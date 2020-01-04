@@ -130,16 +130,28 @@ void main(void)		/* This really IS void, no error here. */
  * Interrupts are still disabled. Do necessary setups, then
  * enable them
  */
+	/*
+	 * this marco are all extract from 0x90000 ~ 0x901F0
+	 * this is filled by setup
+	 * DRIVE_INFO is hd0 data
+	 * but ORIG_ROOT_DEV and ORIG_SWAP_DEV is come from bootsect.S 
+	 */
  	ROOT_DEV = ORIG_ROOT_DEV;
  	SWAP_DEV = ORIG_SWAP_DEV;
 	sprintf(term, "TERM=con%dx%d", CON_COLS, CON_ROWS);
 	envp[1] = term;	
 	envp_rc[1] = term;
  	drive_info = DRIVE_INFO;
+	/*
+	 * EXT_MEM_K is the result of BIOS detected memory
+	 * because the unit of EXT_MEM_K is kb so the memory_end is bytes of usable memory
+	 */
 	memory_end = (1<<20) + (EXT_MEM_K<<10);
+	/* align and limit to 16 MB */
 	memory_end &= 0xfffff000;
 	if (memory_end > 16*1024*1024)
 		memory_end = 16*1024*1024;
+	/* buffer */
 	if (memory_end > 12*1024*1024) 
 		buffer_memory_end = 4*1024*1024;
 	else if (memory_end > 6*1024*1024)
@@ -150,7 +162,9 @@ void main(void)		/* This really IS void, no error here. */
 #ifdef RAMDISK
 	main_memory_start += rd_init(main_memory_start, RAMDISK*1024);
 #endif
+	/* now setup user space memory from main_mem */
 	mem_init(main_memory_start,memory_end);
+
 	trap_init();
 	blk_dev_init();
 	chr_dev_init();

@@ -15,20 +15,24 @@
 .globl _idt,_gdt,_pg_dir,_tmp_floppy_area
 _pg_dir:
 startup_32:
+
 	movl $0x10,%eax
 	mov %ax,%ds
 	mov %ax,%es
 	mov %ax,%fs
 	mov %ax,%gs
 	lss _stack_start,%esp
+
 	call setup_idt
 	call setup_gdt
+
 	movl $0x10,%eax		# reload all the segment registers
 	mov %ax,%ds		# after changing gdt. CS was already
 	mov %ax,%es		# reloaded in 'setup_gdt'
 	mov %ax,%fs
 	mov %ax,%gs
 	lss _stack_start,%esp
+
 	xorl %eax,%eax
 1:	incl %eax		# check that A20 really IS enabled
 	movl %eax,0x000000	# loop forever if it isn't
@@ -76,11 +80,17 @@ check_x87:
  *  written by the page tables.
  */
 setup_idt:
+	/* set eax to ignore_int */
 	lea ignore_int,%edx
 	movl $0x00080000,%eax
 	movw %dx,%ax		/* selector = 0x0008 = cs */
+	/* set dx to 0x8E00 */
 	movw $0x8E00,%dx	/* interrupt gate - dpl=0, present */
 
+	/* 
+	 * this means repeat set IDT and totally 256 entries
+	 * each time move eax to lower 32 bits and move edx to higher 32 bits
+	 */
 	lea _idt,%edi
 	mov $256,%ecx
 rp_sidt:

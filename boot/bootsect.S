@@ -48,22 +48,33 @@ entry start
 start:
 	mov	ax,#BOOTSEG
 	mov	ds,ax
+
 	mov	ax,#INITSEG
 	mov	es,ax
+
+	| mov 256 * 2 bytes from ds:si to es:di
+	| it means move itself from 0x7c00 to 0x90000
 	mov	cx,#256
 	sub	si,si
 	sub	di,di
 	rep
 	movw
+
+	| jump to 0x90000 + go
 	jmpi	go,INITSEG
 
+	| now cs is used as cs:ip
+	| cs is 0x9000
 go:	mov	ax,cs		
 	mov	dx,#0xfef4	! arbitrary value >>512 - disk parm size
 
+	| ds = cs es = cs
 	mov	ds,ax
 	mov	es,ax
 	push	ax
 
+	| set stack segment and sp
+	| ss = cs
 	mov	ss,ax		! put stack at 0x9ff00 - 12.
 	mov	sp,dx
 /*
@@ -122,7 +133,12 @@ load_setup:
 	mov	cx,#0x0002		! sector 2, track 0
 	mov	bx,#0x0200		! address = 512, in INITSEG
 	mov	ax,#0x0200+SETUPLEN	! service 2, nr of sectors
+	| AH = 0x02 AL = Sector Count ES:BX = buffer CH = Cylinder = 0 CL = Sector = 2 DH = Head = 0 DL = Drive = 0
+	| its assumes SETUPLEN is 4 so AH will not overflow
+	| read 4 sectors/2 3 4 5 to es:0x0200 = 0x90200
 	int	0x13			! read it
+
+	| if CF be set it means error
 	jnc	ok_load_setup		! ok - continue
 
 	push	ax			! dump error code
@@ -130,7 +146,7 @@ load_setup:
 	mov	bp, sp
 	call	print_hex
 	pop	ax	
-	
+	| reset to load setup again
 	xor	dl, dl			! reset FDC
 	xor	ah, ah
 	int	0x13
@@ -139,13 +155,16 @@ load_setup:
 ok_load_setup:
 
 ! Get disk drive parameters, specifically nr of sectors/track
-
+	| AH = 0x08 DL = 0x00/the first floppy
 	xor	dl,dl
 	mov	ah,#0x08		! AH=8 is get drive parameters
 	int	0x13
+
+
 	xor	ch,ch
 	seg cs
 	mov	sectors,cx
+
 	mov	ax,#INITSEG
 	mov	es,ax
 
@@ -167,6 +186,7 @@ ok_load_setup:
 	mov	ax,#SYSSEG
 	mov	es,ax		! segment of 0x010000
 	call	read_it
+
 	call	kill_motor
 	call	print_nl
 
@@ -197,6 +217,7 @@ root_defined:
 ! the setup-routine loaded directly after
 ! the bootblock:
 
+	| jump to 0x90200 + 0
 	jmpi	0,SETUPSEG
 
 ! This routine loads the system at address 0x10000, making sure

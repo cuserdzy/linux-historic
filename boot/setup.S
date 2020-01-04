@@ -38,7 +38,9 @@ start:
 	mov	ds,ax
 
 ! Get memory size (extended mem, kB)
-
+	| AH = 0x88
+	| because the largest memory is assumed to be 16MB
+	| contiguous KB above 1 MB
 	mov	ah,#0x88
 	int	0x15
 	mov	[2],ax
@@ -47,6 +49,7 @@ start:
 
 	mov	ah,#0x12
 	mov	bl,#0x10
+	| AX = 0x1200 BL = 0x10
 	int	0x10
 	mov	[8],ax
 	mov	[10],bx
@@ -64,27 +67,33 @@ novga:	mov	[14],ax
 ! Get video-card data:
 	
 	mov	ah,#0x0f
+	| get current video mode
+	| input AH = 0x0F
+	| output AH = column AL = video mode BH = page number
 	int	0x10
 	mov	[4],bx		! bh = display page
 	mov	[6],ax		! al = video mode, ah = window width
 
 ! Get hd0 data
-
+	| set ds to 0x0000 so load 
 	mov	ax,#0x0000
 	mov	ds,ax
 	lds	si,[4*0x41]
+	| set es to INITSEG = 0x9000
 	mov	ax,#INITSEG
 	mov	es,ax
 	mov	di,#0x0080
 	mov	cx,#0x10
+	| mov ds:si to es:di totally 0x10 bytes
 	rep
 	movsb
 
 ! Get hd1 data
-
+	| set ds to 0x0000 so load
 	mov	ax,#0x0000
 	mov	ds,ax
 	lds	si,[4*0x46]
+	| mov ds:si to es:di totally 0x10 bytes
 	mov	ax,#INITSEG
 	mov	es,ax
 	mov	di,#0x0090
@@ -93,7 +102,8 @@ novga:	mov	[14],ax
 	movsb
 
 ! Check that there IS a hd1 :-)
-
+	| read drive type
+	| AH = 0x00 AL = 0x00 DL = 0x81
 	mov	ax,#0x01500
 	mov	dl,#0x81
 	int	0x13
@@ -119,23 +129,30 @@ is_disk1:
 	mov	ax,#0x0000
 	cld			! 'direction'=0, movs moves forward
 do_move:
+	| each time ax will increase 0x1000 so es will be changed too
 	mov	es,ax		! destination segment
 	add	ax,#0x1000
 	cmp	ax,#0x9000
 	jz	end_move
+	| move ds:ei = (ax + 0x1000):0x0000 to es:di = ax:0x0000
+	| it just means move data at 0x10000 to 0x00000 here is the system
+	| each loop move 0x10000 bytes totally 8 loops
 	mov	ds,ax		! source segment
 	sub	di,di
 	sub	si,si
 	mov 	cx,#0x8000
 	rep
 	movsw
+
 	jmp	do_move
 
 ! then we load the segment descriptors
 
 end_move:
+	| set ds to 0x9020
 	mov	ax,#SETUPSEG	! right, forgot this at first. didn't work :-)
 	mov	ds,ax
+
 	lidt	idt_48		! load idt with 0,0
 	lgdt	gdt_48		! load gdt with whatever appropriate
 
@@ -194,8 +211,12 @@ end_move:
 ! we let the gnu-compiled 32-bit programs do that. We just jump to
 ! absolute address 0x00000, in 32-bit protected mode.
 
+	| lmsw dose not means msr register
+	| the opread is 16 bits but only lower 4 bits make sense
+	| it move lower 4 bits into cr0
 	mov	ax,#0x0001	! protected mode (PE) bit
 	lmsw	ax		! This is it!
+
 	jmpi	0,8		! jmp offset 0 of segment 8 (cs)
 
 ! This routine checks that the keyboard command queue is empty

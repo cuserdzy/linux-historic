@@ -1,22 +1,25 @@
 /*
  *  linux/fs/open.c
  *
- *  (C) 1991  Linus Torvalds
+ *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
-#include <errno.h>
-#include <sys/types.h>
-#include <utime.h>
-
-#include <sys/vfs.h>
-
+#include <linux/vfs.h>
+#include <linux/types.h>
+#include <linux/utime.h>
+#include <linux/errno.h>
 #include <linux/fcntl.h>
 #include <linux/stat.h>
 #include <linux/string.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
+#include <linux/signal.h>
+#include <linux/tty.h>
+#include <linux/time.h>
 
 #include <asm/segment.h>
+
+extern void fcntl_remove_locks(struct task_struct *, struct file *);
 
 struct file_operations * chrdev_fops[MAX_CHRDEV] = {
 	NULL,
@@ -34,10 +37,12 @@ int sys_ustat(int dev, struct ustat * ubuf)
 int sys_statfs(const char * path, struct statfs * buf)
 {
 	struct inode * inode;
+	int error;
 
 	verify_area(buf, sizeof(struct statfs));
-	if (!(inode = namei(path)))
-		return -ENOENT;
+	error = namei(path,&inode);
+	if (error)
+		return error;
 	if (!inode->i_sb->s_op->statfs) {
 		iput(inode);
 		return -ENOSYS;
@@ -66,20 +71,27 @@ int sys_fstatfs(unsigned int fd, struct statfs * buf)
 int sys_truncate(const char * path, unsigned int length)
 {
 	struct inode * inode;
+	int error;
 
-	if (!(inode = namei(path)))
-		return -ENOENT;
+	error = namei(path,&inode);
+	if (error)
+		return error;
 	if (S_ISDIR(inode->i_mode) || !permission(inode,MAY_WRITE)) {
 		iput(inode);
 		return -EACCES;
+	}
+	if (IS_RDONLY(inode)) {
+		iput(inode);
+		return -EROFS;
 	}
 	inode->i_size = length;
 	if (inode->i_op && inode->i_op->truncate)
 		inode->i_op->truncate(inode);
 	inode->i_atime = inode->i_mtime = CURRENT_TIME;
 	inode->i_dirt = 1;
+	error = notify_change(inode);
 	iput(inode);
-	return 0;
+	return error;
 }
 
 int sys_ftruncate(unsigned int fd, unsigned int length)
@@ -91,14 +103,14 @@ int sys_ftruncate(unsigned int fd, unsigned int length)
 		return -EBADF;
 	if (!(inode = file->f_inode))
 		return -ENOENT;
-	if (S_ISDIR(inode->i_mode) || !(file->f_flags & 2))
+	if (S_ISDIR(inode->i_mode) || !(file->f_mode & 2))
 		return -EACCES;
 	inode->i_size = length;
 	if (inode->i_op && inode->i_op->truncate)
 		inode->i_op->truncate(inode);
 	inode->i_atime = inode->i_mtime = CURRENT_TIME;
 	inode->i_dirt = 1;
-	return 0;
+	return notify_change(inode);
 }
 
 /* If times==NULL, set access and modification to current time,
@@ -109,9 +121,15 @@ int sys_utime(char * filename, struct utimbuf * times)
 {
 	struct inode * inode;
 	long actime,modtime;
+	int error;
 
-	if (!(inode=namei(filename)))
-		return -ENOENT;
+	error = namei(filename,&inode);
+	if (error)
+		return error;
+	if (IS_RDONLY(inode)) {
+		iput(inode);
+		return -EROFS;
+	}
 	if (times) {
 		if ((current->euid != inode->i_uid) && !suser()) {
 			iput(inode);
@@ -129,9 +147,11 @@ int sys_utime(char * filename, struct utimbuf * times)
 	}
 	inode->i_atime = actime;
 	inode->i_mtime = modtime;
+	inode->i_ctime = CURRENT_TIME;
 	inode->i_dirt = 1;
+	error = notify_change(inode);
 	iput(inode);
-	return 0;
+	return error;
 }
 
 /*
@@ -144,8 +164,9 @@ int sys_access(const char * filename,int mode)
 	int res, i_mode;
 
 	mode &= 0007;
-	if (!(inode=namei(filename)))
-		return -EACCES;
+	res = namei(filename,&inode);
+	if (res)
+		return res;
 	i_mode = res = inode->i_mode & 0777;
 	iput(inode);
 	if (current->uid == inode->i_uid)
@@ -169,9 +190,11 @@ int sys_access(const char * filename,int mode)
 int sys_chdir(const char * filename)
 {
 	struct inode * inode;
+	int error;
 
-	if (!(inode = namei(filename)))
-		return -ENOENT;
+	error = namei(filename,&inode);
+	if (error)
+		return error;
 	if (!S_ISDIR(inode->i_mode)) {
 		iput(inode);
 		return -ENOTDIR;
@@ -188,9 +211,11 @@ int sys_chdir(const char * filename)
 int sys_chroot(const char * filename)
 {
 	struct inode * inode;
+	int error;
 
-	if (!(inode=namei(filename)))
-		return -ENOENT;
+	error = namei(filename,&inode);
+	if (error)
+		return error;
 	if (!S_ISDIR(inode->i_mode)) {
 		iput(inode);
 		return -ENOTDIR;
@@ -215,25 +240,38 @@ int sys_fchmod(unsigned int fd, mode_t mode)
 		return -ENOENT;
 	if ((current->euid != inode->i_uid) && !suser())
 		return -EPERM;
+	if (IS_RDONLY(inode))
+		return -EROFS;
 	inode->i_mode = (mode & 07777) | (inode->i_mode & ~07777);
+	if (!suser() && !in_group_p(inode->i_gid))
+		inode->i_mode &= ~S_ISGID;
 	inode->i_dirt = 1;
-	return 0;
+	return notify_change(inode);
 }
 
 int sys_chmod(const char * filename, mode_t mode)
 {
 	struct inode * inode;
+	int error;
 
-	if (!(inode = namei(filename)))
-		return -ENOENT;
+	error = namei(filename,&inode);
+	if (error)
+		return error;
 	if ((current->euid != inode->i_uid) && !suser()) {
 		iput(inode);
 		return -EPERM;
 	}
+	if (IS_RDONLY(inode)) {
+		iput(inode);
+		return -EROFS;
+	}
 	inode->i_mode = (mode & 07777) | (inode->i_mode & ~07777);
+	if (!suser() && !in_group_p(inode->i_gid))
+		inode->i_mode &= ~S_ISGID;
 	inode->i_dirt = 1;
+	error = notify_change(inode);
 	iput(inode);
-	return 0;
+	return error;
 }
 
 int sys_fchown(unsigned int fd, uid_t user, gid_t group)
@@ -245,13 +283,19 @@ int sys_fchown(unsigned int fd, uid_t user, gid_t group)
 		return -EBADF;
 	if (!(inode = file->f_inode))
 		return -ENOENT;
+	if (IS_RDONLY(inode))
+		return -EROFS;
+	if (user == (uid_t) -1)
+		user = inode->i_uid;
+	if (group == (gid_t) -1)
+		group = inode->i_gid;
 	if ((current->euid == inode->i_uid && user == inode->i_uid &&
 	     (in_group_p(group) || group == inode->i_gid)) ||
 	    suser()) {
 		inode->i_uid = user;
 		inode->i_gid = group;
-		inode->i_dirt=1;
-		return 0;
+		inode->i_dirt = 1;
+		return notify_change(inode);
 	}
 	return -EPERM;
 }
@@ -259,22 +303,47 @@ int sys_fchown(unsigned int fd, uid_t user, gid_t group)
 int sys_chown(const char * filename, uid_t user, gid_t group)
 {
 	struct inode * inode;
+	int error;
 
-	if (!(inode = lnamei(filename)))
-		return -ENOENT;
+	error = lnamei(filename,&inode);
+	if (error)
+		return error;
+	if (IS_RDONLY(inode)) {
+		iput(inode);
+		return -EROFS;
+	}
+	if (user == (uid_t) -1)
+		user = inode->i_uid;
+	if (group == (gid_t) -1)
+		group = inode->i_gid;
 	if ((current->euid == inode->i_uid && user == inode->i_uid &&
 	     (in_group_p(group) || group == inode->i_gid)) ||
 	    suser()) {
 		inode->i_uid = user;
 		inode->i_gid = group;
-		inode->i_dirt=1;
+		inode->i_dirt = 1;
+		error = notify_change(inode);
 		iput(inode);
-		return 0;
+		return error;
 	}
 	iput(inode);
 	return -EPERM;
 }
 
+/*
+ * Note that while the flag value (low two bits) for sys_open means:
+ *	00 - read-only
+ *	01 - write-only
+ *	10 - read-write
+ *	11 - special
+ * it is changed into
+ *	00 - no permissions needed
+ *	01 - read-permission
+ *	10 - write-permission
+ *	11 - read-write
+ * for the internal routines (ie open_namei()/follow_link() etc). 00 is
+ * used by symlinks.
+ */
 int sys_open(const char * filename,int flag,int mode)
 {
 	struct inode * inode;
@@ -286,34 +355,54 @@ int sys_open(const char * filename,int flag,int mode)
 			break;
 	if (fd>=NR_OPEN)
 		return -EMFILE;
-	current->close_on_exec &= ~(1<<fd);
-	f=0+file_table;
-	for (i=0 ; i<NR_FILE ; i++,f++)
-		if (!f->f_count) break;
-	if (i>=NR_FILE)
+	FD_CLR(fd,&current->close_on_exec);
+	f = get_empty_filp();
+	if (!f)
 		return -ENFILE;
-	(current->filp[fd] = f)->f_count++;
-	if ((i = open_namei(filename,flag,mode,&inode))<0) {
+	current->filp[fd] = f;
+	f->f_flags = flag;
+	f->f_mode = (flag+1) & O_ACCMODE;
+	if (f->f_mode)
+		flag++;
+	if (flag & (O_TRUNC | O_CREAT))
+		flag |= 2;
+	i = open_namei(filename,flag,mode,&inode,NULL);
+	if (i) {
 		current->filp[fd]=NULL;
-		f->f_count=0;
+		f->f_count--;
 		return i;
 	}
-	f->f_mode = "\001\002\003\000"[flag & O_ACCMODE];
-	f->f_flags = flag;
-	f->f_count = 1;
+	if (flag & O_TRUNC) {
+		inode->i_size = 0;
+		if (inode->i_op && inode->i_op->truncate)
+			inode->i_op->truncate(inode);
+		if ((i = notify_change(inode))) {
+			iput(inode);
+			current->filp[fd] = NULL;
+			f->f_count--;
+			return i;
+		}
+	}
+	if (!IS_RDONLY(inode)) {
+		inode->i_atime = CURRENT_TIME;
+		inode->i_dirt = 1;
+	}
 	f->f_inode = inode;
 	f->f_pos = 0;
 	f->f_reada = 0;
 	f->f_op = NULL;
 	if (inode->i_op)
 		f->f_op = inode->i_op->default_file_ops;
-	if (f->f_op && f->f_op->open)
-		if (i = f->f_op->open(inode,f)) {
+	if (f->f_op && f->f_op->open) {
+		i = f->f_op->open(inode,f);
+		if (i) {
 			iput(inode);
-			f->f_count=0;
+			f->f_count--;
 			current->filp[fd]=NULL;
 			return i;
 		}
+	}
+	f->f_flags &= ~(O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC);
 	return (fd);
 }
 
@@ -322,27 +411,137 @@ int sys_creat(const char * pathname, int mode)
 	return sys_open(pathname, O_CREAT | O_WRONLY | O_TRUNC, mode);
 }
 
+int close_fp(struct file *filp)
+{
+	struct inode *inode;
+
+	if (filp->f_count == 0) {
+		printk("Close: file count is 0\n");
+		return 0;
+	}
+	inode = filp->f_inode;
+	if (inode && S_ISREG(inode->i_mode))
+		fcntl_remove_locks(current, filp);
+	if (filp->f_count > 1) {
+		filp->f_count--;
+		return 0;
+	}
+	if (filp->f_op && filp->f_op->release)
+		filp->f_op->release(inode,filp);
+	filp->f_count--;
+	filp->f_inode = NULL;
+	iput(inode);
+	return 0;
+}
+
 int sys_close(unsigned int fd)
 {	
 	struct file * filp;
 
 	if (fd >= NR_OPEN)
 		return -EINVAL;
-	current->close_on_exec &= ~(1<<fd);
+	FD_CLR(fd, &current->close_on_exec);
 	if (!(filp = current->filp[fd]))
 		return -EINVAL;
 	current->filp[fd] = NULL;
-	if (filp->f_count == 0) {
-		printk("Close: file count is 0\n");
+	return (close_fp (filp));
+}
+
+/*
+ * This routine is used by vhangup.  It send's sigkill to everything
+ * waiting on a particular wait_queue.  It assumes root privledges.
+ * We don't want to destroy the wait queue here, because the caller
+ * should call wake_up immediately after calling kill_wait.
+ */
+static void kill_wait(struct wait_queue **q, int sig)
+{
+	struct wait_queue *next;
+	struct wait_queue *tmp;
+	struct task_struct *p;
+
+	if (!q || !(next = *q))
+		return;
+	do { 
+		tmp = next;
+		next = tmp->next;
+		if ((p = tmp->task) != NULL)
+			send_sig (sig, p , 1);
+	} while (next && next != *q);
+}
+
+/*
+ * This routine looks through all the process's and closes any
+ * references to the current processes tty.  To avoid problems with
+ * process sleeping on an inode which has already been iput, anyprocess
+ * which is sleeping on the tty is sent a sigkill (It's probably a rogue
+ * process.)  Also no process should ever have /dev/console as it's
+ * controlling tty, or have it open for reading.  So we don't have to
+ * worry about messing with all the daemons abilities to write messages
+ * to the console.  (Besides they should be using syslog.)
+ */
+int sys_vhangup(void)
+{
+	int j;
+	struct task_struct ** process;
+	struct file *filep;
+	struct inode *inode;
+	struct tty_struct *tty;
+	extern int kill_pg (int pgrp, int sig, int priv);
+
+	if (!suser())
+		return -EPERM;
+	/* send the SIGHUP signal. */
+	kill_pg(current->pgrp, SIGHUP, 0);
+	/* See if there is a controlling tty. */
+	if (current->tty < 0)
 		return 0;
+
+	for (process = task + 0; process < task + NR_TASKS; process++) {
+		for (j = 0; j < NR_OPEN; j++) {
+			if (!*process)
+				break;
+			if (!(filep = (*process)->filp[j]))
+				continue;
+			if (!(inode = filep->f_inode))
+				continue;
+	 		if (!S_ISCHR(inode->i_mode))
+				continue;
+			if ((MAJOR(inode->i_rdev) == 5 ||
+			     MAJOR(inode->i_rdev) == 4 ) &&
+			    (MAJOR(filep->f_rdev) == 4 &&
+			     MINOR(filep->f_rdev) == MINOR (current->tty))) {
+		  /* so now we have found something to close.  We
+		     need to kill every process waiting on the
+		     inode. */
+				(*process)->filp[j] = NULL;
+				kill_wait (&inode->i_wait, SIGKILL);
+
+		  /* now make sure they are awake before we close the
+		     file. */
+
+				wake_up (&inode->i_wait);
+
+		  /* finally close the file. */
+
+				FD_CLR(j, &(*process)->close_on_exec);
+				close_fp (filep);
+			}
+		}
+	/* can't let them keep a reference to it around.
+	   But we can't touch current->tty until after the
+	   loop is complete. */
+
+		if (*process && (*process)->tty == current->tty && *process != current) {
+			(*process)->tty = -1;
+		}
 	}
-	if (filp->f_count > 1) {
-		filp->f_count--;
-		return 0;
+   /* need to do tty->session = 0 */
+	tty = TTY_TABLE(MINOR(current->tty));
+	if (tty) {
+		tty->session = 0;
+		tty->pgrp = -1;
+		current->tty = -1;
 	}
-	if (filp->f_op && filp->f_op->release)
-		filp->f_op->release(filp->f_inode,filp);
-	iput(filp->f_inode);
-	filp->f_count--;
 	return 0;
 }
+

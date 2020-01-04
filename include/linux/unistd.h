@@ -116,6 +116,13 @@
 #define __NR_lstat		107
 #define __NR_fstat		108
 #define __NR_uname		109
+#define __NR_iopl		110
+#define __NR_vhangup		111
+#define __NR_idle		112
+#define __NR_vm86		113
+#define __NR_wait4		114
+#define __NR_swapoff		115
+#define __NR_sysinfo		116
 
 extern int errno;
 

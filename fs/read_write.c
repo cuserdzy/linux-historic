@@ -1,17 +1,16 @@
 /*
  *  linux/fs/read_write.c
  *
- *  (C) 1991  Linus Torvalds
+ *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
-#include <errno.h>
-#include <sys/types.h>
-#include <sys/dirent.h>
-
+#include <linux/types.h>
+#include <linux/errno.h>
 #include <linux/stat.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/minix_fs.h>
+
 #include <asm/segment.h>
 
 /*
@@ -75,12 +74,12 @@ int sys_read(unsigned int fd,char * buf,unsigned int count)
 		return -EBADF;
 	if (!(file->f_mode & 1))
 		return -EBADF;
+	if (!file->f_op || !file->f_op->read)
+		return -EINVAL;
 	if (!count)
 		return 0;
 	verify_area(buf,count);
-	if (file->f_op && file->f_op->read)
-		return file->f_op->read(inode,file,buf,count);
-	return -EINVAL;
+	return file->f_op->read(inode,file,buf,count);
 }
 
 int sys_write(unsigned int fd,char * buf,unsigned int count)
@@ -90,11 +89,11 @@ int sys_write(unsigned int fd,char * buf,unsigned int count)
 	
 	if (fd>=NR_OPEN || !(file=current->filp[fd]) || !(inode=file->f_inode))
 		return -EBADF;
-	if (!(file->f_mode&2))
+	if (!(file->f_mode & 2))
 		return -EBADF;
+	if (!file->f_op || !file->f_op->write)
+		return -EINVAL;
 	if (!count)
 		return 0;
-	if (file->f_op && file->f_op->write)
-		return file->f_op->write(inode,file,buf,count);
-	return -EINVAL;
+	return file->f_op->write(inode,file,buf,count);
 }

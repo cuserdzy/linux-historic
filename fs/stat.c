@@ -1,11 +1,10 @@
 /*
  *  linux/fs/stat.c
  *
- *  (C) 1991  Linus Torvalds
+ *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
-#include <errno.h>
-
+#include <linux/errno.h>
 #include <linux/stat.h>
 #include <linux/fs.h>
 #include <linux/sched.h>
@@ -16,8 +15,8 @@ static void cp_old_stat(struct inode * inode, struct old_stat * statbuf)
 {
 	struct old_stat tmp;
 
-	if (inode->i_ino & 0xffff0000)
-		printk("Warning: using old stat() call on bigfs\n");
+	printk("Warning: %s using old stat() call. Recompile your binary.\n",
+		current->comm);
 	verify_area(statbuf,sizeof (*statbuf));
 	tmp.st_dev = inode->i_dev;
 	tmp.st_ino = inode->i_ino;
@@ -26,10 +25,7 @@ static void cp_old_stat(struct inode * inode, struct old_stat * statbuf)
 	tmp.st_uid = inode->i_uid;
 	tmp.st_gid = inode->i_gid;
 	tmp.st_rdev = inode->i_rdev;
-	if( S_ISFIFO(inode->i_mode) )
-		tmp.st_size = 0;
-	else
-		tmp.st_size = inode->i_size;
+	tmp.st_size = inode->i_size;
 	tmp.st_atime = inode->i_atime;
 	tmp.st_mtime = inode->i_mtime;
 	tmp.st_ctime = inode->i_ctime;
@@ -49,43 +45,46 @@ static void cp_new_stat(struct inode * inode, struct new_stat * statbuf)
 	tmp.st_uid = inode->i_uid;
 	tmp.st_gid = inode->i_gid;
 	tmp.st_rdev = inode->i_rdev;
-	if( S_ISFIFO(inode->i_mode) )
-		tmp.st_size = 0;
-	else
-		tmp.st_size = inode->i_size;
+	tmp.st_size = inode->i_size;
 	tmp.st_atime = inode->i_atime;
 	tmp.st_mtime = inode->i_mtime;
 	tmp.st_ctime = inode->i_ctime;
 /*
- * Right now we fake the st_blocks numbers: we'll eventually have to
- * add st_blocks to the inode, and let the vfs routines keep track of
- * it all. This algorithm doesn't guarantee correct block numbers, but
- * at least it tries to come up with a plausible answer...
- *
- * In fact, the minix fs doesn't use these numbers (it uses 7 and 512
- * instead of 10 and 256), but who cares... It's not that exact anyway.
+ * st_blocks and st_blksize are approximated with a simple algorithm if
+ * they aren't supported directly by the filesystem. The minix and msdos
+ * filesystems don't keep track of blocks, so they would either have to
+ * be counted explicitly (by delving into the file itself), or by using
+ * this simple algorithm to get a reasonable (although not 100% accurate)
+ * value.
  */
-	blocks = (tmp.st_size + 1023) / 1024;
-	if (blocks > 10) {
-		indirect = (blocks - 11)/256+1;
-		if (blocks > 10+256) {
-			indirect += (blocks - 267)/(256*256)+1;
-			if (blocks > 10+256+256*256)
-				indirect++;
+	if (!inode->i_blksize) {
+		blocks = (tmp.st_size + 511) / 512;
+		if (blocks > 10) {
+			indirect = (blocks - 11)/256+1;
+			if (blocks > 10+256) {
+				indirect += (blocks - 267)/(256*256)+1;
+				if (blocks > 10+256+256*256)
+					indirect++;
+			}
+			blocks += indirect;
 		}
-		blocks += indirect;
+		tmp.st_blocks = blocks;
+		tmp.st_blksize = BLOCK_SIZE;
+	} else {
+		tmp.st_blocks = inode->i_blocks;
+		tmp.st_blksize = inode->i_blksize;
 	}
-	tmp.st_blksize = 1024;
-	tmp.st_blocks = blocks;
 	memcpy_tofs(statbuf,&tmp,sizeof(tmp));
 }
 
 int sys_stat(char * filename, struct old_stat * statbuf)
 {
 	struct inode * inode;
+	int error;
 
-	if (!(inode=namei(filename)))
-		return -ENOENT;
+	error = namei(filename,&inode);
+	if (error)
+		return error;
 	cp_old_stat(inode,statbuf);
 	iput(inode);
 	return 0;
@@ -94,9 +93,11 @@ int sys_stat(char * filename, struct old_stat * statbuf)
 int sys_newstat(char * filename, struct new_stat * statbuf)
 {
 	struct inode * inode;
+	int error;
 
-	if (!(inode=namei(filename)))
-		return -ENOENT;
+	error = namei(filename,&inode);
+	if (error)
+		return error;
 	cp_new_stat(inode,statbuf);
 	iput(inode);
 	return 0;
@@ -105,9 +106,11 @@ int sys_newstat(char * filename, struct new_stat * statbuf)
 int sys_lstat(char * filename, struct old_stat * statbuf)
 {
 	struct inode * inode;
+	int error;
 
-	if (!(inode = lnamei(filename)))
-		return -ENOENT;
+	error = lnamei(filename,&inode);
+	if (error)
+		return error;
 	cp_old_stat(inode,statbuf);
 	iput(inode);
 	return 0;
@@ -116,9 +119,11 @@ int sys_lstat(char * filename, struct old_stat * statbuf)
 int sys_newlstat(char * filename, struct new_stat * statbuf)
 {
 	struct inode * inode;
+	int error;
 
-	if (!(inode = lnamei(filename)))
-		return -ENOENT;
+	error = lnamei(filename,&inode);
+	if (error)
+		return error;
 	cp_new_stat(inode,statbuf);
 	iput(inode);
 	return 0;
@@ -149,12 +154,14 @@ int sys_newfstat(unsigned int fd, struct new_stat * statbuf)
 int sys_readlink(const char * path, char * buf, int bufsiz)
 {
 	struct inode * inode;
+	int error;
 
 	if (bufsiz <= 0)
 		return -EINVAL;
 	verify_area(buf,bufsiz);
-	if (!(inode = lnamei(path)))
-		return -ENOENT;
+	error = lnamei(path,&inode);
+	if (error)
+		return error;
 	if (!inode->i_op || !inode->i_op->readlink) {
 		iput(inode);
 		return -EINVAL;

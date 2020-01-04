@@ -1,15 +1,17 @@
-#include <signal.h>
-#include <errno.h>
-#include <linux/string.h>
+#include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
+#include <linux/errno.h>
+#include <linux/string.h>
 #include <linux/stat.h>
+#include <linux/socket.h>
+#include <linux/un.h>
+#include <linux/fcntl.h>
+#include <linux/termios.h>
+
 #include <asm/system.h>
 #include <asm/segment.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <linux/fcntl.h>
-#include <termios.h>
+
 #include "kern_sock.h"
 
 static struct unix_proto_data {
@@ -44,18 +46,37 @@ static int unix_proto_release(struct socket *sock, struct socket *peer);
 static int unix_proto_bind(struct socket *sock, struct sockaddr *umyaddr,
 			   int sockaddr_len);
 static int unix_proto_connect(struct socket *sock, struct sockaddr *uservaddr,
-			      int sockaddr_len);
+			      int sockaddr_len, int flags);
 static int unix_proto_socketpair(struct socket *sock1, struct socket *sock2);
-static int unix_proto_accept(struct socket *sock, struct socket *newsock);
+static int unix_proto_accept(struct socket *sock, struct socket *newsock, 
+			     int flags);
 static int unix_proto_getname(struct socket *sock, struct sockaddr *usockaddr,
 			      int *usockaddr_len, int peer);
 static int unix_proto_read(struct socket *sock, char *ubuf, int size,
 			   int nonblock);
 static int unix_proto_write(struct socket *sock, char *ubuf, int size,
 			    int nonblock);
-static int unix_proto_select(struct socket *sock, int which);
+static int unix_proto_select(struct socket *sock, int sel_type, select_table * wait);
 static int unix_proto_ioctl(struct socket *sock, unsigned int cmd,
 			    unsigned long arg);
+static int unix_proto_listen(struct socket *sock, int backlog);
+static int unix_proto_send (struct socket *sock, void *buff, int len,
+			    int nonblock, unsigned flags);
+static int unix_proto_recv (struct socket *sock, void *buff, int len,
+			    int nonblock, unsigned flags);
+static int unix_proto_sendto (struct socket *sock, void *buff, int len,
+			      int nonblock, unsigned flags,
+			      struct sockaddr *addr, int addr_len);
+static int unix_proto_recvfrom (struct socket *sock, void *buff, int len,
+				int nonblock, unsigned flags,
+				struct sockaddr *addr, int *addr_len);
+
+static int unix_proto_shutdown (struct socket *sock, int how);
+
+static int unix_proto_setsockopt (struct socket *sock, int level, int optname,
+				  char *optval, int optlen);
+static int unix_proto_getsockopt (struct socket *sock, int level, int optname,
+				  char *optval, int *optlen);
 
 struct proto_ops unix_proto_ops = {
 	unix_proto_init,
@@ -70,7 +91,16 @@ struct proto_ops unix_proto_ops = {
 	unix_proto_read,
 	unix_proto_write,
 	unix_proto_select,
-	unix_proto_ioctl
+ 	unix_proto_ioctl,
+ 	unix_proto_listen,
+ 	unix_proto_send,
+ 	unix_proto_recv,
+ 	unix_proto_sendto,
+ 	unix_proto_recvfrom,
+ 	unix_proto_shutdown,
+ 	unix_proto_setsockopt,
+ 	unix_proto_getsockopt,
+ 	NULL /* unix_proto_fcntl. */
 };
 
 #ifdef SOCK_DEBUG
@@ -82,7 +112,7 @@ sockaddr_un_printk(struct sockaddr_un *sockun, int sockaddr_len)
 	sockaddr_len -= UN_PATH_OFFSET;
 	if (sockun->sun_family != AF_UNIX)
 		printk("sockaddr_un: <BAD FAMILY: %d>\n", sockun->sun_family);
-	else if (sockaddr_len <= 0 || sockaddr_len >= sizeof(buf)-1)
+	else if (sockaddr_len <= 0 || sockaddr_len >= sizeof(buf))
 		printk("sockaddr_un: <BAD LENGTH: %d>\n", sockaddr_len);
 	else {
 		memcpy(buf, sockun->sun_path, sockaddr_len);
@@ -92,16 +122,79 @@ sockaddr_un_printk(struct sockaddr_un *sockun, int sockaddr_len)
 	}
 }
 #endif
+  
+/* don't have to do anything. */
+static int
+unix_proto_listen (struct socket *sock, int backlog)
+{
+  return (0);
+}
+
+static int
+unix_proto_setsockopt(struct socket *sock, int level, int optname,
+		      char *optval, int optlen)
+{
+    return (-EOPNOTSUPP);
+}
+
+static int
+unix_proto_getsockopt(struct socket *sock, int level, int optname,
+		      char *optval, int *optlen)
+{
+    return (-EOPNOTSUPP);
+}
+
+static int
+unix_proto_sendto(struct socket *sock, void *buff, int len, int nonblock, 
+		  unsigned flags,  struct sockaddr *addr, int addr_len)
+{
+	return (-EOPNOTSUPP);
+}     
+
+static int
+unix_proto_recvfrom(struct socket *sock, void *buff, int len, int nonblock, 
+		    unsigned flags, struct sockaddr *addr, int *addr_len)
+{
+	return (-EOPNOTSUPP);
+}     
+
+static int
+unix_proto_shutdown (struct socket *sock, int how)
+{
+	return (-EOPNOTSUPP);
+}
+
+static int
+unix_proto_send(struct socket *sock, void *buff, int len, int nonblock,
+		unsigned flags)
+{
+	/* this error needs to be checked. */
+	if (flags != 0)
+	  return (-EINVAL);
+	return (unix_proto_write (sock, buff, len, nonblock));
+}
+
+static int
+unix_proto_recv(struct socket *sock, void *buff, int len, int nonblock,
+		unsigned flags)
+{
+	/* this error needs to be checked. */
+	if (flags != 0)
+	  return (-EINVAL);
+	return (unix_proto_read (sock, buff, len, nonblock));
+}
 
 static struct unix_proto_data *
-unix_data_lookup(struct sockaddr_un *sockun, int sockaddr_len)
+unix_data_lookup(struct sockaddr_un *sockun, int sockaddr_len,
+		 struct inode *inode)
 {
 	struct unix_proto_data *upd;
 
 	for (upd = unix_datas; upd <= last_unix_data; ++upd) {
 		if (upd->refcnt && upd->socket &&
-		    upd->sockaddr_len == sockaddr_len &&
-		    memcmp(&upd->sockaddr_un, sockun, sockaddr_len) == 0)
+		    upd->socket->state == SS_UNCONNECTED &&
+		    upd->sockaddr_un.sun_family == sockun->sun_family &&
+		    upd->inode == inode)
 			return upd;
 	}
 	return NULL;
@@ -169,7 +262,7 @@ unix_proto_create(struct socket *sock, int protocol)
 		printk("unix_proto_create: can't allocate buffer\n");
 		return -ENOMEM;
 	}
-	if (!(upd->buf = (char *)get_free_page())) {
+	if (!(upd->buf = (char *)get_free_page(GFP_USER))) {
 		printk("unix_proto_create: can't get page!\n");
 		unix_data_deref(upd);
 		return -ENOMEM;
@@ -237,7 +330,7 @@ unix_proto_bind(struct socket *sock, struct sockaddr *umyaddr,
 	PRINTK("unix_proto_bind: socket 0x%x, len=%d\n", sock,
 	       sockaddr_len);
 	if (sockaddr_len <= UN_PATH_OFFSET ||
-	    sockaddr_len >= sizeof(struct sockaddr_un)) {
+	    sockaddr_len > sizeof(struct sockaddr_un)) {
 		PRINTK("unix_proto_bind: bad length %d\n", sockaddr_len);
 		return -EINVAL;
 	}
@@ -259,7 +352,7 @@ unix_proto_bind(struct socket *sock, struct sockaddr *umyaddr,
 	set_fs(get_ds());
 	i = do_mknod(fname, S_IFSOCK | 0777, 0);
 	if (i == 0)
-		i = open_namei(fname, 0, S_IFSOCK, &upd->inode);
+		i = open_namei(fname, 0, S_IFSOCK, &upd->inode, NULL);
 	set_fs(old_fs);
 	if (i < 0) {
 		printk("unix_proto_bind: can't open socket %s\n", fname);
@@ -271,6 +364,7 @@ unix_proto_bind(struct socket *sock, struct sockaddr *umyaddr,
 #ifdef SOCK_DEBUG
 	sockaddr_un_printk(&upd->sockaddr_un, upd->sockaddr_len);
 #endif
+	PRINTK("to inode 0x%x\n", upd->inode);
 	return 0;
 }
 
@@ -280,19 +374,30 @@ unix_proto_bind(struct socket *sock, struct sockaddr *umyaddr,
  */
 static int
 unix_proto_connect(struct socket *sock, struct sockaddr *uservaddr,
-		   int sockaddr_len)
+		   int sockaddr_len, int flags)
 {
 	int i;
 	struct unix_proto_data *serv_upd;
 	struct sockaddr_un sockun;
+	char fname[sizeof(((struct sockaddr_un *)0)->sun_path) + 1];
+	unsigned long old_fs;
+	struct inode *inode;
 
 	PRINTK("unix_proto_connect: socket 0x%x, servlen=%d\n", sock,
 	       sockaddr_len);
+
 	if (sockaddr_len <= UN_PATH_OFFSET ||
-	    sockaddr_len >= sizeof(struct sockaddr_un)) {
+	    sockaddr_len > sizeof(struct sockaddr_un)) {
 		PRINTK("unix_proto_connect: bad length %d\n", sockaddr_len);
 		return -EINVAL;
 	}
+
+	if (sock->state == SS_CONNECTING)
+	  return (-EINPROGRESS);
+
+	if (sock->state == SS_CONNECTED)
+	  return (-EISCONN);
+
 	verify_area(uservaddr, sockaddr_len);
 	memcpy_fromfs(&sockun, uservaddr, sockaddr_len);
 	if (sockun.sun_family != AF_UNIX) {
@@ -300,8 +405,28 @@ unix_proto_connect(struct socket *sock, struct sockaddr *uservaddr,
 		       sockun.sun_family, AF_UNIX);
 		return -EINVAL;
 	}
-	if (!(serv_upd = unix_data_lookup(&sockun, sockaddr_len))) {
-		PRINTK("unix_proto_connect: can't locate peer\n");
+
+	/*
+	 * try to open the name in the filesystem - this is how we
+	 * identify ourselves and our server. Note that we don't
+	 * hold onto the inode that long, just enough to find our
+	 * server. When we're connected, we mooch off the server.
+	 */
+	memcpy(fname, sockun.sun_path, sockaddr_len-UN_PATH_OFFSET);
+	fname[sockaddr_len-UN_PATH_OFFSET] = '\0';
+	old_fs = get_fs();
+	set_fs(get_ds());
+	i = open_namei(fname, 0, S_IFSOCK, &inode, NULL);
+	set_fs(old_fs);
+	if (i < 0) {
+		PRINTK("unix_proto_connect: can't open socket %s\n", fname);
+		return i;
+	}
+	serv_upd = unix_data_lookup(&sockun, sockaddr_len, inode);
+	iput(inode);
+	if (!serv_upd) {
+		PRINTK("unix_proto_connect: can't locate peer %s at inode 0x%x\n",
+			fname, inode);
 		return -EINVAL;
 	}
 	if ((i = sock_awaitconn(sock, serv_upd->socket)) < 0) {
@@ -314,7 +439,7 @@ unix_proto_connect(struct socket *sock, struct sockaddr *uservaddr,
 }
 
 /*
- * to do a socketpair, we make just connect the two datas, easy! since we
+ * to do a socketpair, we just connect the two datas, easy! since we
  * always wait on the socket inode, they're no contention for a wait area,
  * and deadlock prevention in the case of a process writing to itself is,
  * ignored, in true unix fashion!
@@ -335,12 +460,44 @@ unix_proto_socketpair(struct socket *sock1, struct socket *sock2)
  * on accept, we ref the peer's data for safe writes
  */
 static int
-unix_proto_accept(struct socket *sock, struct socket *newsock)
+unix_proto_accept(struct socket *sock, struct socket *newsock, int flags)
 {
+   struct socket *clientsock;
+
 	PRINTK("unix_proto_accept: socket 0x%x accepted via socket 0x%x\n",
 	       sock, newsock);
-	unix_data_ref(UN_DATA(newsock->conn));
+
+	/*
+	 * if there aren't any sockets awaiting connection, then wait for
+	 * one, unless nonblocking
+	 */
+	while (!(clientsock = sock->iconn)) {
+		if (flags & O_NONBLOCK)
+			return -EAGAIN;
+		interruptible_sleep_on(sock->wait);
+		if (current->signal & ~current->blocked) {
+			PRINTK("sys_accept: sleep was interrupted\n");
+			return -ERESTARTSYS;
+		}
+	}
+
+	/*
+	 * great. finish the connection relative to server and client,
+	 * wake up the client and return the new fd to the server
+	 */
+	sock->iconn = clientsock->next;
+	clientsock->next = NULL;
+	newsock->conn = clientsock;
+	clientsock->conn = newsock;
+	clientsock->state = SS_CONNECTED;
+	newsock->state = SS_CONNECTED;
+	wake_up(clientsock->wait);
+        unix_data_ref (UN_DATA(newsock->conn));
 	UN_DATA(newsock)->peerupd = UN_DATA(newsock->conn);
+	UN_DATA(newsock)->sockaddr_un = UN_DATA(sock)->sockaddr_un;
+	UN_DATA(newsock)->sockaddr_len = UN_DATA(sock)->sockaddr_len;
+	UN_DATA(newsock->conn)->sockaddr_un = UN_DATA(sock)->sockaddr_un;
+	UN_DATA(newsock->conn)->sockaddr_len = UN_DATA(sock)->sockaddr_len;
 	return 0;
 }
 
@@ -519,11 +676,28 @@ unix_proto_write(struct socket *sock, char *ubuf, int size, int nonblock)
 }
 
 static int
-unix_proto_select(struct socket *sock, int which)
+unix_proto_select(struct socket *sock, int sel_type, select_table * wait)
 {
 	struct unix_proto_data *upd, *peerupd;
 
-	if (which == SEL_IN) {
+	/*
+	 * handle server sockets specially
+	 */
+	if (sock->flags & SO_ACCEPTCON) {
+		if (sel_type == SEL_IN) {
+			PRINTK("sock_select: %sconnections pending\n",
+			       sock->iconn ? "" : "no ");
+			if (sock->iconn)
+				return 1;
+			select_wait(sock->wait, wait);
+			return sock->iconn ? 1 : 0;
+		}
+		PRINTK("sock_select: nothing else for server socket\n");
+		select_wait(sock->wait, wait);
+		return 0;
+	}
+
+	if (sel_type == SEL_IN) {
 		upd = UN_DATA(sock);
 		PRINTK("unix_proto_select: there is%s data available\n",
 		       UN_BUF_AVAIL(upd) ? "" : " no");
@@ -533,10 +707,10 @@ unix_proto_select(struct socket *sock, int which)
 			PRINTK("unix_proto_select: socket not connected (read EOF)\n");
 			return 1;
 		}
-		else
-			return 0;
+		select_wait(sock->wait,wait);
+		return 0;
 	}
-	if (which == SEL_OUT) {
+	if (sel_type == SEL_OUT) {
 		if (sock->state != SS_CONNECTED) {
 			PRINTK("unix_proto_select: socket not connected (write EOF)\n");
 			return 1;
@@ -544,7 +718,10 @@ unix_proto_select(struct socket *sock, int which)
 		peerupd = UN_DATA(sock->conn);
 		PRINTK("unix_proto_select: there is%s space available\n",
 		       UN_BUF_SPACE(peerupd) ? "" : " no");
-		return (UN_BUF_SPACE(peerupd) > 0);
+		if (UN_BUF_SPACE(peerupd) > 0)
+			return 1;
+		select_wait(sock->wait,wait);
+		return 0;
 	}
 	/* SEL_EX */
 	PRINTK("unix_proto_select: there are no exceptions here?!\n");
@@ -560,7 +737,10 @@ unix_proto_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 	peerupd = (sock->state == SS_CONNECTED) ? UN_DATA(sock->conn) : NULL;
 
 	switch (cmd) {
+
 	case TIOCINQ:
+		if (sock->flags & SO_ACCEPTCON)
+			return -EINVAL;
 		verify_area((void *)arg, sizeof(unsigned long));
 		if (UN_BUF_AVAIL(upd) || peerupd)
 			put_fs_long(UN_BUF_AVAIL(upd), (unsigned long *)arg);
@@ -569,6 +749,8 @@ unix_proto_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		break;
 
 	case TIOCOUTQ:
+		if (sock->flags & SO_ACCEPTCON)
+			return -EINVAL;
 		verify_area((void *)arg, sizeof(unsigned long));
 		if (peerupd)
 			put_fs_long(UN_BUF_SPACE(peerupd),

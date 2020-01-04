@@ -1,11 +1,10 @@
 /*
  *  linux/fs/minix/chrdev.c
  *
- *  (C) 1991  Linus Torvalds
+ *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
-#include <errno.h>
-
+#include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/minix_fs.h>
 #include <linux/tty.h>
@@ -20,11 +19,11 @@ static int chrdev_open(struct inode * inode, struct file * filp)
 	int i;
 
 	i = MAJOR(inode->i_rdev);
-	if (i < MAX_CHRDEV) {
-		filp->f_op = chrdev_fops[i];
-		if (filp->f_op && filp->f_op->open)
-			return filp->f_op->open(inode,filp);
-	}
+	if (i >= MAX_CHRDEV || !chrdev_fops[i])
+		return -ENODEV;
+	filp->f_op = chrdev_fops[i];
+	if (filp->f_op->open)
+		return filp->f_op->open(inode,filp);
 	return 0;
 }
 
@@ -40,6 +39,7 @@ static struct file_operations def_chr_fops = {
 	NULL,		/* readdir */
 	NULL,		/* select */
 	NULL,		/* ioctl */
+	NULL,		/* mmap */
 	chrdev_open,	/* open */
 	NULL,		/* release */
 };
@@ -57,7 +57,7 @@ struct inode_operations minix_chrdev_inode_operations = {
 	NULL,			/* rename */
 	NULL,			/* readlink */
 	NULL,			/* follow_link */
-	minix_bmap,		/* bmap */
-	minix_truncate		/* truncate */
+	NULL,			/* bmap */
+	NULL			/* truncate */
 };
 

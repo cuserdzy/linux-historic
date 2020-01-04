@@ -1,17 +1,17 @@
 /*
  *  linux/kernel/signal.c
  *
- *  (C) 1991  Linus Torvalds
+ *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
 #include <linux/sched.h>
 #include <linux/kernel.h>
-#include <asm/segment.h>
+#include <linux/signal.h>
+#include <linux/errno.h>
+#include <linux/wait.h>
+#include <linux/ptrace.h>
 
-#include <signal.h>
-#include <sys/wait.h>
-#include <sys/ptrace.h>
-#include <errno.h>
+#include <asm/segment.h>
 
 extern int core_dump(long signr,struct pt_regs * regs);
 
@@ -66,26 +66,6 @@ int sys_sigsuspend(int restart, unsigned long old_mask, unsigned long set)
     return -ERESTARTNOINTR;		/* handle the signal, and come back */
 }
 
-static inline void save_old(char * from,char * to)
-{
-	int i;
-
-	verify_area(to, sizeof(struct sigaction));
-	for (i=0 ; i< sizeof(struct sigaction) ; i++) {
-		put_fs_byte(*from,to);
-		from++;
-		to++;
-	}
-}
-
-static inline void get_new(char * from,char * to)
-{
-	int i;
-
-	for (i=0 ; i< sizeof(struct sigaction) ; i++)
-		*(to++) = get_fs_byte(from++);
-}
-
 int sys_signal(int signum, long handler, long restorer)
 {
 	struct sigaction tmp;
@@ -104,24 +84,34 @@ int sys_signal(int signum, long handler, long restorer)
 int sys_sigaction(int signum, const struct sigaction * action,
 	struct sigaction * oldaction)
 {
-	struct sigaction tmp;
+	struct sigaction new, *p;
 
 	if (signum<1 || signum>32 || signum==SIGKILL || signum==SIGSTOP)
 		return -EINVAL;
-	tmp = current->sigaction[signum-1];
-	get_new((char *) action,
-		(char *) (signum-1+current->sigaction));
-	if (oldaction)
-		save_old((char *) &tmp,(char *) oldaction);
-	if (current->sigaction[signum-1].sa_flags & SA_NOMASK)
-		current->sigaction[signum-1].sa_mask = 0;
-	else
-		current->sigaction[signum-1].sa_mask |= (1<<(signum-1));
+	p = signum - 1 + current->sigaction;
+	if (action) {
+		memcpy_fromfs(&new, action, sizeof(struct sigaction));
+		if (new.sa_flags & SA_NOMASK)
+			new.sa_mask = 0;
+		else
+			new.sa_mask |= (1<<(signum-1));
+	}
+	if (oldaction) {
+		verify_area(oldaction, sizeof(struct sigaction));
+		memcpy_tofs(oldaction, p, sizeof(struct sigaction));
+	}
+	if (action)
+		*p = new;
 	return 0;
 }
 
 extern int sys_waitpid(pid_t pid,unsigned long * stat_addr, int options);
 
+/*
+ * Note that 'init' is a special process: it doesn't get signals it doesn't
+ * want to handle. Thus you cannot kill init even with a SIGKILL even by
+ * mistake.
+ */
 int do_signal(long signr,struct pt_regs * regs)
 {
 	unsigned long sa_handler;
@@ -130,13 +120,8 @@ int do_signal(long signr,struct pt_regs * regs)
 	int longs;
 	unsigned long * tmp_esp;
 
-#ifdef notdef
-	printk("pid: %d, signr: %x, eax=%d, oeax = %d, int=%d\n", 
-		current->pid, signr, regs->eax, regs->orig_eax, 
-		sa->sa_flags & SA_INTERRUPT);
-#endif
 	sa_handler = (unsigned long) sa->sa_handler;
-	if ((regs->orig_eax != -1) &&
+	if ((regs->orig_eax >= 0) &&
 	    ((regs->eax == -ERESTARTSYS) || (regs->eax == -ERESTARTNOINTR))) {
 		if ((sa_handler > 1) && (regs->eax == -ERESTARTSYS) &&
 		    (sa->sa_flags & SA_INTERRUPT))
@@ -154,6 +139,8 @@ int do_signal(long signr,struct pt_regs * regs)
 		return(1);   /* Ignore, see if there are more signals... */
 	}
 	if (!sa_handler) {
+		if (current->pid == 1)
+			return 1;
 		switch (signr) {
 		case SIGCONT:
 		case SIGCHLD:
@@ -178,9 +165,10 @@ int do_signal(long signr,struct pt_regs * regs)
 		case SIGFPE:
 		case SIGSEGV:
 			if (core_dump(signr,regs))
-				do_exit(signr|0x80);
+				signr |= 0x80;
 			/* fall through */
 		default:
+			current->signal |= 1<<((signr & 0x7f)-1);
 			do_exit(signr);
 		}
 	}

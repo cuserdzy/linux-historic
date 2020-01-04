@@ -14,40 +14,22 @@
 	$(CC) $(CFLAGS) -c $<
 
 OBJS  = ctype.o _exit.o open.o close.o errno.o write.o dup.o setsid.o \
-	execve.o wait.o string.o malloc.o itimer.o
+	execve.o wait.o string.o malloc.o
 
 lib.a: $(OBJS)
 	$(AR) rcs lib.a $(OBJS)
 	sync
 
 clean:
-	rm -f core *.o *.a tmp_make
-	for i in *.c;do rm -f `basename $$i .c`.s;done
+	rm -f core *.o *.a *.s
 
 dep:
-	sed '/\#\#\# Dependencies/q' < Makefile > tmp_make
-	for i in *.c;do $(CPP) -M $$i;done >> tmp_make
-	cp tmp_make Makefile
+	$(CPP) -M *.c > .depend
 
-### Dependencies:
-_exit.o : _exit.c /usr/src/linux/include/linux/unistd.h 
-close.o : close.c /usr/src/linux/include/linux/unistd.h 
-ctype.o : ctype.c /usr/src/linux/include/linux/ctype.h 
-dup.o : dup.c /usr/src/linux/include/linux/unistd.h 
-errno.o : errno.c 
-execve.o : execve.c /usr/src/linux/include/linux/unistd.h 
-itimer.o : itimer.c /usr/src/linux/include/linux/unistd.h /usr/src/linux/include/sys/time.h \
-  /usr/src/linux/include/time.h /usr/src/linux/include/sys/types.h /usr/src/linux/include/stddef.h 
-malloc.o : malloc.c /usr/src/linux/include/linux/kernel.h /usr/src/linux/include/linux/mm.h \
-  /usr/src/linux/include/linux/fs.h /usr/src/linux/include/sys/types.h /usr/src/linux/include/stddef.h \
-  /usr/src/linux/include/sys/dirent.h /usr/src/linux/include/limits.h /usr/src/linux/include/sys/vfs.h \
-  /usr/src/linux/include/signal.h /usr/src/linux/include/asm/system.h 
-open.o : open.c /usr/src/linux/include/linux/unistd.h /usr/src/linux/include/stdarg.h 
-setsid.o : setsid.c /usr/src/linux/include/sys/types.h /usr/src/linux/include/stddef.h \
-  /usr/src/linux/include/linux/unistd.h 
-string.o : string.c /usr/src/linux/include/linux/string.h /usr/src/linux/include/sys/types.h \
-  /usr/src/linux/include/stddef.h 
-wait.o : wait.c /usr/src/linux/include/linux/unistd.h /usr/src/linux/include/sys/wait.h \
-  /usr/src/linux/include/sys/types.h /usr/src/linux/include/stddef.h 
-write.o : write.c /usr/src/linux/include/linux/unistd.h /usr/src/linux/include/sys/types.h \
-  /usr/src/linux/include/stddef.h 
+#
+# include a dependency file if one exists
+#
+ifeq (.depend,$(wildcard .depend))
+include .depend
+endif
+

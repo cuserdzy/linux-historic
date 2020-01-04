@@ -1,5 +1,8 @@
+#ifndef __ASM_SYSTEM_H
+#define __ASM_SYSTEM_H
+
 #define move_to_user_mode() \
-__asm__ ("movl %%esp,%%eax\n\t" \
+__asm__ __volatile__ ("movl %%esp,%%eax\n\t" \
 	"pushl $0x17\n\t" \
 	"pushl %%eax\n\t" \
 	"pushfl\n\t" \
@@ -13,14 +16,28 @@ __asm__ ("movl %%esp,%%eax\n\t" \
 	"mov %%ax,%%gs" \
 	:::"ax")
 
-#define sti() __asm__ ("sti"::)
-#define cli() __asm__ ("cli"::)
-#define nop() __asm__ ("nop"::)
+#define sti() __asm__ __volatile__ ("sti"::)
+#define cli() __asm__ __volatile__ ("cli"::)
+#define nop() __asm__ __volatile__ ("nop"::)
 
-#define iret() __asm__ ("iret"::)
+extern inline int tas(char * m)
+{
+	char res;
+
+	__asm__("xchg %0,%1":"=q" (res),"=m" (*m):"0" (0x1));
+	return res;
+}
+
+#define save_flags(x) \
+__asm__ __volatile__("pushfl ; popl %0":"=r" (x))
+
+#define restore_flags(x) \
+__asm__ __volatile__("pushl %0 ; popfl"::"r" (x))
+
+#define iret() __asm__ __volatile__ ("iret"::)
 
 #define _set_gate(gate_addr,type,dpl,addr) \
-__asm__ ("movw %%dx,%%ax\n\t" \
+__asm__ __volatile__ ("movw %%dx,%%ax\n\t" \
 	"movw %0,%%dx\n\t" \
 	"movl %%eax,%1\n\t" \
 	"movl %%edx,%2" \
@@ -49,8 +66,8 @@ __asm__ ("movw %%dx,%%ax\n\t" \
 	*((gate_addr)+1) = (((base) & 0x0000ffff)<<16) | \
 		((limit) & 0x0ffff); }
 
-#define _set_tssldt_desc(n,addr,type) \
-__asm__ ("movw $232,%1\n\t" \
+#define _set_tssldt_desc(n,addr,limit,type) \
+__asm__ __volatile__ ("movw $" #limit ",%1\n\t" \
 	"movw %%ax,%2\n\t" \
 	"rorl $16,%%eax\n\t" \
 	"movb %%al,%3\n\t" \
@@ -58,9 +75,11 @@ __asm__ ("movw $232,%1\n\t" \
 	"movb $0x00,%5\n\t" \
 	"movb %%ah,%6\n\t" \
 	"rorl $16,%%eax" \
-	::"a" (addr), "m" (*(n)), "m" (*(n+2)), "m" (*(n+4)), \
+	::"a" (addr+0xc0000000), "m" (*(n)), "m" (*(n+2)), "m" (*(n+4)), \
 	 "m" (*(n+5)), "m" (*(n+6)), "m" (*(n+7)) \
 	)
 
-#define set_tss_desc(n,addr) _set_tssldt_desc(((char *) (n)),addr,"0x89")
-#define set_ldt_desc(n,addr) _set_tssldt_desc(((char *) (n)),addr,"0x82")
+#define set_tss_desc(n,addr) _set_tssldt_desc(((char *) (n)),((int)(addr)),231,"0x89")
+#define set_ldt_desc(n,addr) _set_tssldt_desc(((char *) (n)),((int)(addr)),23,"0x82")
+
+#endif

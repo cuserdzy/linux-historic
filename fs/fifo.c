@@ -4,11 +4,10 @@
  *  written by Paul H. Hargrove
  */
 
-#include <errno.h>
-
-#include <linux/fcntl.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
+#include <linux/errno.h>
+#include <linux/fcntl.h>
 
 extern struct file_operations read_pipe_fops;
 extern struct file_operations write_pipe_fops;
@@ -85,16 +84,17 @@ static int fifo_open(struct inode * inode,struct file * filp)
 		wake_up(&PIPE_READ_WAIT(*inode));
 	if (PIPE_READERS(*inode))
 		wake_up(&PIPE_WRITE_WAIT(*inode));
-	if (retval || inode->i_size)
+	if (retval || PIPE_BASE(*inode))
 		return retval;
-	page = get_free_page();
-	if (inode->i_size) {
+	page = get_free_page(GFP_KERNEL);
+	if (PIPE_BASE(*inode)) {
 		free_page(page);
 		return 0;
 	}
 	if (!page)
 		return -ENOMEM;
-	inode->i_size = page;
+	PIPE_HEAD(*inode) = PIPE_TAIL(*inode) = 0;
+	PIPE_BASE(*inode) = (char *) page;
 	return 0;
 }
 
@@ -104,6 +104,7 @@ static int fifo_open(struct inode * inode,struct file * filp)
  * depending on the access mode of the file...
  */
 struct file_operations def_fifo_fops = {
+	NULL,
 	NULL,
 	NULL,
 	NULL,

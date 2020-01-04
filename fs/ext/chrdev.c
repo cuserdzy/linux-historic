@@ -1,13 +1,13 @@
 /*
  *  linux/fs/ext/chrdev.c
  *
- *  (C) 1992  Remy Card (card@masi.ibp.fr)
+ *  Copyright (C) 1992  Remy Card (card@masi.ibp.fr)
  *
  *  from
  *
  *  linux/fs/minix/chrdev.c
  *
- *  (C) 1991  Linus Torvalds
+ *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
 #include <linux/sched.h>
@@ -15,8 +15,7 @@
 #include <linux/tty.h>
 #include <linux/stat.h>
 #include <linux/fcntl.h>
-
-#include <errno.h>
+#include <linux/errno.h>
 
 /*
  * Called every time an ext character special file is opened
@@ -26,11 +25,11 @@ static int chrdev_open(struct inode * inode, struct file * filp)
 	int i;
 
 	i = MAJOR(inode->i_rdev);
-	if (i < MAX_CHRDEV) {
-		filp->f_op = chrdev_fops[i];
-		if (filp->f_op && filp->f_op->open)
-			return filp->f_op->open(inode,filp);
-	}
+	if (i >= MAX_CHRDEV || !chrdev_fops[i])
+		return -ENODEV;
+	filp->f_op = chrdev_fops[i];
+	if (filp->f_op->open)
+		return filp->f_op->open(inode,filp);
 	return 0;
 }
 
@@ -46,6 +45,7 @@ static struct file_operations def_chr_fops = {
 	NULL,		/* readdir */
 	NULL,		/* select */
 	NULL,		/* ioctl */
+	NULL,		/* mmap */
 	chrdev_open,	/* open */
 	NULL,		/* release */
 };
@@ -63,7 +63,7 @@ struct inode_operations ext_chrdev_inode_operations = {
 	NULL,			/* rename */
 	NULL,			/* readlink */
 	NULL,			/* follow_link */
-	ext_bmap,		/* bmap */
-	ext_truncate		/* truncate */
+	NULL,			/* bmap */
+	NULL			/* truncate */
 };
 

@@ -6,7 +6,7 @@
 #include <linux/config.h>
 SYSSIZE = DEF_SYSSIZE
 !
-!	bootsect.s		(C) 1991 Linus Torvalds
+!	bootsect.s		Copyright (C) 1991, 1992 Linus Torvalds
 !	modified by Drew Eckhardt
 !	modified by Bruce Evans (bde)
 !
@@ -40,6 +40,12 @@ ENDSEG    = SYSSEG + SYSSIZE		! where to stop loading
 ! ROOT_DEV & SWAP_DEV are now written by "build".
 ROOT_DEV = 0
 SWAP_DEV = 0
+#ifndef SVGA_MODE
+#define SVGA_MODE ASK_VGA
+#endif
+#ifndef RAMDISK
+#define RAMDISK 0
+#endif 
 
 ! ld86 requires an entry symbol. This may as well be the usual one.
 .globl	_main
@@ -72,8 +78,6 @@ go:	mov	ax,cs
 
 	mov	ds,ax
 	mov	es,ax
-	push	ax
-
 	mov	ss,ax		! put stack at INITSEG:0x4000-12.
 	mov	sp,dx
 /*
@@ -115,7 +119,7 @@ go:	mov	ax,cs
 	seg fs
 	mov	2(bx),es
 
-	pop	ax
+	mov	ax,cs
 	mov	fs,ax
 	mov	gs,ax
 	
@@ -425,9 +429,13 @@ msg1:
 	.byte 13,10
 	.ascii "Loading"
 
-.org 506
+.org 502
 swap_dev:
 	.word SWAP_DEV
+ram_size:
+	.word RAMDISK
+vid_mode:
+	.word SVGA_MODE
 root_dev:
 	.word ROOT_DEV
 boot_flag:

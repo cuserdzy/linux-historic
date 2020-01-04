@@ -1,22 +1,24 @@
 /*
  *  linux/kernel/exit.c
  *
- *  (C) 1991  Linus Torvalds
+ *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
 #define DEBUG_PROC_TREE
 
-#include <errno.h>
-#include <signal.h>
-#include <sys/wait.h>
-
+#include <linux/wait.h>
+#include <linux/errno.h>
+#include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
+#include <linux/resource.h>
 #include <linux/mm.h>
 #include <linux/tty.h>
+
 #include <asm/segment.h>
 
 int sys_close(int fd);
+void getrusage(struct task_struct *, int, struct rusage *);
 
 int send_sig(long sig,struct task_struct * p,int priv)
 {
@@ -68,6 +70,7 @@ void release(struct task_struct * p)
 		if (task[i] == p) {
 			task[i] = NULL;
 			REMOVE_LINKS(p);
+			free_page(p->kernel_stack_page);
 			free_page((long) p);
 			return;
 		}
@@ -96,7 +99,7 @@ int bad_task_ptr(struct task_struct *p)
  * holds.  Used for debugging only, since it's very slow....
  *
  * It looks a lot scarier than it really is.... we're doing ænothing more
- * than verifying the doubly-linked list foundæin p_ysptr and p_osptr, 
+ * than verifying the doubly-linked list found in p_ysptr and p_osptr, 
  * and checking it corresponds with the process tree defined by p_cptr and 
  * p_pptr;
  */
@@ -185,6 +188,10 @@ int session_of_pgrp(int pgrp)
 	return fallback;
 }
 
+/*
+ * kill_pg() sends a signal to a process group: this is what the tty
+ * control characters do (^C, ^Z etc)
+ */
 int kill_pg(int pgrp, int sig, int priv)
 {
 	struct task_struct **p;
@@ -195,7 +202,30 @@ int kill_pg(int pgrp, int sig, int priv)
 		return -EINVAL;
  	for (p = &LAST_TASK ; p > &FIRST_TASK ; --p)
 		if (*p && (*p)->pgrp == pgrp) {
-			if (sig && (err = send_sig(sig,*p,priv)))
+			if ((err = send_sig(sig,*p,priv)) != 0)
+				retval = err;
+			else
+				found++;
+		}
+	return(found ? 0 : retval);
+}
+
+/*
+ * kill_sl() sends a signal to the session leader: this is used
+ * to send SIGHUP to the controlling process of a terminal when
+ * the connection is lost.
+ */
+int kill_sl(int sess, int sig, int priv)
+{
+	struct task_struct **p;
+	int err,retval = -ESRCH;
+	int found = 0;
+
+	if (sig<0 || sig>32 || sess<=0)
+		return -EINVAL;
+ 	for (p = &LAST_TASK ; p > &FIRST_TASK ; --p)
+		if (*p && (*p)->session == sess && (*p)->leader) {
+			if ((err = send_sig(sig,*p,priv)) != 0)
 				retval = err;
 			else
 				found++;
@@ -211,7 +241,7 @@ int kill_proc(int pid, int sig, int priv)
 		return -EINVAL;
 	for (p = &LAST_TASK ; p > &FIRST_TASK ; --p)
 		if (*p && (*p)->pid == pid)
-			return(sig ? send_sig(sig,*p,priv) : 0);
+			return send_sig(sig,*p,priv);
 	return(-ESRCH);
 }
 
@@ -297,8 +327,7 @@ volatile void do_exit(long code)
 	int i;
 
 fake_volatile:
-	free_page_tables(get_base(current->ldt[1]),get_limit(0x0f));
-	free_page_tables(get_base(current->ldt[2]),get_limit(0x17));
+	free_page_tables(current);
 	for (i=0 ; i<NR_OPEN ; i++)
 		if (current->filp[i])
 			sys_close(i);
@@ -343,10 +372,10 @@ fake_volatile:
 	 *	as a result of our exiting, and if they have any stopped
 	 *	jobs, send them a SIGHUP and then a SIGCONT.  (POSIX 3.2.2.2)
 	 */
-	while (p = current->p_cptr) {
+	while ((p = current->p_cptr) != NULL) {
 		current->p_cptr = p->p_osptr;
 		p->p_ysptr = NULL;
-		p->flags &= ~PF_PTRACED;
+		p->flags &= ~(PF_PTRACED|PF_TRACESYS);
 		if (task[1])
 			p->p_pptr = task[1];
 		else
@@ -376,10 +405,12 @@ fake_volatile:
 
 		if (current->tty >= 0) {
 			tty = TTY_TABLE(current->tty);
-			if (tty->pgrp > 0)
-				kill_pg(tty->pgrp, SIGHUP, 1);
-			tty->pgrp = -1;
-			tty->session = 0;
+			if (tty) {
+				if (tty->pgrp > 0)
+					kill_pg(tty->pgrp, SIGHUP, 1);
+				tty->pgrp = -1;
+				tty->session = 0;
+			}
 		}
 	 	for (p = &LAST_TASK ; p > &FIRST_TASK ; --p)
 			if (*p && (*p)->session == current->session)
@@ -412,7 +443,7 @@ int sys_exit(int error_code)
 	do_exit((error_code&0xff)<<8);
 }
 
-int sys_waitpid(pid_t pid,unsigned long * stat_addr, int options)
+int sys_wait4(pid_t pid,unsigned long * stat_addr, int options, struct rusage * ru)
 {
 	int flag;
 	struct task_struct *p;
@@ -421,6 +452,7 @@ int sys_waitpid(pid_t pid,unsigned long * stat_addr, int options)
 	if (stat_addr)
 		verify_area(stat_addr,4);
 repeat:
+	current->signal &= ~(1<<(SIGCHLD-1));
 	flag=0;
  	for (p = current->p_cptr ; p ; p = p->p_osptr) {
 		if (pid>0) {
@@ -443,12 +475,16 @@ repeat:
 					put_fs_long((p->exit_code << 8) | 0x7f,
 						stat_addr);
 				p->exit_code = 0;
+				if (ru != NULL)
+					getrusage(p, RUSAGE_BOTH, ru);
 				return p->pid;
 			case TASK_ZOMBIE:
 				current->cutime += p->utime + p->cutime;
 				current->cstime += p->stime + p->cstime;
 				current->cmin_flt += p->min_flt + p->cmin_flt;
 				current->cmaj_flt += p->maj_flt + p->cmaj_flt;
+				if (ru != NULL)
+					getrusage(p, RUSAGE_BOTH, ru);
 				flag = p->pid;
 				if (stat_addr)
 					put_fs_long(p->exit_code, stat_addr);
@@ -482,4 +518,13 @@ repeat:
 			goto repeat;
 	}
 	return -ECHILD;
+}
+
+/*
+ * sys_waitpid() remains for compatibility. waitpid() should be
+ * implemented by calling sys_wait4() from libc.a.
+ */
+int sys_waitpid(pid_t pid,unsigned long * stat_addr, int options)
+{
+	return sys_wait4(pid, stat_addr, options, NULL);
 }

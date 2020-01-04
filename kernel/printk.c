@@ -1,16 +1,15 @@
 /*
  *  linux/kernel/printk.c
  *
- *  (C) 1991  Linus Torvalds
+ *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
 #include <stdarg.h>
-#include <stddef.h>
-#include <errno.h>
 
 #include <asm/segment.h>
 #include <asm/system.h>
 
+#include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 
@@ -22,7 +21,7 @@ extern void console_print(const char *);
 static unsigned long log_page = 0;
 static unsigned long log_start = 0;
 static unsigned long log_size = 0;
-static struct task_struct * log_wait = NULL;
+static struct wait_queue * log_wait = NULL;
 
 int sys_syslog(int type, char * buf, int len)
 {
@@ -36,14 +35,14 @@ int sys_syslog(int type, char * buf, int len)
 			i = log_page;
 			log_page = 0;
 			free_page(i);
-			wake_up(&log_wait);
+			wake_up_interruptible(&log_wait);
 			return 0;
 		case 1:
-			i = get_free_page();
+			i = get_free_page(GFP_KERNEL);
 			if (log_page) {
 				free_page(i);
 				return 0;
-			} else if (log_page = i) {
+			} else if ((log_page = i) != 0) {
 				log_start = log_size = 0;
 				return 0;
 			}
@@ -65,7 +64,7 @@ int sys_syslog(int type, char * buf, int len)
 				sti();
 			}
 			i = 0;
-			while (log_size && len) {
+			while (log_size && i < len) {
 				c = *((char *) log_page+log_start);
 				log_start++;
 				log_size--;
@@ -98,7 +97,7 @@ int printk(const char *fmt, ...)
 			log_start++;
 	}
 	if (log_page)
-		wake_up(&log_wait);
+		wake_up_interruptible(&log_wait);
 	console_print(buf);
 	return i;
 }

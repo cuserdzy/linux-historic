@@ -20,32 +20,14 @@ mm.o: $(OBJS)
 	$(LD) -r -o mm.o $(OBJS)
 
 clean:
-	rm -f core *.o *.a tmp_make
-	for i in *.c;do rm -f `basename $$i .c`.s;done
+	rm -f core *.o *.a *.s
 
 dep:
-	sed '/\#\#\# Dependencies/q' < Makefile > tmp_make
-	for i in *.c;do $(CPP) -M $$i;done >> tmp_make
-	cp tmp_make Makefile
+	$(CPP) -M *.c > .depend
 
-### Dependencies:
-memory.o : memory.c /usr/src/linux/include/signal.h /usr/src/linux/include/sys/types.h \
-  /usr/src/linux/include/stddef.h /usr/src/linux/include/asm/system.h /usr/src/linux/include/linux/sched.h \
-  /usr/src/linux/include/linux/head.h /usr/src/linux/include/linux/fs.h /usr/src/linux/include/sys/dirent.h \
-  /usr/src/linux/include/limits.h /usr/src/linux/include/sys/vfs.h /usr/src/linux/include/linux/mm.h \
-  /usr/src/linux/include/linux/kernel.h /usr/src/linux/include/sys/param.h /usr/src/linux/include/sys/time.h \
-  /usr/src/linux/include/time.h /usr/src/linux/include/sys/resource.h 
-mmap.o : mmap.c /usr/src/linux/include/linux/stat.h /usr/src/linux/include/linux/sched.h \
-  /usr/src/linux/include/linux/head.h /usr/src/linux/include/linux/fs.h /usr/src/linux/include/sys/types.h \
-  /usr/src/linux/include/stddef.h /usr/src/linux/include/sys/dirent.h /usr/src/linux/include/limits.h \
-  /usr/src/linux/include/sys/vfs.h /usr/src/linux/include/linux/mm.h /usr/src/linux/include/linux/kernel.h \
-  /usr/src/linux/include/signal.h /usr/src/linux/include/sys/param.h /usr/src/linux/include/sys/time.h \
-  /usr/src/linux/include/time.h /usr/src/linux/include/sys/resource.h /usr/src/linux/include/asm/segment.h \
-  /usr/src/linux/include/asm/system.h /usr/src/linux/include/errno.h /usr/src/linux/include/sys/mman.h 
-swap.o : swap.c /usr/src/linux/include/errno.h /usr/src/linux/include/linux/stat.h \
-  /usr/src/linux/include/linux/mm.h /usr/src/linux/include/linux/fs.h /usr/src/linux/include/sys/types.h \
-  /usr/src/linux/include/stddef.h /usr/src/linux/include/sys/dirent.h /usr/src/linux/include/limits.h \
-  /usr/src/linux/include/sys/vfs.h /usr/src/linux/include/linux/kernel.h /usr/src/linux/include/signal.h \
-  /usr/src/linux/include/linux/string.h /usr/src/linux/include/linux/sched.h /usr/src/linux/include/linux/head.h \
-  /usr/src/linux/include/sys/param.h /usr/src/linux/include/sys/time.h /usr/src/linux/include/time.h \
-  /usr/src/linux/include/sys/resource.h 
+#
+# include a dependency file if one exists
+#
+ifeq (.depend,$(wildcard .depend))
+include .depend
+endif

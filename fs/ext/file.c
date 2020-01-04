@@ -1,29 +1,27 @@
 /*
  *  linux/fs/ext/file.c
  *
- *  (C) 1992 Remy Card (card@masi.ibp.fr)
+ *  Copyright (C) 1992 Remy Card (card@masi.ibp.fr)
  *
  *  from
  *
  *  linux/fs/minix/file.c
  *
- *  (C) 1991 Linus Torvalds
+ *  Copyright (C) 1991, 1992 Linus Torvalds
  *
  *  ext regular file handling primitives
  */
 
-#include <errno.h>
-
-#include <sys/dirent.h>
-
 #include <asm/segment.h>
 #include <asm/system.h>
 
-#include <linux/fcntl.h>
 #include <linux/sched.h>
 #include <linux/ext_fs.h>
 #include <linux/kernel.h>
+#include <linux/errno.h>
+#include <linux/fcntl.h>
 #include <linux/stat.h>
+#include <linux/locks.h>
 
 #define	NBUF	16
 
@@ -47,6 +45,7 @@ static struct file_operations ext_file_operations = {
 	NULL,			/* readdir - bad */
 	NULL,			/* select - default */
 	NULL,			/* ioctl - default */
+	NULL,			/* mmap */
 	NULL,			/* no special open is needed */
 	NULL			/* release */
 };
@@ -68,100 +67,131 @@ struct inode_operations ext_file_inode_operations = {
 	ext_truncate		/* truncate */
 };
 
-static inline void wait_on_buffer(struct buffer_head * bh)
-{
-	cli();
-	while (bh->b_lock)
-		sleep_on(&bh->b_wait);
-	sti();
-}
-
 static int ext_file_read(struct inode * inode, struct file * filp, char * buf, int count)
 {
-	int read,left,chars,nr;
+	int read,left,chars;
 	int block, blocks, offset;
+	int bhrequest, uptodate;
 	struct buffer_head ** bhb, ** bhe;
+	struct buffer_head * bhreq[NBUF];
 	struct buffer_head * buflist[NBUF];
+	unsigned int size;
 
 	if (!inode) {
 		printk("ext_file_read: inode = NULL\n");
 		return -EINVAL;
 	}
-	if (!(S_ISREG(inode->i_mode) || S_ISDIR(inode->i_mode))) {
+	if (!S_ISREG(inode->i_mode)) {
 		printk("ext_file_read: mode = %07o\n",inode->i_mode);
 		return -EINVAL;
 	}
-	if (filp->f_pos > inode->i_size)
+	offset = filp->f_pos;
+	size = inode->i_size;
+	if (offset > size)
 		left = 0;
 	else
-		left = inode->i_size - filp->f_pos;
+		left = size - offset;
 	if (left > count)
 		left = count;
 	if (left <= 0)
 		return 0;
 	read = 0;
-	block = filp->f_pos >> BLOCK_SIZE_BITS;
-	offset = filp->f_pos & (BLOCK_SIZE-1);
-	blocks = (left + offset + BLOCK_SIZE - 1) / BLOCK_SIZE;
+	block = offset >> BLOCK_SIZE_BITS;
+	offset &= BLOCK_SIZE-1;
+	size = (size + (BLOCK_SIZE-1)) >> BLOCK_SIZE_BITS;
+	blocks = (left + offset + BLOCK_SIZE - 1) >> BLOCK_SIZE_BITS;
 	bhb = bhe = buflist;
+	if (filp->f_reada) {
+		blocks += read_ahead[MAJOR(inode->i_dev)] / (BLOCK_SIZE >> 9);
+		if (block + blocks > size)
+			blocks = size - block;
+	}
+
+	/* We do this in a two stage process.  We first try and request
+	   as many blocks as we can, then we wait for the first one to
+	   complete, and then we try and wrap up as many as are actually
+	   done.  This routine is rather generic, in that it can be used
+	   in a filesystem by substituting the appropriate function in
+	   for getblk.
+
+	   This routine is optimized to make maximum use of the various
+	   buffers and caches. */
+
 	do {
-		if (blocks) {
+		bhrequest = 0;
+		uptodate = 1;
+		while (blocks) {
 			--blocks;
-			if (nr = ext_bmap(inode,block++)) {
-				*bhb = getblk(inode->i_dev,nr);
-				if (!(*bhb)->b_uptodate)
-					ll_rw_block(READ,*bhb);
-			} else
-				*bhb = NULL;
+			*bhb = ext_getblk(inode, block++, 0);
+			if (*bhb && !(*bhb)->b_uptodate) {
+				uptodate = 0;
+				bhreq[bhrequest++] = *bhb;
+			}
 
 			if (++bhb == &buflist[NBUF])
 				bhb = buflist;
 
-			if (bhb != bhe)
-				continue;
-		}
-		if (*bhe) {
-			wait_on_buffer(*bhe);
-			if (!(*bhe)->b_uptodate) {
-				do {
-					brelse(*bhe);
-					if (++bhe == &buflist[NBUF])
-						bhe = buflist;
-				} while (bhe != bhb);
+			/* If the block we have on hand is uptodate, go ahead
+			   and complete processing. */
+			if (uptodate)
 				break;
-			}
+			if (bhb == bhe)
+				break;
 		}
 
-		if (left < BLOCK_SIZE - offset)
-			chars = left;
-		else
-			chars = BLOCK_SIZE - offset;
-		filp->f_pos += chars;
-		left -= chars;
-		read += chars;
-		if (*bhe) {
-			memcpy_tofs(buf,offset+(*bhe)->b_data,chars);
-			brelse(*bhe);
-			buf += chars;
-		} else {
-			while (chars-->0)
-				put_fs_byte(0,buf++);
-		}
-		offset = 0;
+		/* Now request them all */
+		if (bhrequest)
+			ll_rw_block(READ, bhrequest, bhreq);
+
+		do { /* Finish off all I/O that has actually completed */
+			if (*bhe) {
+				wait_on_buffer(*bhe);
+				if (!(*bhe)->b_uptodate) {	/* read error? */
+					left = 0;
+					break;
+				}
+			}
+			if (left < BLOCK_SIZE - offset)
+				chars = left;
+			else
+				chars = BLOCK_SIZE - offset;
+			filp->f_pos += chars;
+			left -= chars;
+			read += chars;
+			if (*bhe) {
+				memcpy_tofs(buf,offset+(*bhe)->b_data,chars);
+				brelse(*bhe);
+				buf += chars;
+			} else {
+				while (chars-->0)
+					put_fs_byte(0,buf++);
+			}
+			offset = 0;
+			if (++bhe == &buflist[NBUF])
+				bhe = buflist;
+		} while (left > 0 && bhe != bhb && (!*bhe || !(*bhe)->b_lock));
+	} while (left > 0);
+
+/* Release the read-ahead blocks */
+	while (bhe != bhb) {
+		brelse(*bhe);
 		if (++bhe == &buflist[NBUF])
 			bhe = buflist;
-	} while (left > 0);
+	};
 	if (!read)
 		return -EIO;
-	inode->i_atime = CURRENT_TIME;
-	inode->i_dirt = 1;
+	filp->f_reada = 1;
+	if (!IS_RDONLY(inode)) {
+		inode->i_atime = CURRENT_TIME;
+		inode->i_dirt = 1;
+	}
 	return read;
 }
 
 static int ext_file_write(struct inode * inode, struct file * filp, char * buf, int count)
 {
 	off_t pos;
-	int written,block,c;
+	int written,c;
 	struct buffer_head * bh;
 	char * p;
 
@@ -183,7 +213,8 @@ static int ext_file_write(struct inode * inode, struct file * filp, char * buf, 
 		pos = filp->f_pos;
 	written = 0;
 	while (written<count) {
-		if (!(block = ext_create_block(inode,pos/BLOCK_SIZE))) {
+		bh = ext_getblk(inode,pos/BLOCK_SIZE,1);
+		if (!bh) {
 			if (!written)
 				written = -ENOSPC;
 			break;
@@ -191,14 +222,15 @@ static int ext_file_write(struct inode * inode, struct file * filp, char * buf, 
 		c = BLOCK_SIZE - (pos % BLOCK_SIZE);
 		if (c > count-written)
 			c = count-written;
-		if (c == BLOCK_SIZE)
-			bh = getblk(inode->i_dev, block);
-		else
-			bh = bread(inode->i_dev,block);
-		if (!bh) {
-			if (!written)
-				written = -EIO;
-			break;
+		if (c != BLOCK_SIZE && !bh->b_uptodate) {
+			ll_rw_block(READ, 1, &bh);
+			wait_on_buffer(bh);
+			if (!bh->b_uptodate) {
+				brelse(bh);
+				if (!written)
+					written = -EIO;
+				break;
+			}
 		}
 		p = (pos % BLOCK_SIZE) + bh->b_data;
 		pos += c;

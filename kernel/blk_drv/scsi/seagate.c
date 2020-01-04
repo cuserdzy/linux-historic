@@ -8,12 +8,20 @@
 
 #include <linux/config.h>
 
-#ifdef CONFIG_SCSI_SEAGATE
+#if defined(CONFIG_SCSI_SEAGATE) || defined(CONFIG_SCSI_FD_88x) 
+#include <asm/io.h>
+#include <asm/system.h>
+#include <linux/signal.h>
 #include <linux/sched.h>
-
-#include "seagate.h"
+#include "../blk.h"
 #include "scsi.h"
 #include "hosts.h"
+#include "seagate.h"
+
+
+static int internal_command(unsigned char target, unsigned char lun,
+			    const void *cmnd,
+			 void *buff, int bufflen, int reselect);
 
 static int incommand;			/*
 						set if arbitration has finished and we are 
@@ -27,7 +35,7 @@ static void *base_address = NULL;	/*
 					*/
 static volatile int abort_confirm = 0;
 
-volatile void *st0x_cr_sr;       /*
+static volatile void *st0x_cr_sr;       /*
 						control register write,
 						status register read.
 						256 bytes in length.
@@ -53,7 +61,7 @@ static volatile int st0x_aborted=0;	/*
 						detect routine - but this 
 						overides it. 
 					*/
-
+static unsigned char controller_type;	/* set to SEAGATE for ST0x boards or FD for TMC-88x boards */
 			
 #define retcode(result) (((result) << 16) | (message << 8) | status) 			
 #define STATUS (*(unsigned char *) st0x_cr_sr)
@@ -68,12 +76,37 @@ typedef struct
 	char *signature ;
 	unsigned offset;
 	unsigned length;
+	unsigned char type;
 	} Signature;
 	
 static const Signature signatures[] = {
-{"SCSI BIOS 2.00  (C) Copyright 1987 Seagate", 15, 40},
-{"SEAGATE SCSI BIOS ",16, 17},
-{"SEAGATE SCSI BIOS ",17, 17}};
+#ifdef CONFIG_SCSI_SEAGATE
+{"SCSI BIOS 2.00  (C) Copyright 1987 Seagate", 15, 40, SEAGATE},
+
+/*
+	The following two lines are NOT mistakes.  One detects 
+ 	ROM revision 3.0.0, the other 3.2.  Since seagate
+	has only one type of SCSI adapter, and this is not 
+	going to change, the "SEAGATE" and "SCSI" together
+	are probably "good enough"
+*/
+
+{"SEAGATE SCSI BIOS ",16, 17, SEAGATE},
+{"SEAGATE SCSI BIOS ",17, 17, SEAGATE},
+
+/*
+	This is for the Future Domain 88x series.  I've been told that
+	the Seagate controllers are just repackages of these, and seeing
+	early seagate BIOS bearing the Future Domain copyright,
+	I believe it.
+*/
+
+{"FUTURE DOMAIN CORP. (C) 1986-1989 V6.0A7/28/90", 5, 46, FD},
+{"FUTURE DOMAIN CORP. (C) 1986-1990 V6.0105/31/90",5, 47, FD},
+{"FUTURE DOMAIN CORP. (C) 1986-1990 V7.009/18/90", 5, 46, FD},
+#endif
+}
+;
 /*
 	Note that the last signature handles BIOS revisions 3.0.0 and 
 	3.2 - the real ID's are 
@@ -86,107 +119,230 @@ SEAGATE SCSI BIOS REVISION 3.2
 #define NUM_SIGNATURES (sizeof(signatures) / sizeof(Signature))
 #endif
 
+/*
+ * hostno stores the hostnumber, as told to us by the init routine.
+ */
+
+static int hostno = -1;
+static void seagate_reconnect_intr(int);
+
 int seagate_st0x_detect (int hostnum)
 	{
-	#ifndef OVERRIDE
-		int i,j;
-	#endif
+#ifndef OVERRIDE
+	int i,j;
+#endif
+static struct sigaction seagate_sigaction = {
+	&seagate_reconnect_intr,
+	0,
+	SA_INTERRUPT,
+	NULL
+};
 
-	/*
-		First, we try for the manual override.
-	*/
-	#ifdef DEBUG 
-		printk("Autodetecting seagate ST0x\n");
-	#endif
+/*
+ *	First, we try for the manual override.
+ */
+#ifdef DEBUG 
+	printk("Autodetecting seagate ST0x\n");
+#endif
+	
+	if (hostno != -1)
+		{
+		printk ("ERROR : seagate_st0x_detect() called twice.\n");
+		return 0;
+		}
 	
 	base_address = NULL;
-	#ifdef OVERRIDE
-		base_address = (void *) OVERRIDE;	
-		#ifdef DEBUG
-			printk("Base address overridden to %x\n", base_address);
-		#endif
-	#else	
-	/*
-		To detect this card, we simply look for the SEAGATE SCSI
-		from the BIOS version notice in all the possible locations
-		of the ROM's.
-	*/
+#ifdef OVERRIDE
+	base_address = (void *) OVERRIDE;	
+#ifdef DEBUG
+	printk("Base address overridden to %x\n", base_address);
+#endif
+#else	
+/*
+ *	To detect this card, we simply look for the signature
+ *	from the BIOS version notice in all the possible locations
+ *	of the ROM's.  This has a nice sideeffect of not trashing
+ * 	any register locations that might be used by something else.
+ */
 
 	for (i = 0; i < (sizeof (seagate_bases) / sizeof (char  * )); ++i)
 		for (j = 0; !base_address && j < NUM_SIGNATURES; ++j)
 		if (!memcmp ((void *) (seagate_bases[i] +
 		    signatures[j].offset), (void *) signatures[j].signature,
-		    signatures[j].length))
+		    signatures[j].length)) {
 			base_address = (void *) seagate_bases[i];
-       	#endif
+			controller_type = signatures[j].type;
+		}
+ #endif
  
 	if (base_address)
 		{
-		st0x_cr_sr =(void *) (((unsigned char *) base_address) + 0x1a00); 
-		st0x_dr = (void *) (((unsigned char *) base_address )+ 0x1c00);
-		#ifdef DEBUG
-			printk("ST0x detected. Base address = %x, cr = %x, dr = %x\n", base_address, st0x_cr_sr, st0x_dr);
-		#endif
+		st0x_cr_sr =(void *) (((unsigned char *) base_address) + (controller_type == SEAGATE ? 0x1a00 : 0x1c00)); 
+		st0x_dr = (void *) (((unsigned char *) base_address ) + (controller_type == SEAGATE ? 0x1c00 : 0x1e00));
+#ifdef DEBUG
+		printk("ST0x detected. Base address = %x, cr = %x, dr = %x\n", base_address, st0x_cr_sr, st0x_dr);
+#endif
+/*
+ *	At all times, we will use IRQ 5.  
+ */
+		hostno = hostnum;
+		if (irqaction(5, &seagate_sigaction)) {
+			printk("Unable to allocate IRQ5 for ST0x driver\n");
+			return 0;
+		}
 		return -1;
 		}
 	else
 		{
-		#ifdef DEBUG
-			printk("ST0x not detected.\n");
-		#endif
+#ifdef DEBUG
+		printk("ST0x not detected.\n");
+#endif
 		return 0;
 		}
 	}
 	 
-	
-
-char *seagate_st0x_info(void)
+const char *seagate_st0x_info(void)
 {
 	static char buffer[] = "Seagate ST-0X SCSI driver by Drew Eckhardt \n"
-"$Header: /usr/src/linux/kernel/blk_drv/scsi/RCS/seagate.c,v 1.1 1992/04/24 18:01:50 root Exp root $\n";
+"$Header: /usr/src/linux/kernel/blk_drv/scsi/RCS/seagate.c,v 1.1 1992/07/24 06:27:38 root Exp root $\n";
 	return buffer;
 }
 
+/*
+ * These are our saved pointers for the outstanding command that is 
+ * waiting for a reconnect
+ */
 
+static unsigned char current_target, current_lun;
+static unsigned char *current_cmnd, *current_data;
+static int current_bufflen;
+static void (*done_fn)(Scsi_Cmnd *) = NULL;
+static Scsi_Cmnd * SCint = NULL;
 
-int seagate_st0x_command(unsigned char target, const void *cmnd,
-			 void *buff, int bufflen)
+/*
+ * These control whether or not disconnect / reconnect will be attempted,
+ * or are being attempted.
+ */
+
+#define NO_RECONNECT 	0
+#define RECONNECT_NOW 	1
+#define CAN_RECONNECT	2
+
+/*
+ * This determines if we are expecting to reconnect or not.
+ */
+
+static int should_reconnect = 0;
+
+/*
+ * The seagate_reconnect_intr routine is called when a target reselects the 
+ * host adapter.  This occurs on the interrupt triggered by the target 
+ * asserting SEL.
+ */
+
+static void seagate_reconnect_intr (int unused)
+	{
+	int temp;
+
+/* enable all other interrupts. */	
+	sti();
+#if (DEBUG & PHASE_RESELECT)
+	printk("scsi%d : seagate_reconnect_intr() called\n", hostno);
+#endif
+
+	if (!should_reconnect)
+	    printk("scsi%d: unexpected interrupt.\n", hostno);
+	else
+		{
+		should_reconnect = 0;
+
+#if (DEBUG & PHASE_RESELECT)
+		printk("scsi%d : internal_command("
+		       "%d, %08x, %08x, %d, RECONNECT_NOW\n", hostno, 
+			current_target, current_data, current_bufflen);
+#endif
+	
+		temp =  internal_command (current_target, current_lun,
+			current_cmnd, current_data, current_bufflen,
+			RECONNECT_NOW);
+
+		if (msg_byte(temp) != DISCONNECT)
+			{
+			if (done_fn)
+				{
+#if (DEBUG & PHASE_RESELECT)
+				printk("scsi%d : done_fn(%d,%08x)", hostno, 
+				hostno, temp);
+#endif
+				SCint->result = temp;
+				done_fn (SCint);
+				}
+			else
+				printk("done_fn() not defined.\n");
+			}
+		}
+	} 
+
+/* 
+ * The seagate_st0x_queue_command() function provides a queued interface
+ * to the seagate SCSI driver.  Basically, it just passes control onto the
+ * seagate_command() function, after fixing it so that the done_fn()
+ * is set to the one passed to the function.
+ */
+
+int seagate_st0x_queue_command (Scsi_Cmnd * SCpnt,  void (*done)(Scsi_Cmnd *))
+	{
+	int result;
+
+	done_fn = done;
+	current_target = SCpnt->target;
+	current_lun = SCpnt->lun;
+	(const void *) current_cmnd = SCpnt->cmnd;
+	current_data = SCpnt->request_buffer;
+	current_bufflen = SCpnt->request_bufflen;
+	SCint = SCpnt;
+
+	result = internal_command (SCpnt->target, SCpnt->lun, SCpnt->cmnd, SCpnt->request_buffer,
+				   SCpnt->request_bufflen, 
+				   CAN_RECONNECT);
+	if (msg_byte(result) == DISCONNECT)
+		return 0;
+	else 
+		{
+		  SCpnt->result = result;
+		done_fn (SCpnt); 
+		return 1; 
+		}
+	}
+
+int seagate_st0x_command (Scsi_Cmnd * SCpnt)
+	{
+	return internal_command (SCpnt->target, SCpnt->lun, SCpnt->cmnd, SCpnt->request_buffer,
+				 SCpnt->request_bufflen, 
+				 (int) NO_RECONNECT);
+	}
+	
+static int internal_command(unsigned char target, unsigned char lun, const void *cmnd,
+			 void *buff, int bufflen, int reselect)
 	{
 	int len;			
 	unsigned char *data;	
+	int clock;			
+	int temp;
 
-	int clock;			/*
-						We use clock for timeouts, etc.   This replaces the 
-						seagate_st0x_timeout that we had been using.
-					*/
-	#if (DEBUG & PHASE_SELECTION)
-		int temp;
-	#endif
 
-	#if (DEBUG & PHASE_EXIT)
-		 void *retaddr, *realretaddr;
-	#endif
+#if ((DEBUG & PHASE_ETC) || (DEBUG & PRINT_COMMAND) || (DEBUG & PHASE_EXIT))	
+	int i;
+#endif
 
-	#if ((DEBUG & PHASE_ETC) || (DEBUG & PRINT_COMMAND) || (DEBUG & PHASE_EXIT))	
-		int i;
-	#endif
-
-	#if (DEBUG & PHASE_ETC)
-		int phase=0, newphase;
-	#endif
+#if (DEBUG & PHASE_ETC)
+	int phase=0, newphase;
+#endif
 
 	int done = 0;
 	unsigned char status = 0;	
 	unsigned char message = 0;
 	register unsigned char status_read;
-
-	#if (DEBUG & PHASE_EXIT)
-		 __asm__("
-movl 4(%%ebp), %%eax 
-":"=a" (realretaddr):);
-		printk("return address = %08x\n", realretaddr);
-	#endif
-
 
 	len=bufflen;
 	data=(unsigned char *) buff;
@@ -194,73 +350,192 @@ movl 4(%%ebp), %%eax
 	incommand = 0;
 	st0x_aborted = 0;
 
-	#if (DEBUG & PRINT_COMMAND)
-		printk ("seagate_st0x_command, target = %d, command = ", target);
-		for (i = 0; i < COMMAND_SIZE(((unsigned char *)cmnd)[0]); ++i)
-			printk("%02x ",  ((unsigned char *) cmnd)[i]);
-		printk("\n");
-	#endif
+#if (DEBUG & PRINT_COMMAND)
+	printk ("scsi%d : target = %d, command = ", hostno, target);
+	for (i = 0; i < COMMAND_SIZE(((unsigned char *)cmnd)[0]); ++i)
+		printk("%02x ",  ((unsigned char *) cmnd)[i]);
+	printk("\n");
+#endif
+
+#if (DEBUG & PHASE_RESELECT)
+	switch (reselect)
+	{
+	case RECONNECT_NOW :
+		printk("scsi%d : reconnecting\n", hostno);
+		break;
+	case CAN_RECONNECT :
+		printk("scsi%d : allowed to reconnect\n", hostno);
+		break;
+	default :
+		printk("scsi%d : not allowed to reconnect\n", hostno);
+	}
+#endif
 	
-	if (target > 6)
+
+	if (target == (controller_type == SEAGATE ? 7 : 6))
 		return DID_BAD_TARGET;
 
-	
-	#if (DEBUG & PHASE_BUS_FREE)
-		printk ("SCSI PHASE = BUS FREE \n");
-	#endif
+/*
+ *	We work it differently depending on if this is is "the first time,"
+ *	or a reconnect.  If this is a reselct phase, then SEL will 
+ *	be asserted, and we must skip selection / arbitration phases.
+ */
 
-	/*
+	if (reselect == RECONNECT_NOW) 
+		{
+#if (DEBUG & PHASE_RESELECT)
+		printk("scsi%d : phase RESELECT \n", hostno);
+#endif
 
-		BUS FREE PHASE
+/*
+ *	At this point, we should find the logical or of our ID and the original
+ *	target's ID on the BUS, with BSY, SEL, and I/O signals asserted.
+ *
+ *	After ARBITRATION phase is completed, only SEL, BSY, and the 
+ *	target ID are asserted.  A valid initator ID is not on the bus
+ *	until IO is asserted, so we must wait for that.
+ */
+		
+		for (clock = jiffies + 10, temp = 0; (jiffies < clock) &&
+		     !(STATUS & STAT_IO););
+		
+		if (jiffies >= clock)
+			{
+#if (DEBUG & PHASE_RESELECT)
+			printk("scsi%d : RESELECT timed out while waiting for IO .\n",
+				hostno);
+#endif
+			return (DID_BAD_INTR << 16);
+			}
 
-		On entry, we make sure that the BUS is in a BUS FREE
-		phase, by insuring that both BSY and SEL are low for
-		at least one bus settle delay.  The standard requires a
-		minimum of 400 ns, which is 16 clock cycles on a
-		386-40  .
+/* 
+ * 	After I/O is asserted by the target, we can read our ID and its
+ *	ID off of the BUS.
+ */
+ 
+		if (!((temp = DATA) & (controller_type == SEAGATE ? 0x80 : 0x40)))
+			{
+#if (DEBUG & PHASE_RESELECT)
+			printk("scsi%d : detected reconnect request to different target.\n" 
+			       "\tData bus = %d\n", hostno, temp);
+#endif
+			return (DID_BAD_INTR << 16);
+			}
 
-		This doesn't give us much time - so we'll do two several
-		reads to be sure be sure.
-	*/
+		if (!(temp & (1 << current_target)))
+			{
+			printk("scsi%d : Unexpected reselect interrupt.  Data bus = %d\n",
+				hostno, temp);
+			return (DID_BAD_INTR << 16);
+			}
+                data=current_data;      /* WDE add */
+                cmnd=current_cmnd;      /* WDE add */
+                len=current_bufflen;    /* WDE add */
 
-	clock = jiffies + ST0X_BUS_FREE_DELAY;	
+/*
+ * 	We have determined that we have been selected.  At this point, 
+ *	we must respond to the reselection by asserting BSY ourselves
+ */
 
-	while (((STATUS |  STATUS | STATUS) & 
-	         (STAT_BSY | STAT_SEL)) && 
-		 (!st0x_aborted) && (jiffies < clock));
+		CONTROL = (BASE_CMD | CMD_DRVR_ENABLE | CMD_BSY);
 
-	if (jiffies > clock)
-		return retcode(DID_BUS_BUSY);
-	else if (st0x_aborted)
-		return retcode(st0x_aborted);
+/*
+ *	The target will drop SEL, and raise BSY, at which time we must drop
+ *	BSY.
+ */
 
-	/*
-		Bus free has been detected, within BUS settle.  I used to support an arbitration
-		phase - however, on the seagate, this degraded performance by a factor > 10 - so
-	        it is no more.
-	*/
+		for (clock = jiffies + 10; (jiffies < clock) &&  (STATUS & STAT_SEL););
 
-	/*
-		SELECTION PHASE
+		if (jiffies >= clock)
+			{ 
+			CONTROL = (BASE_CMD | CMD_INTR);
+#if (DEBUG & PHASE_RESELECT)
+			printk("scsi%d : RESELECT timed out while waiting for SEL.\n",
+				hostno);
+#endif
+			return (DID_BAD_INTR << 16);				 
+			}
 
-		Now, we select the disk, giving it the SCSI ID at data
-		and a command of PARITY if necessary, plus driver enable,
-		plus raise select signal.
-	*/
+		CONTROL = BASE_CMD;
 
-	#if (DEBUG & PHASE_SELECTION)
-		printk("SCSI PHASE = SELECTION\n");
-	#endif
+/*
+ *	At this point, we have connected with the target and can get 
+ *	on with our lives.
+ */	 
+		}  	
+	else
+ 		{	
+#if (DEBUG & PHASE_BUS_FREE)
+		printk ("scsi%d : phase = BUS FREE \n", hostno);
+#endif
 
-	clock = jiffies + ST0X_SELECTION_DELAY;
-	DATA = (unsigned char) (1 << target);
+/*
+ *	BUS FREE PHASE
+ *
+ * 	On entry, we make sure that the BUS is in a BUS FREE
+ *	phase, by insuring that both BSY and SEL are low for
+ *	at least one bus settle delay.  Several reads help
+ *	eliminate wire glitch.
+ */
 
-	CONTROL =  BASE_CMD | CMD_DRVR_ENABLE | CMD_SEL;
+		clock = jiffies + ST0X_BUS_FREE_DELAY;	
 
-	/*
-		When the SCSI device decides that we're gawking at it, it will respond by asserting BUSY on the bus.
-	*/
-	while (!((status_read = STATUS) & STAT_BSY) && (jiffies < clock) && !st0x_aborted)
+		while (((STATUS |  STATUS | STATUS) & 
+		         (STAT_BSY | STAT_SEL)) && 
+			 (!st0x_aborted) && (jiffies < clock));
+
+		if (jiffies > clock)
+			return retcode(DID_BUS_BUSY);
+		else if (st0x_aborted)
+			return retcode(st0x_aborted);
+
+/*
+ *	Bus free has been detected, within BUS settle.  I used to 
+ *	support an arbitration phase - however, on the Seagate, this 
+ *	degraded performance by a factor > 10 - so it is no more.
+ */
+
+/*
+ *	SELECTION PHASE
+ *
+ *	Now, we select the disk, giving it the SCSI ID at data
+ *	and a command of PARITY if necessary, and we raise SEL.
+ */
+
+#if (DEBUG & PHASE_SELECTION)
+		printk("scsi%d : phase = SELECTION\n", hostno);
+#endif
+
+		clock = jiffies + ST0X_SELECTION_DELAY;
+
+/*
+ *	If we wish to disconnect, we should request a MESSAGE OUT
+ *	at this point.  Technically, ATTN should be raised before 
+ *	SEL = true and BSY = false (from arbitration), but I think this 
+ *	should do.
+ */
+		if (reselect)
+			CONTROL = BASE_CMD | CMD_DRVR_ENABLE |
+				CMD_ATTN;
+		
+/*
+ *	We must assert both our ID and our target's ID on the bus.
+ */
+		DATA = (unsigned char) ((1 << target) | (controller_type == SEAGATE ? 0x80 : 0x40));
+
+/*
+ *	If we are allowing ourselves to reconnect, then I will keep 
+ *	ATTN raised so we get MSG OUT. 
+ */ 
+		CONTROL =  BASE_CMD | CMD_DRVR_ENABLE | CMD_SEL | 
+			(reselect ? CMD_ATTN : 0);
+
+/*
+ *	When the SCSI device decides that we're gawking at it, it will 
+ *	respond by asserting BUSY on the bus.
+ */
+		while (!((status_read = STATUS) & STAT_BSY) && 
+			(jiffies < clock) && !st0x_aborted)
 
 #if (DEBUG & PHASE_SELECTION)
 		{
@@ -271,110 +546,128 @@ movl 4(%%ebp), %%eax
 	
 		}
 		printk("Done.                                             \n\r");
-		printk("Status = %02x, seagate_st0x_timeout = %d, aborted = %02x \n", status_read, temp,
-			st0x_aborted);
+		printk("scsi%d : status = %02x, seagate_st0x_timeout = %d, aborted = %02x \n", 
+			hostno, status_read, temp, st0x_aborted);
 #else
 		;
 #endif
 	
 
-	if ((jiffies > clock)  || (!st0x_aborted & !(status_read & STAT_BSY)))
-		{
-		#if (DEBUG & PHASE_SELECT)
-			printk ("NO CONNECT with target %d, status = %x \n", target, STATUS);
-		#endif
-		return retcode(DID_NO_CONNECT);
+		if ((jiffies > clock)  || (!st0x_aborted && 
+			!(status_read & STAT_BSY)))
+			{
+#if (DEBUG & PHASE_SELECT)
+			printk ("scsi%d : NO CONNECT with target %d, status = %x \n", 
+				hostno, target, STATUS);
+#endif
+			return retcode(DID_NO_CONNECT);
+			}
+
+/*
+ *	If we have been aborted, and we have a command in progress, IE the 
+ *	target still has BSY asserted, then we will reset the bus, and 
+ * 	notify the midlevel driver to expect sense.
+ */
+
+		if (st0x_aborted)
+			{
+			CONTROL = BASE_CMD;
+			if (STATUS & STAT_BSY)
+				{
+				seagate_st0x_reset();
+				return retcode(DID_RESET);
+				}
+			return retcode(st0x_aborted);
+			}	
 		}
 
-	/*
-		If we have been aborted, and we have a command in progress, IE the target still has
-		BSY asserted, then we will reset the bus, and notify the midlevel driver to
-		expect sense.
-	*/
-
-	if (st0x_aborted)
-		{
-		CONTROL = BASE_CMD;
-		if (STATUS & STAT_BSY)
-			{
-			seagate_st0x_reset();
-			return retcode(DID_RESET);
-			}
-		
-		return retcode(st0x_aborted);
-		}	
+	CONTROL = BASE_CMD | CMD_DRVR_ENABLE | 
+		((reselect == CAN_RECONNECT) ? CMD_ATTN : 0) ;
 	
-	/*
-		COMMAND PHASE
-		The device has responded with a BSY, so we may now enter
-		the information transfer phase, where we will send / recieve
-		data and command as directed by the target.
+/*
+ * 	INFORMATION TRANSFER PHASE
+ *
+ *	The nasty looking read / write inline assembler loops we use for 
+ *	DATAIN and DATAOUT phases are approximately 4-5 times as fast as 
+ *	the 'C' versions - since we're moving 1024 bytes of data, this
+ *	really adds up.
+ */
 
-
-		The nasty looking read / write inline assembler loops we use for 
-		DATAIN and DATAOUT phases are approximately 4-5 times as fast as 
-		the 'C' versions - since we're moving 1024 bytes of data, this
-		really adds up.
-	*/
-
-	#if (DEBUG & PHASE_ETC)
-		printk("PHASE = information transfer\n");
-	#endif  
+#if (DEBUG & PHASE_ETC)
+	printk("scsi%d : phase = INFORMATION TRANSFER\n", hostno);
+#endif  
 
 	incommand = 1;
 
-	/*
-		Enable command
-	*/
 
-	CONTROL = BASE_CMD | CMD_DRVR_ENABLE;
-
-	/*
-		Now, we poll the device for status information,
-		and handle any requests it makes.  Note that since we are unsure of 
-		how much data will be flowing across the system, etc and cannot 
-		make reasonable timeouts, that we will instead have the midlevel
-		driver handle any timeouts that occur in this phase.
-	*/
+/*
+ * 	Now, we poll the device for status information,
+ *	and handle any requests it makes.  Note that since we are unsure of 
+ *	how much data will be flowing across the system, etc and cannot 
+ *	make reasonable timeouts, that we will instead have the midlevel
+ * 	driver handle any timeouts that occur in this phase.
+ */
 
 	while (((status_read = STATUS) & STAT_BSY) && !st0x_aborted && !done) 
+		{
+#ifdef PARITY
+		if (status_read & STAT_PARITY)
 			{
-			#ifdef PARITY
-				if (status_read & STAT_PARITY)
-					{
-					done = 1;
-					st0x_aborted = DID_PARITY;
-					}	
-			#endif
+			done = 1;
+			st0x_aborted = DID_PARITY;
+			}	
+#endif
 
-			if (status_read & STAT_REQ)
+		if (status_read & STAT_REQ)
+			{
+#if (DEBUG & PHASE_ETC)
+			if ((newphase = (status_read & REQ_MASK)) != phase)
 				{
-				#if (DEBUG & PHASE_ETC)
-					if ((newphase = (status_read & REQ_MASK)) != phase)
-						{
-						phase = newphase;
-						switch (phase)
-							{
-							case REQ_DATAOUT : printk("SCSI PHASE = DATA OUT\n"); break;
-							case REQ_DATAIN : printk("SCSI PHASE = DATA IN\n"); break;
-							case REQ_CMDOUT : printk("SCSI PHASE = COMMAND OUT\n"); break;
-							case REQ_STATIN : printk("SCSI PHASE = STATUS IN\n"); break;
-							case REQ_MSGOUT : printk("SCSI PHASE = MESSAGE OUT\n"); break;
-							case REQ_MSGIN : printk("SCSI PHASE = MESSAGE IN\n"); break;
-							default : printk("UNKNOWN PHASE"); st0x_aborted = 1; done = 1;
-							}	
-						}
-				#endif
+				phase = newphase;
+				switch (phase)
+				{
+				case REQ_DATAOUT: 
+					printk("scsi%d : phase = DATA OUT\n",
+						hostno); 
+					break;
+				case REQ_DATAIN : 
+					printk("scsi%d : phase = DATA IN\n",
+						hostno); 
+					break;
+				case REQ_CMDOUT : 
+					printk("scsi%d : phase = COMMAND OUT\n",
+						hostno); 
+					break;
+				case REQ_STATIN :
+					 printk("scsi%d : phase = STATUS IN\n",
+						hostno); 
+					break;
+				case REQ_MSGOUT :
+					printk("scsi%d : phase = MESSAGE OUT\n",
+						hostno); 
+					break;
+				case REQ_MSGIN :
+					printk("scsi%d : phase = MESSAGE IN\n",
+						hostno);
+					break;
+				default : 
+					printk("scsi%d : phase = UNKNOWN\n",
+						hostno); 
+					st0x_aborted = 1; 
+					done = 1;
+				}	
+				}
+#endif
 
-				switch (status_read & REQ_MASK)
-					{			
-					case REQ_DATAOUT : 
+		switch (status_read & REQ_MASK)
+		{			
+		case REQ_DATAOUT : 
 
-	/*
-		We loop as long as we are in a data out phase, there is data to send, and BSY is still
-		active
-	*/
-							__asm__ ("
+/*
+ * 	We loop as long as we are in a data out phase, there is data to send, 
+ *	and BSY is still active.
+ */
+		__asm__ (
 
 /*
 	Local variables : 
@@ -385,9 +678,9 @@ movl 4(%%ebp), %%eax
 
 	Test for any data here at all.
 */
-	movl %0, %%esi		/* local value of data */
-	movl %1, %%ecx		/* local value of len */	
-	orl %%ecx, %%ecx
+	"movl %0, %%esi\n"		/* local value of data */
+	"\tmovl %1, %%ecx\n"		/* local value of len */	
+	"\torl %%ecx, %%ecx
 	jz 2f
 
 	cld
@@ -395,23 +688,23 @@ movl 4(%%ebp), %%eax
 	movl _st0x_cr_sr, %%ebx
 	movl _st0x_dr, %%edi
 	
-1:	movb (%%ebx), %%al
+1:	movb (%%ebx), %%al\n"
 /*
 	Test for BSY
 */
 
-	test $1, %%al 
-	jz 2f
+	"\ttest $1, %%al
+	jz 2f\n"
 
 /*
 	Test for data out phase - STATUS & REQ_MASK should be REQ_DATAOUT, which is 0.
 */
-	test $0xe, %%al
-	jnz 2f	
+	"\ttest $0xe, %%al
+	jnz 2f	\n"
 /*
 	Test for REQ
 */	
-	test $0x10, %%al
+	"\ttest $0x10, %%al
 	jz 1b
 	lodsb
 	movb %%al, (%%edi) 
@@ -428,15 +721,15 @@ movl 4(%%ebp), %%eax
 /* clobbered */
 "ebx", "ecx", "edi", "esi"); 
 
-							break;
+			break;
 
-      					case REQ_DATAIN : 
-	/*
-		We loop as long as we are in a data out phase, there is room to read, and BSY is still
-		active
-	*/
+		case REQ_DATAIN : 
+/*
+ * 	We loop as long as we are in a data in phase, there is room to read, 
+ * 	and BSY is still active
+ */
  
-							__asm__ ("
+			__asm__ (
 /*
 	Local variables : 
 	ecx = len
@@ -447,118 +740,199 @@ movl 4(%%ebp), %%eax
 	Test for room to read
 */
 
-	movl %0, %%edi		/* data */
-	movl %1, %%ecx		/* len */
-	orl %%ecx, %%ecx
+	"movl %0, %%edi\n"		/* data */
+	"\tmovl %1, %%ecx\n"		/* len */
+	"\torl %%ecx, %%ecx
 	jz 2f
 
 	cld
 	movl _st0x_cr_sr, %%esi
 	movl _st0x_dr, %%ebx
 
-1:	movb (%%esi), %%al
+1:	movb (%%esi), %%al\n"
 /*
 	Test for BSY
 */
 
-	test $1, %%al 
-	jz 2f
+	"\ttest $1, %%al 
+	jz 2f\n"
 
 /*
 	Test for data in phase - STATUS & REQ_MASK should be REQ_DATAIN, = STAT_IO, which is 4.
 */
-	movb $0xe, %%ah	
+	"\tmovb $0xe, %%ah	
 	andb %%al, %%ah
 	cmpb $0x04, %%ah
-	jne 2f
+	jne 2f\n"
 		
 /*
 	Test for REQ
 */	
-	test $0x10, %%al
+	"\ttest $0x10, %%al
 	jz 1b
 
 	movb (%%ebx), %%al	
 	stosb	
 	loop 1b
 
-2: 	movl %%edi, %2	 	/* data */
-	movl %%ecx, %3 		/* len */
-									":
+2: 	movl %%edi, %2\n"	 	/* data */
+	"\tmovl %%ecx, %3\n" 		/* len */
+									:
 /* output */
 "=r" (data), "=r" (len) :
 /* input */
 "0" (data), "1" (len) :
 /* clobbered */
 "ebx", "ecx", "edi", "esi"); 
-							break;
+			break;
 
-					case REQ_CMDOUT : 
-							while (((status_read = STATUS) & STAT_BSY) && ((status_read & REQ_MASK) ==
-								REQ_CMDOUT))
-								DATA = *(unsigned char *) cmnd ++;
-						break;
+		case REQ_CMDOUT : 
+			while (((status_read = STATUS) & STAT_BSY) && 
+			       ((status_read & REQ_MASK) == REQ_CMDOUT))
+				if (status_read & STAT_REQ)
+					DATA = *(unsigned char *) cmnd ++;
+			break;
 	
-					case REQ_STATIN : 
-						status = DATA;
-						break;
+		case REQ_STATIN : 
+			status = DATA;
+			break;
 				
-					case REQ_MSGOUT : 
-						DATA = MESSAGE_REJECT;
-						break;
-					
-					case REQ_MSGIN : 
-						if ((message = DATA) == COMMAND_COMPLETE)
-							done=1;
-						
-						break;
+		case REQ_MSGOUT : 
+/*
+ *	We can only have sent a MSG OUT if we requested to do this 
+ *	by raising ATTN.  So, we must drop ATTN.
+ */
 
-					default : printk("UNKNOWN PHASE"); st0x_aborted = DID_ERROR; 
-					}	
+			CONTROL = BASE_CMD | CMD_DRVR_ENABLE;
+/*
+ * 	If we are reconecting, then we must send an IDENTIFY message in 
+ *	 response  to MSGOUT.
+ */
+			if (reselect)
+				{
+				DATA = IDENTIFY(1, lun);
+#if (DEBUG & (PHASE_RESELECT | PHASE_MSGOUT)) 
+				printk("scsi%d : sent IDENTIFY message.\n", hostno);
+#endif
 				}
+			else  
+				{
+				DATA = MESSAGE_REJECT;
+				
+#if (DEBUG & PHASE_MSGOUT)
+				printk("scsi%d : sent MESSAGE REJECT message.\n", hostno);
+#endif
+				}
+			break;
+					
+		case REQ_MSGIN : 
+			switch (message = DATA)
+			{
+			case DISCONNECT :
+				should_reconnect = 1;
+                                current_data = data;    /* WDE add */
+                                current_bufflen = len;  /* WDE add */
+#if (DEBUG & (PHASE_RESELECT | PHASE_MSGIN))
+				printk("scsi%d : disconnected.\n", hostno);
+				done=1;
+				break;
+#endif
+			case COMMAND_COMPLETE :
+#if (DEBUG & PHASE_MSGIN)	
+				printk("scsi%d : command complete.\n", hostno);
+				done=1;
+				break;
+#endif
+			case ABORT :
+#if (DEBUG & PHASE_MSGIN)
+				printk("scsi%d : abort message.\n", hostno);
+#endif
+				done=1;
+				break;
+			case SAVE_POINTERS :
+				current_data = data;	/* WDE mod */
+                                current_bufflen = len;  /* WDE add */
+#if (DEBUG & PHASE_MSGIN)
+				printk("scsi%d : pointers saved.\n", hostno);
+#endif 
+				break;
+			case RESTORE_POINTERS:
+				data=current_data;	/* WDE mod */
+				cmnd=current_cmnd;
+#if (DEBUG & PHASE_MSGIN)
+				printk("scsi%d : pointers restored.\n", hostno);
+#endif
+				break;
+			default:
 
-		}
+/*
+ * 	IDENTIFY distinguishes itself from the other messages by setting the
+ *	high byte.
+ */
+
+				if (message & 0x80)
+					{
+#if (DEBUG & PHASE_MSGIN)
+					printk("scsi%d : IDENTIFY message received from id %d, lun %d.\n",
+						hostno, target, message & 7);
+#endif
+					}	
+				else
+					{
+			
+#if (DEBUG & PHASE_MSGIN)
+					printk("scsi%d : unknown message %d from target %d.\n",
+						hostno,  message,   target);
+#endif	
+					}
+			}
+			break;
+
+		default : 
+			printk("scsi%d : unknown phase.\n", hostno); 
+			st0x_aborted = DID_ERROR; 
+		}	
+		} /* while ends */
+		} /* if ends */
 
 #if (DEBUG & (PHASE_DATAIN | PHASE_DATAOUT | PHASE_EXIT))
 	printk("Transfered %d bytes, allowed %d additional bytes\n", (bufflen - len), len);
 #endif
 
 #if (DEBUG & PHASE_EXIT)
-		printk("Buffer : \n");
-		for (i = 0; i < 20; ++i) 
-			printk ("%02x  ", ((unsigned char *) buff)[i]);
-		printk("\n");
-		printk("Status = %02x, message = %02x\n", status, message);
+	printk("Buffer : \n");
+	for (i = 0; i < 20; ++i) 
+		printk ("%02x  ", ((unsigned char *) data)[i]);	/* WDE mod */
+	printk("\n");
+	printk("Status = %02x, message = %02x\n", status, message);
 #endif
 
 	
-		if (st0x_aborted)
+	if (st0x_aborted)
+		{
+		if (STATUS & STAT_BSY)
 			{
-			if (STATUS & STAT_BSY)
-				{
-				seagate_st0x_reset();
-				st0x_aborted = DID_RESET;
-				}
-			abort_confirm = 1;
-			}	
-			
+			seagate_st0x_reset();
+			st0x_aborted = DID_RESET;
+			}
+		abort_confirm = 1;
+		}		
+
+	if (should_reconnect)
+		{
+#if (DEBUG & PHASE_RESELECT)
+		printk("scsi%d : exiting seagate_st0x_queue_command() with reconnect enabled.\n",
+			hostno);
+#endif
+		CONTROL = BASE_CMD | CMD_INTR ;
+		}
+	else
 		CONTROL = BASE_CMD;
 
-#if (DEBUG & PHASE_EXIT)
-	__asm__("
-mov 4(%%ebp), %%eax
-":"=a" (retaddr):);
-
-	printk("Exiting seagate_st0x_command() - return address is %08x \n", retaddr);
-	if (retaddr != realretaddr)
-		panic ("Corrupted stack : return address on entry != return address on exit.\n");
-	
-#endif
-
-		return retcode (st0x_aborted);
+	return retcode (st0x_aborted);
 	}
 
-int seagate_st0x_abort (int code)
+int seagate_st0x_abort (Scsi_Cmnd * SCpnt, int code)
 	{
 	if (code)
 		st0x_aborted = code;
@@ -604,4 +978,6 @@ int seagate_st0x_reset (void)
 #endif
 	return 0;
 	}
+
 #endif	
+

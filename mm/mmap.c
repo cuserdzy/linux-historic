@@ -7,10 +7,12 @@
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/errno.h>
+#include <linux/mman.h>
+#include <linux/string.h>
+
 #include <asm/segment.h>
 #include <asm/system.h>
-#include <errno.h>
-#include <sys/mman.h>
 
 /*
  * description of effects of mapping type and prot in current implementation.
@@ -48,16 +50,16 @@ mmap_chr(unsigned long addr, size_t len, int prot, int flags,
 	minor = MINOR(inode->i_rdev);
 
 	/*
-	 * for character devices, only /dev/mem may be mapped. when the
+	 * for character devices, only /dev/[k]mem may be mapped. when the
 	 * swapping code is modified to allow arbitrary sources of pages,
 	 * then we can open it up to regular files.
 	 */
 
-	if (major != 1 || minor != 1)
+	if (major != 1 || (minor != 1 && minor != 2))
 		return (caddr_t)-ENODEV;
 
 	/*
-	 * we only allow mappings from address 0 to HIGH_MEMORY, since thats
+	 * we only allow mappings from address 0 to high_memory, since thats
 	 * the range of our memory [actually this is a lie. the buffer cache
 	 * and ramdisk occupy higher memory, but the paging stuff won't
 	 * let us map to it anyway, so we break it here].
@@ -71,7 +73,7 @@ mmap_chr(unsigned long addr, size_t len, int prot, int flags,
 	 * truly useful.
 	 */
 
-	if (len > HIGH_MEMORY || off > HIGH_MEMORY - len) /* avoid overflow */
+	if (len > high_memory || off > high_memory - len) /* avoid overflow */
 		return (caddr_t)-ENXIO;
 
 	if (remap_page_range(addr, off, len, PERMISS(flags, prot)))

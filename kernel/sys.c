@@ -1,24 +1,26 @@
 /*
  *  linux/kernel/sys.c
  *
- *  (C) 1991  Linus Torvalds
+ *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
-#include <errno.h>
-
+#include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/tty.h>
 #include <linux/kernel.h>
 #include <linux/config.h>
-#include <asm/segment.h>
-#include <sys/times.h>
+#include <linux/times.h>
 #include <linux/utsname.h>
-#include <sys/param.h>
-#include <sys/resource.h>
+#include <linux/param.h>
+#include <linux/resource.h>
+#include <linux/signal.h>
 #include <linux/string.h>
+#include <linux/ptrace.h>
+
+#include <asm/segment.h>
 
 /*
- * this indicates wether you can reboot with ctrl-alt-del: the deault is yes
+ * this indicates wether you can reboot with ctrl-alt-del: the default is yes
  */
 static int C_A_D = 1;
 
@@ -128,6 +130,77 @@ int sys_prof()
 	return -ENOSYS;
 }
 
+unsigned long save_v86_state(int signr,struct vm86_regs * regs)
+{
+	unsigned long stack;
+
+	if (!current->vm86_info) {
+		printk("no vm86_info: BAD\n");
+		do_exit(SIGSEGV);
+	}
+	memcpy_tofs(&(current->vm86_info->regs),regs,sizeof(*regs));
+	put_fs_long(current->screen_bitmap,&(current->vm86_info->screen_bitmap));
+	stack = current->tss.esp0;
+	current->tss.esp0 = current->saved_kernel_stack;
+	current->saved_kernel_stack = 0;
+	return stack;
+}
+
+static void mark_screen_rdonly(struct task_struct * tsk)
+{
+	unsigned long tmp;
+	unsigned long *pg_table;
+
+	if ((tmp = tsk->tss.cr3) != 0) {
+		tmp = *(unsigned long *) tmp;
+		if (tmp & PAGE_PRESENT) {
+			tmp &= 0xfffff000;
+			pg_table = (0xA0000 >> PAGE_SHIFT) + (unsigned long *) tmp;
+			tmp = 32;
+			while (tmp--) {
+				if (PAGE_PRESENT & *pg_table)
+					*pg_table &= ~PAGE_RW;
+				pg_table++;
+			}
+		}
+	}
+}
+
+int sys_vm86(struct vm86_struct * v86)
+{
+	struct vm86_struct info;
+	struct pt_regs * pt_regs = (struct pt_regs *) &v86;
+
+	if (current->saved_kernel_stack)
+		return -EPERM;
+	memcpy_fromfs(&info,v86,sizeof(info));
+/*
+ * make sure the vm86() system call doesn't try to do anything silly
+ */
+	info.regs.__null_ds = 0;
+	info.regs.__null_es = 0;
+	info.regs.__null_fs = 0;
+	info.regs.__null_gs = 0;
+/*
+ * The eflags register is also special: we cannot trust that the user
+ * has set it up safely, so this makes sure interrupt etc flags are
+ * inherited from protected mode.
+ */
+	info.regs.eflags &= 0x00000dd5;
+	info.regs.eflags |= 0xfffff22a & pt_regs->eflags;
+	info.regs.eflags |= VM_MASK;
+	current->saved_kernel_stack = current->tss.esp0;
+	current->tss.esp0 = (unsigned long) pt_regs;
+	current->vm86_info = v86;
+	current->screen_bitmap = info.screen_bitmap;
+	if (info.flags & VM86_SCREEN_BITMAP)
+		mark_screen_rdonly(current);
+	__asm__ __volatile__("movl %0,%%esp\n\t"
+		"pushl $ret_from_sys_call\n\t"
+		"ret"::"g" ((long) &(info.regs)),"a" (info.regs.eax));
+	return 0;
+}
+
 extern void hard_reset_now(void);
 
 /*
@@ -165,8 +238,7 @@ void ctrl_alt_del(void)
 	if (C_A_D)
 		hard_reset_now();
 	else
-		if (task[1])
-			send_sig(SIGINT,task[1],1);
+		send_sig(SIGINT,task[1],1);
 }
 	
 
@@ -181,23 +253,28 @@ void ctrl_alt_del(void)
  * 100% compatible with BSD.  A program which uses just setgid() will be
  * 100% compatible with POSIX w/ Saved ID's. 
  */
-int sys_setregid(int rgid, int egid)
+int sys_setregid(gid_t rgid, gid_t egid)
 {
-	if (rgid >= 0) {
-		if ((current->gid == rgid) || 
+	int old_rgid = current->gid;
+
+	if (rgid != (gid_t) -1) {
+		if ((current->egid==rgid) ||
+		    (old_rgid == rgid) || 
 		    suser())
 			current->gid = rgid;
 		else
 			return(-EPERM);
 	}
-	if (egid >= 0) {
-		if ((current->gid == egid) ||
+	if (egid != (gid_t) -1) {
+		if ((old_rgid == egid) ||
 		    (current->egid == egid) ||
 		    suser()) {
 			current->egid = egid;
 			current->sgid = egid;
-		} else
+		} else {
+			current->gid = old_rgid;
 			return(-EPERM);
+		}
 	}
 	return 0;
 }
@@ -205,7 +282,7 @@ int sys_setregid(int rgid, int egid)
 /*
  * setgid() is implemeneted like SysV w/ SAVED_IDS 
  */
-int sys_setgid(int gid)
+int sys_setgid(gid_t gid)
 {
 	if (suser())
 		current->gid = current->egid = current->sgid = gid;
@@ -266,11 +343,11 @@ int sys_time(long * tloc)
  * 100% compatible with BSD.  A program which uses just setuid() will be
  * 100% compatible with POSIX w/ Saved ID's. 
  */
-int sys_setreuid(int ruid, int euid)
+int sys_setreuid(uid_t ruid, uid_t euid)
 {
 	int old_ruid = current->uid;
 	
-	if (ruid >= 0) {
+	if (ruid != (uid_t) -1) {
 		if ((current->euid==ruid) ||
 		    (old_ruid == ruid) ||
 		    suser())
@@ -278,7 +355,7 @@ int sys_setreuid(int ruid, int euid)
 		else
 			return(-EPERM);
 	}
-	if (euid >= 0) {
+	if (euid != (uid_t) -1) {
 		if ((old_ruid == euid) ||
 		    (current->euid == euid) ||
 		    suser()) {
@@ -303,7 +380,7 @@ int sys_setreuid(int ruid, int euid)
  * will allow a root program to temporarily drop privileges and be able to
  * regain them by swapping the real and effective uid.  
  */
-int sys_setuid(int uid)
+int sys_setuid(uid_t uid)
 {
 	if (suser())
 		current->uid = current->euid = current->suid = uid;
@@ -352,7 +429,7 @@ int sys_brk(unsigned long end_data_seg)
  * only important on a multi-user system anyway, to make sure one user
  * can't send a signal to a process owned by another.  -TYT, 12/12/91
  */
-int sys_setpgid(int pid, int pgid)
+int sys_setpgid(pid_t pid, pid_t pgid)
 {
 	int i; 
 
@@ -446,16 +523,12 @@ int in_group_p(gid_t grp)
 	return 0;
 }
 
-static struct new_utsname thisname = {
-	UTS_SYSNAME, UTS_NODENAME, UTS_RELEASE, UTS_VERSION, UTS_MACHINE
-};
-
 int sys_newuname(struct new_utsname * name)
 {
 	if (!name)
 		return -EFAULT;
 	verify_area(name, sizeof *name);
-	memcpy_tofs(name,&thisname,sizeof *name);
+	memcpy_tofs(name,&system_utsname,sizeof *name);
 	return 0;
 }
 
@@ -464,15 +537,15 @@ int sys_uname(struct old_utsname * name)
 	if (!name)
 		return -EINVAL;
 	verify_area(name,sizeof *name);
-	memcpy_tofs(&name->sysname,&thisname.sysname,__OLD_UTS_LEN);
+	memcpy_tofs(&name->sysname,&system_utsname.sysname,__OLD_UTS_LEN);
 	put_fs_byte(0,name->sysname+__OLD_UTS_LEN);
-	memcpy_tofs(&name->nodename,&thisname.nodename,__OLD_UTS_LEN);
+	memcpy_tofs(&name->nodename,&system_utsname.nodename,__OLD_UTS_LEN);
 	put_fs_byte(0,name->nodename+__OLD_UTS_LEN);
-	memcpy_tofs(&name->release,&thisname.release,__OLD_UTS_LEN);
+	memcpy_tofs(&name->release,&system_utsname.release,__OLD_UTS_LEN);
 	put_fs_byte(0,name->release+__OLD_UTS_LEN);
-	memcpy_tofs(&name->version,&thisname.version,__OLD_UTS_LEN);
+	memcpy_tofs(&name->version,&system_utsname.version,__OLD_UTS_LEN);
 	put_fs_byte(0,name->version+__OLD_UTS_LEN);
-	memcpy_tofs(&name->machine,&thisname.machine,__OLD_UTS_LEN);
+	memcpy_tofs(&name->machine,&system_utsname.machine,__OLD_UTS_LEN);
 	put_fs_byte(0,name->machine+__OLD_UTS_LEN);
 	return 0;
 }
@@ -489,14 +562,14 @@ int sys_sethostname(char *name, int len)
 	if (len > __NEW_UTS_LEN)
 		return -EINVAL;
 	for (i=0; i < len; i++) {
-		if ((thisname.nodename[i] = get_fs_byte(name+i)) == 0)
+		if ((system_utsname.nodename[i] = get_fs_byte(name+i)) == 0)
 			return 0;
 	}
-	thisname.nodename[i] = 0;
+	system_utsname.nodename[i] = 0;
 	return 0;
 }
 
-int sys_getrlimit(int resource, struct rlimit *rlim)
+int sys_getrlimit(unsigned int resource, struct rlimit *rlim)
 {
 	if (resource >= RLIM_NLIMITS)
 		return -EINVAL;
@@ -508,7 +581,7 @@ int sys_getrlimit(int resource, struct rlimit *rlim)
 	return 0;	
 }
 
-int sys_setrlimit(int resource, struct rlimit *rlim)
+int sys_setrlimit(unsigned int resource, struct rlimit *rlim)
 {
 	struct rlimit new, *old;
 
@@ -533,35 +606,51 @@ int sys_setrlimit(int resource, struct rlimit *rlim)
  * a lot simpler!  (Which we're not doing right now because we're not
  * measuring them yet).
  */
-int sys_getrusage(int who, struct rusage *ru)
+void getrusage(struct task_struct *p, int who, struct rusage *ru)
 {
 	struct rusage r;
 	unsigned long	*lp, *lpend, *dest;
 
-	if (who != RUSAGE_SELF && who != RUSAGE_CHILDREN)
-		return -EINVAL;
 	verify_area(ru, sizeof *ru);
 	memset((char *) &r, 0, sizeof(r));
-	if (who == RUSAGE_SELF) {
-		r.ru_utime.tv_sec = CT_TO_SECS(current->utime);
-		r.ru_utime.tv_usec = CT_TO_USECS(current->utime);
-		r.ru_stime.tv_sec = CT_TO_SECS(current->stime);
-		r.ru_stime.tv_usec = CT_TO_USECS(current->stime);
-		r.ru_minflt = current->min_flt;
-		r.ru_majflt = current->maj_flt;
-	} else {
-		r.ru_utime.tv_sec = CT_TO_SECS(current->cutime);
-		r.ru_utime.tv_usec = CT_TO_USECS(current->cutime);
-		r.ru_stime.tv_sec = CT_TO_SECS(current->cstime);
-		r.ru_stime.tv_usec = CT_TO_USECS(current->cstime);
-		r.ru_minflt = current->cmin_flt;
-		r.ru_majflt = current->cmaj_flt;
+	switch (who) {
+		case RUSAGE_SELF:
+			r.ru_utime.tv_sec = CT_TO_SECS(p->utime);
+			r.ru_utime.tv_usec = CT_TO_USECS(p->utime);
+			r.ru_stime.tv_sec = CT_TO_SECS(p->stime);
+			r.ru_stime.tv_usec = CT_TO_USECS(p->stime);
+			r.ru_minflt = p->min_flt;
+			r.ru_majflt = p->maj_flt;
+			break;
+		case RUSAGE_CHILDREN:
+			r.ru_utime.tv_sec = CT_TO_SECS(p->cutime);
+			r.ru_utime.tv_usec = CT_TO_USECS(p->cutime);
+			r.ru_stime.tv_sec = CT_TO_SECS(p->cstime);
+			r.ru_stime.tv_usec = CT_TO_USECS(p->cstime);
+			r.ru_minflt = p->cmin_flt;
+			r.ru_majflt = p->cmaj_flt;
+			break;
+		default:
+			r.ru_utime.tv_sec = CT_TO_SECS(p->utime + p->cutime);
+			r.ru_utime.tv_usec = CT_TO_USECS(p->utime + p->cutime);
+			r.ru_stime.tv_sec = CT_TO_SECS(p->stime + p->cstime);
+			r.ru_stime.tv_usec = CT_TO_USECS(p->stime + p->cstime);
+			r.ru_minflt = p->min_flt + p->cmin_flt;
+			r.ru_majflt = p->maj_flt + p->cmaj_flt;
+			break;
 	}
 	lp = (unsigned long *) &r;
 	lpend = (unsigned long *) (&r+1);
 	dest = (unsigned long *) ru;
 	for (; lp < lpend; lp++, dest++) 
 		put_fs_long(*lp, dest);
+}
+
+int sys_getrusage(int who, struct rusage *ru)
+{
+	if (who != RUSAGE_SELF && who != RUSAGE_CHILDREN)
+		return -EINVAL;
+	getrusage(current, who, ru);
 	return(0);
 }
 

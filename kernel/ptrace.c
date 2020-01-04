@@ -6,12 +6,11 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
+#include <linux/errno.h>
+#include <linux/ptrace.h>
 
 #include <asm/segment.h>
 #include <asm/system.h>
-
-#include <errno.h>
-#include <sys/ptrace.h>
 
 /*
  * does not yet catch signals sent when the child dies.
@@ -31,15 +30,12 @@
  */
 #define MAGICNUMBER 68
 
-void do_no_page(unsigned long, unsigned long, struct task_struct *, unsigned long);
-void write_verify(unsigned long);
-
 /* change a pid into a task struct. */
 static inline struct task_struct * get_task(int pid)
 {
 	int i;
 
-	for (i = 0; i < NR_TASKS; i++) {
+	for (i = 1; i < NR_TASKS; i++) {
 		if (task[i] != NULL && (task[i]->pid == pid))
 			return task[i];
 	}
@@ -92,7 +88,6 @@ static unsigned long get_long(struct task_struct * tsk,
 {
 	unsigned long page;
 
-	addr += tsk->start_code;
 repeat:
 	page = tsk->tss.cr3 + ((addr >> 20) & 0xffc);
 	page = *(unsigned long *) page;
@@ -121,13 +116,14 @@ static void put_long(struct task_struct * tsk, unsigned long addr,
 {
 	unsigned long page;
 
-	addr += tsk->start_code;
 repeat:
 	page = tsk->tss.cr3 + ((addr >> 20) & 0xffc);
 	page = *(unsigned long *) page;
 	if (page & PAGE_PRESENT) {
 		page &= 0xfffff000;
 		page += (addr >> 10) & 0xffc;
+/* we're bypassing pagetables, so we have to set the dirty bit ourselves */
+		*(unsigned long *) page |= PAGE_DIRTY;
 		page = *((unsigned long *) page);
 	}
 	if (!(page & PAGE_PRESENT)) {
@@ -135,7 +131,7 @@ repeat:
 		goto repeat;
 	}
 	if (!(page & PAGE_RW)) {
-		write_verify(addr);
+		do_wp_page(0,addr,tsk,0);
 		goto repeat;
 	}
 	page &= 0xfffff000;
@@ -233,12 +229,16 @@ int sys_ptrace(long request, long pid, long addr, long data)
 		current->flags |= PF_PTRACED;
 		return 0;
 	}
+	if (pid == 1)		/* you may not mess with init */
+		return -EPERM;
 	if (!(child = get_task(pid)))
 		return -ESRCH;
 	if (request == PTRACE_ATTACH) {
 		long tmp;
 
-		if ((!current->dumpable || (current->uid != child->euid) ||
+		if (child == current)
+			return -EPERM;
+		if ((!child->dumpable || (current->uid != child->euid) ||
 	 	    (current->gid != child->egid)) && !suser())
 			return -EPERM;
 		/* the same process cannot be attached many times */
@@ -308,9 +308,14 @@ int sys_ptrace(long request, long pid, long addr, long data)
 				return -EIO;
 			return 0;
 
+		case PTRACE_SYSCALL: /* continue and stop at next (return from) syscall */
 		case PTRACE_CONT: { /* restart after signal. */
 			long tmp;
 
+			if (request == PTRACE_SYSCALL)
+				child->flags |= PF_TRACESYS;
+			else
+				child->flags &= ~PF_TRACESYS;
 			child->signal = 0;
 			if (data > 0 && data <= NSIG)
 				child->signal = 1<<(data-1);
@@ -340,6 +345,7 @@ int sys_ptrace(long request, long pid, long addr, long data)
 		case PTRACE_SINGLESTEP: {  /* set the trap flag. */
 			long tmp;
 
+			child->flags &= ~PF_TRACESYS;
 			tmp = get_stack_long(child, 4*EFL-MAGICNUMBER) | TRAP_FLAG;
 			put_stack_long(child, 4*EFL-MAGICNUMBER,tmp);
 			child->state = TASK_RUNNING;
@@ -353,7 +359,7 @@ int sys_ptrace(long request, long pid, long addr, long data)
 		case PTRACE_DETACH: { /* detach a process that was attached. */
 			long tmp;
 
-			child->flags &= ~PF_PTRACED;
+			child->flags &= ~(PF_PTRACED|PF_TRACESYS);
 			child->signal=0;
 			child->state = 0;
 			REMOVE_LINKS(child);

@@ -1,28 +1,33 @@
 /*
  *  linux/fs/minix/dir.c
  *
- *  (C) 1991 Linus Torvalds
+ *  Copyright (C) 1991, 1992 Linus Torvalds
  *
  *  minix directory handling functions
  */
 
-#include <errno.h>
-
 #include <asm/segment.h>
 
+#include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/minix_fs.h>
 #include <linux/stat.h>
+
+static int minix_dir_read(struct inode * inode, struct file * filp, char * buf, int count)
+{
+	return -EISDIR;
+}
 
 static int minix_readdir(struct inode *, struct file *, struct dirent *, int);
 
 static struct file_operations minix_dir_operations = {
 	NULL,			/* lseek - default */
-	minix_file_read,	/* read */
+	minix_dir_read,		/* read */
 	NULL,			/* write - bad */
 	minix_readdir,		/* readdir */
 	NULL,			/* select - default */
 	NULL,			/* ioctl - default */
+	NULL,			/* mmap */
 	NULL,			/* no special open code */
 	NULL			/* no special release code */
 };
@@ -43,14 +48,14 @@ struct inode_operations minix_dir_inode_operations = {
 	minix_rename,		/* rename */
 	NULL,			/* readlink */
 	NULL,			/* follow_link */
-	minix_bmap,		/* bmap */
+	NULL,			/* bmap */
 	minix_truncate		/* truncate */
 };
 
 static int minix_readdir(struct inode * inode, struct file * filp,
 	struct dirent * dirent, int count)
 {
-	unsigned int block,offset,i;
+	unsigned int offset,i;
 	char c;
 	struct buffer_head * bh;
 	struct minix_dir_entry * de;
@@ -61,8 +66,8 @@ static int minix_readdir(struct inode * inode, struct file * filp,
 		return -EBADF;
 	while (filp->f_pos < inode->i_size) {
 		offset = filp->f_pos & 1023;
-		block = minix_bmap(inode,(filp->f_pos)>>BLOCK_SIZE_BITS);
-		if (!block || !(bh = bread(inode->i_dev,block))) {
+		bh = minix_bread(inode,(filp->f_pos)>>BLOCK_SIZE_BITS,0);
+		if (!bh) {
 			filp->f_pos += 1024-offset;
 			continue;
 		}
@@ -72,7 +77,7 @@ static int minix_readdir(struct inode * inode, struct file * filp,
 			filp->f_pos += sizeof (struct minix_dir_entry);
 			if (de->inode) {
 				for (i = 0; i < MINIX_NAME_LEN; i++)
-					if (c = de->name[i])
+					if ((c = de->name[i]) != 0)
 						put_fs_byte(c,i+dirent->d_name);
 					else
 						break;

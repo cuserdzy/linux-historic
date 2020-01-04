@@ -43,6 +43,12 @@ start:
 	int	0x15
 	mov	[2],ax
 
+! set the keyboard repeat rate to the max
+
+	mov	ax,#0x0305
+	mov	bx,#0x0000
+	int	0x16
+
 ! check for EGA/VGA and some config parameters
 
 	mov	ah,#0x12
@@ -211,6 +217,22 @@ empty_8042:
 	jnz	empty_8042	! yes - loop
 	ret
 
+getkey:
+	in	al,#0x60	! Quick and dirty...
+	.word	0x00eb,0x00eb		! jmp $+2, jmp $+2
+	mov	bl,al
+	in	al,#0x61
+	.word	0x00eb,0x00eb
+	mov	ah,al
+	or	al,#0x80
+	out	#0x61,al
+	.word	0x00eb,0x00eb
+	mov	al,ah
+	out	#0x61,al
+	.word	0x00eb,0x00eb
+	mov	al,bl
+	ret
+
 ! Routine trying to recognize type of SVGA-board present (if any)
 ! and if it recognize one gives the choices of resolution it offers.
 ! If one is found the resolution chosen is given by al,ah (rows,cols).
@@ -227,7 +249,7 @@ flush:	in	al,#0x60		! Flush the keyboard buffer
 	cmp	al,#0x82
 	jb	nokey
 	jmp	flush
-nokey:	in	al,#0x60
+nokey:	call getkey
 	cmp	al,#0x82
 	jb	nokey
 	cmp	al,#0xe0
@@ -475,7 +497,7 @@ tbl:	pop	bx
 	call	prtstr
 	pop	si
 	add	cl,#0x80
-nonum:	in	al,#0x60	! Quick and dirty...
+nonum:	call	getkey
 	cmp	al,#0x82
 	jb	nonum
 	cmp	al,#0x8b
@@ -498,8 +520,25 @@ nozero:	sub	al,#0x80
 	lodsw
 	pop	ds
 	ret
-novid7:	pop	ds	! Here could be code to support standard 80x50,80x30
-	mov	ax,#0x5019	
+novid7:
+	mov	ax,#0x1112
+	mov	bl,#0
+	int	0x10		! use 8x8 font set (50 lines on VGA)
+
+	mov	ax,#0x1200
+	mov	bl,#0x20
+	int	0x10		! use alternate print screen
+
+	mov	ax,#0x1201
+	mov	bl,#0x34
+	int	0x10		! turn off cursor emulation
+
+	mov	ah,#0x01
+	mov	cx,#0x0607
+	int	0x10		! turn on cursor (scan lines 6 to 7)
+
+	pop	ds
+	mov	ax,#0x5032	! return 80x50
 	ret
 
 ! Routine that 'tabs' to next col.

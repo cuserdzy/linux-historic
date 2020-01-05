@@ -1,4 +1,5 @@
 #ifndef _ASM_BITOPS_H
+#define _ASM_BITOPS_H
 /*
  * Copyright 1992, Linus Torvalds.
  */
@@ -6,40 +7,50 @@
 #ifdef i386
 /*
  * These have to be done with inline assembly: that way the bit-setting
- * is guaranteed to be atomic. Both set_bit and clear_bit return 0
- * if the bit-setting went ok, != 0 if the bit already was set/cleared.
+ * is guaranteed to be atomic. All bitoperations return 0 if the bit
+ * was cleared before the operation and != 0 if it was not.
  *
  * bit 0 is the LSB of addr; bit 32 is the LSB of (addr+1).
  */
-extern inline int set_bit(int nr,int * addr)
-{
-	char ok;
 
-	__asm__ __volatile__("btsl %1,%2\n\tsetb %0":
-		"=q" (ok):"r" (nr),"m" (*(addr)));
-	return ok;
+/*
+ * Some hacks to defeat gcc over-optimizations..
+ */
+struct __dummy { unsigned long a[100]; };
+#define ADDR (*(struct __dummy *) addr)
+
+extern __inline__ int set_bit(int nr, void * addr)
+{
+	int oldbit;
+
+	__asm__ __volatile__("btsl %2,%1\n\tsbbl %0,%0"
+		:"=r" (oldbit),"=m" (ADDR)
+		:"r" (nr));
+	return oldbit;
 }
 
-extern inline int clear_bit(int nr, int * addr)
+extern __inline__ int clear_bit(int nr, void * addr)
 {
-	char ok;
+	int oldbit;
 
-	__asm__ __volatile__("btrl %1,%2\n\tsetnb %0":
-		"=q" (ok):"r" (nr),"m" (*(addr)));
-	return ok;
+	__asm__ __volatile__("btrl %2,%1\n\tsbbl %0,%0"
+		:"=r" (oldbit),"=m" (ADDR)
+		:"r" (nr));
+	return oldbit;
 }
 
 /*
  * This routine doesn't need to be atomic, but it's faster to code it
  * this way.
  */
-extern inline int test_bit(int nr, int * addr)
+extern __inline__ int test_bit(int nr, void * addr)
 {
-	char ok;
+	int oldbit;
 
-	__asm__ __volatile__("btl %1,%2\n\tsetb %0":
-		"=q" (ok):"r" (nr),"m" (*(addr)));
-	return ok;
+	__asm__ __volatile__("btl %2,%1\n\tsbbl %0,%0"
+		:"=r" (oldbit)
+		:"m" (ADDR),"r" (nr));
+	return oldbit;
 }
 
 #else
@@ -58,7 +69,7 @@ extern inline int test_bit(int nr, int * addr)
  * C language equivalents written by Theodore Ts'o, 9/26/92
  */
 
-extern inline int set_bit(int nr,int * addr)
+extern __inline__ int set_bit(int nr,int * addr)
 {
 	int	mask, retval;
 
@@ -71,7 +82,7 @@ extern inline int set_bit(int nr,int * addr)
 	return retval;
 }
 
-extern inline int clear_bit(int nr, int * addr)
+extern __inline__ int clear_bit(int nr, int * addr)
 {
 	int	mask, retval;
 
@@ -84,7 +95,7 @@ extern inline int clear_bit(int nr, int * addr)
 	return retval;
 }
 
-extern inline int test_bit(int nr, int * addr)
+extern __inline__ int test_bit(int nr, int * addr)
 {
 	int	mask;
 

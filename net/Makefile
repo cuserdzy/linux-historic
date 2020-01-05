@@ -8,14 +8,11 @@
 # Note 2! The CFLAGS definition is now in the main makefile...
 
 # only these two lines should need to be changed to remove inet sockets.
-# (and the tcp/tcpip.o in net.o)
+# (and the inet/tcpip.o in net.o)
 
-SUBDIRS = tcp
+SUBDIRS     := unix inet
 
-ifdef CONFIG_TCPIP
-NET_SUBDIRS = tcp
-TCP_ARCHIVE = tcp/tcpip.a
-endif
+SUBOBJS     := $(foreach f,$(SUBDIRS),$f/$f.o)
 
 .c.o:
 	$(CC) $(CFLAGS) -c $<
@@ -24,22 +21,24 @@ endif
 .c.s:
 	$(CC) $(CFLAGS) -S $<
 
-OBJS	=  socket.o unix.o 
+OBJS	=  Space.o ddi.o socket.o
 
-net.o: $(OBJS) subdirs
-	$(LD) -r -o net.o $(OBJS) $(TCP_ARCHIVE)
+all:		subdirs net.o
 
+net.o:		$(OBJS) network.a
+		$(LD) -r -o net.o $(OBJS) network.a
 
-subdirs: dummy
-	for i in $(NET_SUBDIRS); do (cd $$i && echo $$i && $(MAKE)) || exit; done
+network.a:	$(SUBOBJS)
+		rm -f $@
+		ar rc $@ $(SUBOBJS)
+		ranlib $@
 
-clean:
-	rm -f core *.o *.a *.s
-	@for i in $(SUBDIRS); do (cd $$i && echo $$i && $(MAKE) clean) || exit; done
+subdirs:	dummy
+		set -e; for i in $(SUBDIRS); do $(MAKE) -C $$i; done
 
 dep:
-	$(CPP) -M *.c > .depend
-	@for i in $(SUBDIRS); do (cd $$i && echo $$i && $(MAKE) dep) || exit; done
+		$(CPP) -M *.c > .depend
+		set -e; for i in $(SUBDIRS); do $(MAKE) -C $$i dep; done
 
 dummy:
 

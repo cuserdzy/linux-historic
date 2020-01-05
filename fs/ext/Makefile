@@ -15,13 +15,10 @@
 	$(AS) -o $*.o $<
 
 OBJS=	freelists.o truncate.o namei.o inode.o \
-	file.o dir.o symlink.o blkdev.o chrdev.o fifo.o
+	file.o dir.o symlink.o fsync.o
 
 ext.o: $(OBJS)
 	$(LD) -r -o ext.o $(OBJS)
-
-clean:
-	rm -f core *.s *.o *.a
 
 dep:
 	$(CPP) -M *.c > .depend

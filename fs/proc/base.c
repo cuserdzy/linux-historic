@@ -25,7 +25,8 @@ static struct file_operations proc_base_operations = {
 	NULL,			/* ioctl - default */
 	NULL,			/* mmap */
 	NULL,			/* no special open code */
-	NULL			/* no special release code */
+	NULL,			/* no special release code */
+	NULL			/* can't fsync */
 };
 
 /*
@@ -45,7 +46,8 @@ struct inode_operations proc_base_inode_operations = {
 	NULL,			/* readlink */
 	NULL,			/* follow_link */
 	NULL,			/* bmap */
-	NULL			/* truncate */
+	NULL,			/* truncate */
+	NULL			/* permission */
 };
 
 static struct proc_dir_entry base_dir[] = {
@@ -56,11 +58,12 @@ static struct proc_dir_entry base_dir[] = {
 	{ 5,4,"root" },
 	{ 6,3,"exe" },
 	{ 7,2,"fd" },
-	{ 8,3,"lib" },
+	{ 8,4,"mmap" },
 	{ 9,7,"environ" },
 	{ 10,7,"cmdline" },
 	{ 11,4,"stat" },
-	{ 12,5,"statm" }
+	{ 12,5,"statm" },
+	{ 15,4,"maps" }
 };
 
 #define NR_BASE_DIRENTRY ((sizeof (base_dir))/(sizeof (base_dir[0])))
@@ -77,7 +80,7 @@ int proc_match(int len,const char * name,struct proc_dir_entry * de)
 	if (de->namelen != len)
 		return 0;
 	__asm__("cld\n\t"
-		"fs ; repe ; cmpsb\n\t"
+		"repe ; cmpsb\n\t"
 		"setz %%al"
 		:"=a" (same)
 		:"0" (0),"S" ((long) name),"D" ((long) de->name),"c" (len)
@@ -88,8 +91,8 @@ int proc_match(int len,const char * name,struct proc_dir_entry * de)
 static int proc_lookupbase(struct inode * dir,const char * name, int len,
 	struct inode ** result)
 {
-	unsigned int pid;
-	int i, ino;
+	unsigned int pid, ino;
+	int i;
 
 	*result = NULL;
 	if (!dir)

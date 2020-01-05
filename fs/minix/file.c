@@ -17,7 +17,7 @@
 #include <linux/stat.h>
 #include <linux/locks.h>
 
-#define	NBUF	16
+#define	NBUF	32
 
 #define MIN(a,b) (((a)<(b))?(a):(b))
 #define MAX(a,b) (((a)>(b))?(a):(b))
@@ -39,9 +39,10 @@ static struct file_operations minix_file_operations = {
 	NULL,			/* readdir - bad */
 	NULL,			/* select - default */
 	NULL,			/* ioctl - default */
-	NULL,			/* mmap */
+	generic_mmap,  		/* mmap */
 	NULL,			/* no special open is needed */
-	NULL			/* release */
+	NULL,			/* release */
+	minix_sync_file		/* fsync */
 };
 
 struct inode_operations minix_file_inode_operations = {
@@ -58,7 +59,8 @@ struct inode_operations minix_file_inode_operations = {
 	NULL,			/* readlink */
 	NULL,			/* follow_link */
 	minix_bmap,		/* bmap */
-	minix_truncate		/* truncate */
+	minix_truncate,		/* truncate */
+	NULL			/* permission */
 };
 
 static int minix_file_read(struct inode * inode, struct file * filp, char * buf, int count)
@@ -141,6 +143,9 @@ static int minix_file_read(struct inode * inode, struct file * filp, char * buf,
 			if (*bhe) {
 				wait_on_buffer(*bhe);
 				if (!(*bhe)->b_uptodate) {	/* read error? */
+				        brelse(*bhe);
+					if (++bhe == &buflist[NBUF])
+					  bhe = buflist;
 					left = 0;
 					break;
 				}
@@ -175,10 +180,8 @@ static int minix_file_read(struct inode * inode, struct file * filp, char * buf,
 	if (!read)
 		return -EIO;
 	filp->f_reada = 1;
-	if (!IS_RDONLY(inode)) {
+	if (!IS_RDONLY(inode))
 		inode->i_atime = CURRENT_TIME;
-		inode->i_dirt = 1;
-	}
 	return read;
 }
 
@@ -239,8 +242,7 @@ static int minix_file_write(struct inode * inode, struct file * filp, char * buf
 		bh->b_dirt = 1;
 		brelse(bh);
 	}
-	inode->i_mtime = CURRENT_TIME;
-	inode->i_ctime = CURRENT_TIME;
+	inode->i_mtime = inode->i_ctime = CURRENT_TIME;
 	filp->f_pos = pos;
 	inode->i_dirt = 1;
 	return written;

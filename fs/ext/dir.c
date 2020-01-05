@@ -36,7 +36,8 @@ static struct file_operations ext_dir_operations = {
 	NULL,			/* ioctl - default */
 	NULL,			/* mmap */
 	NULL,			/* no special open code */
-	NULL			/* no special release code */
+	NULL,			/* no special release code */
+	file_fsync		/* fsync */
 };
 
 /*
@@ -56,7 +57,8 @@ struct inode_operations ext_dir_inode_operations = {
 	NULL,			/* readlink */
 	NULL,			/* follow_link */
 	NULL,			/* bmap */
-	ext_truncate		/* truncate */
+	ext_truncate,		/* truncate */
+	NULL			/* permission */
 };
 
 static int ext_readdir(struct inode * inode, struct file * filp,

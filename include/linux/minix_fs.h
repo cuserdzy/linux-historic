@@ -12,16 +12,20 @@
  * it.
  */
 
-#define MINIX_NAME_LEN 14
 #define MINIX_ROOT_INO 1
+
+/* Not the same as the bogus LINK_MAX in <linux/limits.h>. Oh well. */
+#define MINIX_LINK_MAX	250
 
 #define MINIX_I_MAP_SLOTS	8
 #define MINIX_Z_MAP_SLOTS	8
-#define MINIX_SUPER_MAGIC	0x137F
-#define NEW_MINIX_SUPER_MAGIC	0x2468
+#define MINIX_SUPER_MAGIC	0x137F		/* original minix fs */
+#define MINIX_SUPER_MAGIC2	0x138F		/* minix fs, 30 char names */
+#define NEW_MINIX_SUPER_MAGIC	0x2468		/* minix V2 - not implemented */
+#define MINIX_VALID_FS		0x0001		/* Clean fs. */
+#define MINIX_ERROR_FS		0x0002		/* fs has errors. */
 
 #define MINIX_INODES_PER_BLOCK ((BLOCK_SIZE)/(sizeof (struct minix_inode)))
-#define MINIX_DIR_ENTRIES_PER_BLOCK ((BLOCK_SIZE)/(sizeof (struct minix_dir_entry)))
 
 struct minix_inode {
 	unsigned short i_mode;
@@ -63,11 +67,12 @@ struct minix_super_block {
 	unsigned short s_log_zone_size;
 	unsigned long s_max_size;
 	unsigned short s_magic;
+	unsigned short s_state;
 };
 
 struct minix_dir_entry {
 	unsigned short inode;
-	char name[MINIX_NAME_LEN];
+	char name[0];
 };
 
 extern int minix_lookup(struct inode * dir,const char * name, int len,
@@ -97,20 +102,18 @@ extern struct buffer_head * minix_bread(struct inode *, int, int);
 
 extern void minix_truncate(struct inode *);
 extern void minix_put_super(struct super_block *);
-extern struct super_block *minix_read_super(struct super_block *,void *);
+extern struct super_block *minix_read_super(struct super_block *,void *,int);
+extern void minix_write_super(struct super_block *);
+extern int minix_remount (struct super_block * sb, int * flags, char * data);
 extern void minix_read_inode(struct inode *);
 extern void minix_write_inode(struct inode *);
 extern void minix_put_inode(struct inode *);
 extern void minix_statfs(struct super_block *, struct statfs *);
+extern int minix_sync_inode(struct inode *);
+extern int minix_sync_file(struct inode *, struct file *);
 
 extern struct inode_operations minix_file_inode_operations;
 extern struct inode_operations minix_dir_inode_operations;
 extern struct inode_operations minix_symlink_inode_operations;
-extern struct inode_operations minix_chrdev_inode_operations;
-extern struct inode_operations minix_blkdev_inode_operations;
-extern struct inode_operations minix_fifo_inode_operations;
-
-extern struct file_operations minix_file_operations;
-extern struct file_operations minix_dir_operations;
 
 #endif

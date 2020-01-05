@@ -82,7 +82,7 @@ void flush_output(struct tty_struct * tty)
 	}
 }
 
-void wait_until_sent(struct tty_struct * tty)
+void wait_until_sent(struct tty_struct * tty, int timeout)
 {
 	struct wait_queue wait = { current, NULL };
 
@@ -91,7 +91,11 @@ void wait_until_sent(struct tty_struct * tty)
 		return;
 	add_wait_queue(&tty->write_q.proc_list, &wait);
 	current->counter = 0;	/* make us low-priority */
-	while (1) {
+	if (timeout)
+		current->timeout = timeout + jiffies;
+	else
+		current->timeout = (unsigned) -1;
+	do {
 		current->state = TASK_INTERRUPTIBLE;
 		if (current->signal & ~current->blocked)
 			break;
@@ -99,7 +103,7 @@ void wait_until_sent(struct tty_struct * tty)
 		if (EMPTY(&tty->write_q))
 			break;
 		schedule();
-	}
+	} while (current->timeout);
 	current->state = TASK_RUNNING;
 	remove_wait_queue(&tty->write_q.proc_list, &wait);
 }
@@ -297,7 +301,7 @@ static int tty_set_ldisc(struct tty_struct *tty, int ldisc)
 		return 0;	/* We are already in the desired discipline */
 
 	/* Shutdown the current discipline. */
-	wait_until_sent(tty);
+	wait_until_sent(tty, 0);
 	flush_input(tty);
 	if (ldiscs[tty->disc].close)
 		ldiscs[tty->disc].close(tty);
@@ -379,7 +383,7 @@ int tty_ioctl(struct inode * inode, struct file * file,
 			if (cmd == TCSETSF || cmd == TCSETSW) {
 				if (cmd == TCSETSF)
 					flush_input(termios_tty);
-				wait_until_sent(termios_tty);
+				wait_until_sent(termios_tty, 0);
 			}
 			return set_termios(termios_tty, (struct termios *) arg,
 					   termios_dev);
@@ -394,7 +398,7 @@ int tty_ioctl(struct inode * inode, struct file * file,
 			if (cmd == TCSETAF || cmd == TCSETAW) {
 				if (cmd == TCSETAF)
 					flush_input(termios_tty);
-				wait_until_sent(termios_tty);
+				wait_until_sent(termios_tty, 0);
 			}
 			return set_termio(termios_tty, (struct termio *) arg,
 					  termios_dev);
@@ -483,6 +487,8 @@ int tty_ioctl(struct inode * inode, struct file * file,
 					     sizeof (pid_t));
 			if (retval)
 				return retval;
+			if (current->tty != termios_dev)
+				return -ENOTTY;
 			put_fs_long(termios_tty->pgrp, (pid_t *) arg);
 			return 0;
 		case TIOCSPGRP:
@@ -522,7 +528,10 @@ int tty_ioctl(struct inode * inode, struct file * file,
 			return 0;
 		case TIOCSTI:
 			if ((current->tty != dev) && !suser())
-				return -EACCES;
+				return -EPERM;
+			retval = verify_area(VERIFY_READ, (void *) arg, 1);
+			if (retval)
+				return retval;
 			put_tty_queue(get_fs_byte((char *) arg), &tty->read_q);
 			TTY_READ_FLUSH(tty);
 			return 0;
@@ -550,6 +559,9 @@ int tty_ioctl(struct inode * inode, struct file * file,
 					return set_selection(arg);
 				case 3:
 					return paste_selection(tty);
+				case 4:
+					unblank_screen();
+					return 0;
 #endif /* CONFIG_SELECTION */
 				default: 
 					return -EINVAL;
@@ -570,7 +582,7 @@ int tty_ioctl(struct inode * inode, struct file * file,
 			else if (IS_A_PTY_SLAVE(dev))
 				redirect = tty;
 			else
-				return -EINVAL;
+				return -ENOTTY;
 			return 0;
 		case FIONBIO:
 			arg = get_fs_long((unsigned long *) arg);
@@ -580,8 +592,8 @@ int tty_ioctl(struct inode * inode, struct file * file,
 				file->f_flags &= ~O_NONBLOCK;
 			return 0;
 		case TIOCNOTTY:
-			if (MINOR(file->f_rdev) != current->tty)
-				return -EINVAL;
+			if (current->tty != dev)
+				return -ENOTTY;
 			if (current->leader)
 				disassociate_ctty(0);
 			current->tty = -1;
@@ -619,7 +631,7 @@ int tty_ioctl(struct inode * inode, struct file * file,
 			return 0;
 		case TIOCPKT:
 			if (!IS_A_PTY_MASTER(dev))
-				return -EINVAL;
+				return -ENOTTY;
 			retval = verify_area(VERIFY_READ, (void *) arg,
 					     sizeof (unsigned long));
 			if (retval)
@@ -627,7 +639,7 @@ int tty_ioctl(struct inode * inode, struct file * file,
 			if (get_fs_long(arg)) {
 				if (!tty->packet) {
 					tty->packet = 1;
-					tty->ctrl_status = 0;
+					tty->link->ctrl_status = 0;
 				}
 			} else
 				tty->packet = 0;
@@ -636,7 +648,7 @@ int tty_ioctl(struct inode * inode, struct file * file,
 			retval = check_change(tty, dev);
 			if (retval)
 				return retval;
-			wait_until_sent(tty);
+			wait_until_sent(tty, 0);
 			if (!tty->ioctl)
 				return 0;
 			tty->ioctl(tty, file, cmd, arg);

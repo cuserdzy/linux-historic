@@ -259,8 +259,10 @@ void do_tty_hangup(struct tty_struct * tty, struct file_operations *fops)
 	flush_input(tty);
 	flush_output(tty);
 	wake_up_interruptible(&tty->secondary.proc_list);
-	if (tty->session > 0)
+	if (tty->session > 0) {
 		kill_sl(tty->session,SIGHUP,1);
+		kill_sl(tty->session,SIGCONT,1);
+	}
 	tty->session = 0;
 	tty->pgrp = -1;
  	for_each_task(p) {
@@ -297,7 +299,7 @@ int tty_hung_up_p(struct file * filp)
  * it wants to dissassociate itself from its controlling tty.
  *
  * It performs the following functions:
- * 	(1)  Sends a SIGHUP to the foreground process group
+ * 	(1)  Sends a SIGHUP and SIGCONT to the foreground process group
  * 	(2)  Clears the tty from being controlling the session
  * 	(3)  Clears the controlling tty for all processes in the
  * 		session group.
@@ -310,8 +312,10 @@ void disassociate_ctty(int priv)
 	if (current->tty >= 0) {
 		tty = tty_table[current->tty];
 		if (tty) {
-			if (tty->pgrp > 0)
+			if (tty->pgrp > 0) {
 				kill_pg(tty->pgrp, SIGHUP, priv);
+				kill_pg(tty->pgrp, SIGCONT, priv);
+			}
 			tty->session = 0;
 			tty->pgrp = -1;
 		} else
@@ -926,10 +930,7 @@ int is_ignored(int sig)
 static inline int input_available_p(struct tty_struct *tty)
 {
 	/* Avoid calling TTY_READ_FLUSH unnecessarily. */
-	if (L_ICANON(tty)) {
-		if (tty->canon_data || FULL(&tty->read_q))
-			return 1;
-	} else if (!EMPTY(&tty->secondary))
+	if (L_ICANON(tty) ? tty->canon_data : !EMPTY(&tty->secondary))
 		return 1;
 
 	/* Shuffle any pending data down the queues. */
@@ -937,10 +938,7 @@ static inline int input_available_p(struct tty_struct *tty)
 	if (tty->link)
 		TTY_WRITE_FLUSH(tty->link);
 
-	if (L_ICANON(tty)) {
-		if (tty->canon_data || FULL(&tty->read_q))
-			return 1;
-	} else if (!EMPTY(&tty->secondary))
+	if (L_ICANON(tty) ? tty->canon_data : !EMPTY(&tty->secondary))
 		return 1;
 	return 0;
 }
@@ -953,6 +951,24 @@ static int read_chan(struct tty_struct *tty, struct file *file,
 	unsigned char *b = buf;
 	int minimum, time;
 	int retval = 0;
+
+	/* Job control check -- must be done at start and after
+	   every sleep (POSIX.1 7.1.1.4). */
+	/* NOTE: not yet done after every sleep pending a thorough
+	   check of the logic of this change. -- jlc */
+	/* don't stop on /dev/console */
+	if (file->f_inode->i_rdev != CONSOLE_DEV &&
+	    current->tty == tty->line) {
+		if (tty->pgrp <= 0)
+			printk("read_chan: tty->pgrp <= 0!\n");
+		else if (current->pgrp != tty->pgrp) {
+			if (is_ignored(SIGTTIN) ||
+			    is_orphaned_pgrp(current->pgrp))
+				return -EIO;
+			kill_pg(current->pgrp, SIGTTIN, 1);
+			return -ERESTARTSYS;
+		}
+	}
 
 	if (L_ICANON(tty)) {
 		minimum = time = 0;
@@ -974,24 +990,6 @@ static int read_chan(struct tty_struct *tty, struct file *file,
 
 	add_wait_queue(&tty->secondary.proc_list, &wait);
 	while (1) {
-		/* Job control check -- must be done at start and after
-		   every sleep (POSIX.1 7.1.1.4). */
-		/* don't stop on /dev/console */
-		if (file->f_inode->i_rdev != CONSOLE_DEV &&
-		    current->tty == tty->line) {
-			if (tty->pgrp <= 0)
-				printk("read_chan: tty->pgrp <= 0!\n");
-			else if (current->pgrp != tty->pgrp) {
-				if (is_ignored(SIGTTIN) ||
-				    is_orphaned_pgrp(current->pgrp)) {
-					retval = -EIO;
-					break;
-				}
-				kill_pg(current->pgrp, SIGTTIN, 1);
-				retval = -ERESTARTSYS;
-				break;
-			}
-		}
 		/* First test for status change. */
 		if (tty->packet && tty->link->ctrl_status) {
 			if (b != buf)
@@ -1032,7 +1030,7 @@ static int read_chan(struct tty_struct *tty, struct file *file,
 			nr--;
 		}
 
-		while (nr > 0) {
+		while (1) {
 			int eol;
 
 			cli();
@@ -1043,6 +1041,24 @@ static int read_chan(struct tty_struct *tty, struct file *file,
 			eol = clear_bit(tty->secondary.tail,
 					&tty->secondary_flags);
 			c = tty->secondary.buf[tty->secondary.tail];
+			if (!nr) {
+				/* Gobble up an immediately following EOF if
+				   there is no more room in buf (this can
+				   happen if the user "pushes" some characters
+				   using ^D).  This prevents the next read()
+				   from falsely returning EOF. */
+				if (eol) {
+					if (c == __DISABLED_CHAR) {
+						tty->canon_data--;
+						INC(tty->secondary.tail);
+					} else {
+						set_bit(tty->secondary.tail,
+							&tty->secondary_flags);
+					}
+				}
+				sti();
+				break;
+			}
 			INC(tty->secondary.tail);
 			sti();
 			if (eol) {
@@ -1063,10 +1079,9 @@ static int read_chan(struct tty_struct *tty, struct file *file,
 		/* If there is enough space in the secondary queue now, let the
 		   low-level driver know. */
 		if (tty->throttle && (LEFT(&tty->secondary) >= SQ_THRESHOLD_HW)
-		    && !clear_bit(TTY_SQ_THROTTLED, &tty->flags))
+		    && clear_bit(TTY_SQ_THROTTLED, &tty->flags))
 			tty->throttle(tty, TTY_THROTTLE_SQ_AVAIL);
 
-		/* XXX packet mode's status byte is mistakenly counted */
 		if (b - buf >= minimum || !nr)
 			break;
 		if (time)
@@ -1117,6 +1132,10 @@ static int write_chan(struct tty_struct * tty, struct file * file,
 			break;
 		if (EMPTY(&tty->write_q) && !need_resched)
 			continue;
+		if (file->f_flags & O_NONBLOCK) {
+			retval = -EAGAIN;
+			break;
+		}
 		schedule();
 	}
 	current->state = TASK_RUNNING;
@@ -1590,7 +1609,7 @@ static int normal_select(struct tty_struct * tty, struct inode * inode,
 			select_wait(&tty->secondary.proc_list, wait);
 			return 0;
 		case SEL_OUT:
-			if (!FULL(&tty->write_q))
+			if (LEFT(&tty->write_q) > WAKEUP_CHARS)
 				return 1;
 			select_wait(&tty->write_q.proc_list, wait);
 			return 0;

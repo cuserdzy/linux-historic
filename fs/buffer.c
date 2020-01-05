@@ -484,17 +484,15 @@ repeat:
 #endif
 	}
 
-	if (!bh && nr_free_pages > 5) {
-		if (grow_buffers(GFP_BUFFER, size))
-			goto repeat;
-	}
-	
-/* and repeat until we find something good */
 	if (!bh) {
+		if (nr_free_pages > 5)
+			if (grow_buffers(GFP_BUFFER, size))
+				goto repeat;
 		if (!grow_buffers(GFP_ATOMIC, size))
 			sleep_on(&buffer_wait);
 		goto repeat;
 	}
+
 	wait_on_buffer(bh);
 	if (bh->b_count || bh->b_size != size)
 		goto repeat;
@@ -750,16 +748,14 @@ static unsigned long try_to_load_aligned(unsigned long address,
 	bh = create_buffers(address, size);
 	if (!bh)
 		return 0;
+	/* do any of the buffers already exist? punt if so.. */
 	p = b;
 	for (offset = 0 ; offset < PAGE_SIZE ; offset += size) {
 		block = *(p++);
 		if (!block)
 			goto not_aligned;
-		tmp = get_hash_table(dev, block, size);
-		if (tmp) {
-			brelse(tmp);
+		if (find_buffer(dev, block, size))
 			goto not_aligned;
-		}
 	}
 	tmp = bh;
 	p = b;
@@ -920,7 +916,7 @@ static int try_to_free(struct buffer_head * bh, struct buffer_head ** bhp)
 	do {
 		if (!tmp)
 			return 0;
-		if (tmp->b_count || tmp->b_dirt || tmp->b_lock)
+		if (tmp->b_count || tmp->b_dirt || tmp->b_lock || tmp->b_wait)
 			return 0;
 		tmp = tmp->b_this_page;
 	} while (tmp != bh);
@@ -956,7 +952,13 @@ int shrink_buffers(unsigned int priority)
 	bh = free_list;
 	i = nr_buffers >> priority;
 	for ( ; i-- > 0 ; bh = bh->b_next_free) {
-		if (bh->b_count || !bh->b_this_page)
+		if (bh->b_count ||
+		    (priority >= 5 &&
+		     mem_map[MAP_NR((unsigned long) bh->b_data)] > 1)) {
+			put_last_free(bh);
+			continue;
+		}
+		if (!bh->b_this_page)
 			continue;
 		if (bh->b_lock)
 			if (priority)
@@ -973,6 +975,29 @@ int shrink_buffers(unsigned int priority)
 			return 1;
 	}
 	return 0;
+}
+
+void show_buffers(void)
+{
+	struct buffer_head * bh;
+	int found = 0, locked = 0, dirty = 0, used = 0, lastused = 0;
+
+	printk("Buffer memory:   %6dkB\n",buffermem>>10);
+	printk("Buffer heads:    %6d\n",nr_buffer_heads);
+	printk("Buffer blocks:   %6d\n",nr_buffers);
+	bh = free_list;
+	do {
+		found++;
+		if (bh->b_lock)
+			locked++;
+		if (bh->b_dirt)
+			dirty++;
+		if (bh->b_count)
+			used++, lastused = found;
+		bh = bh->b_next_free;
+	} while (bh != free_list);
+	printk("Buffer mem: %d buffers, %d used (last=%d), %d locked, %d dirty\n",
+		found, used, lastused, locked, dirty);
 }
 
 /*

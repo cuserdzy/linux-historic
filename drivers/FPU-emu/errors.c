@@ -84,16 +84,32 @@ void emu_printall()
 
   RE_ENTRANT_CHECK_OFF;
   /* No need to verify_area(), we have previously fetched these bytes. */
-  printk("At %p: ", (void *) address);
-  while ( 1 )
+  printk("At %p:", (void *) address);
+#define MAX_PRINTED_BYTES 20
+  for ( i = 0; i < MAX_PRINTED_BYTES; i++ )
     {
       byte1 = get_fs_byte((unsigned char *) address);
-      if ( (byte1 & 0xf8) == 0xd8 ) break;
-      printk("[%02x]", byte1);
+      if ( (byte1 & 0xf8) == 0xd8 )
+	{
+	  printk(" %02x", byte1);
+	  break;
+	}
+      printk(" [%02x]", byte1);
       address++;
     }
-  printk("%02x ", byte1);
-  FPU_modrm = get_fs_byte(1 + (unsigned char *) address);
+  if ( i == MAX_PRINTED_BYTES )
+    printk(" [more..]\n");
+  else
+    {
+      FPU_modrm = get_fs_byte(1 + (unsigned char *) address);
+
+      if (FPU_modrm >= 0300)
+	printk(" %02x (%02x+%d)\n", FPU_modrm, FPU_modrm & 0xf8, FPU_modrm & 7);
+      else
+	printk(" /%d, mod=%d rm=%d\n",
+	       (FPU_modrm >> 3) & 7, (FPU_modrm >> 6) & 3, FPU_modrm & 7);
+    }
+
   partial_status = status_word();
 
 #ifdef DEBUGGING
@@ -111,12 +127,6 @@ if ( partial_status & SW_Zero_Div )    printk("SW: divide by zero\n");
 if ( partial_status & SW_Denorm_Op )   printk("SW: denormalized operand\n");
 if ( partial_status & SW_Invalid )     printk("SW: invalid operation\n");
 #endif DEBUGGING
-
-  if (FPU_modrm >= 0300)
-    printk("%02x (%02x+%d)\n", FPU_modrm, FPU_modrm & 0xf8, FPU_modrm & 7);
-  else
-    printk("/%d, mod=%d rm=%d\n",
-	   (FPU_modrm >> 3) & 7, (FPU_modrm >> 6) & 3, FPU_modrm & 7);
 
   printk(" SW: b=%d st=%ld es=%d sf=%d cc=%d%d%d%d ef=%d%d%d%d%d%d\n",
 	 partial_status & 0x8000 ? 1 : 0,   /* busy */
@@ -234,8 +244,9 @@ static struct {
 	      0x126  in fpu_entry.c
 	      0x127  in poly_2xm1.c
 	      0x128  in fpu_entry.c
+	      0x130  in get_address.c
        0x2nn  in an *.S file:
-              0x201  in reg_u_add.S, reg_round.S
+              0x201  in reg_u_add.S
               0x202  in reg_u_div.S
               0x203  in reg_u_div.S
               0x204  in reg_u_div.S
@@ -250,11 +261,15 @@ static struct {
 	      0x213  in wm_sqrt.S
 	      0x214  in wm_sqrt.S
 	      0x215  in wm_sqrt.S
-	      0x216  in reg_round.S
-	      0x217  in reg_round.S
-	      0x218  in reg_round.S
 	      0x220  in reg_norm.S
 	      0x221  in reg_norm.S
+	      0x230  in reg_round.S
+	      0x231  in reg_round.S
+	      0x232  in reg_round.S
+	      0x233  in reg_round.S
+	      0x234  in reg_round.S
+	      0x235  in reg_round.S
+	      0x236  in reg_round.S
  */
 
 void exception(int n)
@@ -307,11 +322,11 @@ void exception(int n)
 #endif PRINT_MESSAGES
 	}
       else
-	printk("FP emulator: Unknown Exception: 0x%04x!\n", n);
+	printk("FPU emulator: Unknown Exception: 0x%04x!\n", n);
       
       if ( n == EX_INTERNAL )
 	{
-	  printk("FP emulator: Internal error type 0x%04x\n", int_type);
+	  printk("FPU emulator: Internal error type 0x%04x\n", int_type);
 	  emu_printall();
 	}
 #ifdef PRINT_MESSAGES

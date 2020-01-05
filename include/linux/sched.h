@@ -166,7 +166,7 @@ struct tss_struct {
 
 struct task_struct {
 /* these are hardcoded - don't touch */
-	long state;		/* -1 unrunnable, 0 runnable, >0 stopped */
+	volatile long state;	/* -1 unrunnable, 0 runnable, >0 stopped */
 	long counter;
 	long priority;
 	unsigned long signal;
@@ -183,6 +183,7 @@ struct task_struct {
 	int elf_executable:1;
 	int dumpable:1;
 	int swappable:1;
+	int did_exec:1;
 	unsigned long start_code,end_code,end_data,start_brk,brk,start_stack,start_mmap;
 	unsigned long arg_start, arg_end, env_start, env_end;
 	int pid,pgrp,session,leader;
@@ -263,7 +264,7 @@ struct task_struct {
 /* schedlink */	&init_task,&init_task, \
 /* signals */	{{ 0, },}, \
 /* stack */	0,(unsigned long) &init_kernel_stack, \
-/* ec,brk... */	0,0,0,0,0,0,0,0,0,0,0,0, \
+/* ec,brk... */	0,0,0,0,0,0,0,0,0,0,0,0,0, \
 /* argv.. */	0,0,0,0, \
 /* pid etc.. */	0,0,0,0, \
 /* suppl grps*/ {NOGROUP,}, \
@@ -302,6 +303,8 @@ extern struct task_struct *task[NR_TASKS];
 extern struct task_struct *last_task_used_math;
 extern struct task_struct *current;
 extern unsigned long volatile jiffies;
+extern unsigned long itimer_ticks;
+extern unsigned long itimer_next;
 extern struct timeval xtime;
 extern int need_resched;
 
@@ -478,6 +481,21 @@ extern inline void select_wait(struct wait_queue ** wait_address, select_table *
 	add_wait_queue(wait_address,&entry->wait);
 	p->nr++;
 }
+
+extern void __down(struct semaphore * sem);
+
+extern inline void down(struct semaphore * sem)
+{
+	if (sem->count <= 0)
+		__down(sem);
+	sem->count--;
+}
+
+extern inline void up(struct semaphore * sem)
+{
+	sem->count++;
+	wake_up(&sem->wait);
+}	
 
 static inline unsigned long _get_base(char * addr)
 {

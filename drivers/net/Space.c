@@ -139,18 +139,15 @@ static struct device atp_dev = {
 #endif
 
 /* The first device defaults to I/O base '0', which means autoprobe. */
-#ifdef EI8390
-# define ETH0_ADDR EI8390
-#else
+#ifndef ETH0_ADDR
 # define ETH0_ADDR 0
 #endif
-#ifdef EI8390_IRQ
-# define ETH0_IRQ EI8390_IRQ
-#else
+#ifndef ETH0_IRQ
 # define ETH0_IRQ 0
 #endif
-/* "eth0" defaults to autoprobe, other use a base of "-0x20", "don't probe".
-   Enable these with boot-time setup. 0.99pl13+ can optionally autoprobe. */
+/* "eth0" defaults to autoprobe (== 0), other use a base of 0xffe0 (== -0x20),
+   which means "don't probe".  These entries exist to only to provide empty
+   slots which may be enabled at boot-time. */
 
 static struct device eth3_dev = {
     "eth3", 0,0,0,0,0xffe0 /* I/O base*/, 0,0,0,0, NEXT_DEV, ethif_probe };

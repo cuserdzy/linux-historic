@@ -391,6 +391,12 @@ int sys_shmat (int shmid, char *shmaddr, int shmflg, ulong *raddr)
 	if (shmid < 0)
 		return -EINVAL;
 
+	if (raddr) {
+		err = verify_area(VERIFY_WRITE, raddr, sizeof(long));
+		if (err)
+			return err;
+	}
+
 	shp = shm_segs[id = shmid % SHMMNI];
 	if (shp == IPC_UNUSED || shp == IPC_NOID)
 		return -EINVAL;
@@ -462,6 +468,8 @@ int sys_shmat (int shmid, char *shmaddr, int shmflg, ulong *raddr)
 	shp->attaches = shmd;
 	shp->shm_lpid = current->pid;
 	shp->shm_atime = CURRENT_TIME;
+	if (!raddr)
+		return addr;
 	put_fs_long (addr, raddr);
 	return 0;
 }

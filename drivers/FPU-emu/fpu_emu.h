@@ -81,6 +81,12 @@ extern char emulating;
 #define PREFIX_REPE 0xf3
 #define PREFIX_REPNE 0xf2
 #define PREFIX_LOCK 0xf0
+#define PREFIX_CS_ 1
+#define PREFIX_DS_ 2
+#define PREFIX_ES_ 3
+#define PREFIX_FS_ 4
+#define PREFIX_GS_ 5
+#define PREFIX_SS_ 6
 
 /* These are to defeat the default action, giving the instruction
    no net effect: */
@@ -94,7 +100,11 @@ extern char emulating;
 
 typedef void (*FUNC)(void);
 typedef struct fpu_reg FPU_REG;
-typedef struct { unsigned char address_size, segment; } overrides;
+typedef struct { unsigned char address_size, operand_size, segment; }
+        overrides;
+/* This structure is 32 bits: */
+typedef struct { overrides override;
+		 unsigned char vm86; } fpu_addr_modes;
 
 #define	st(x)	( regs[((top+x) &7 )] )
 

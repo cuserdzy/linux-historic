@@ -6,7 +6,7 @@ SYSTEM = ../tools/zSystem
 
 zOBJECTS = $(HEAD) inflate.o unzip.o misc.o
 
-CFLAGS = -O6 -DSTDC_HEADERS $(TEST)
+CFLAGS = -O2 -DSTDC_HEADERS $(TEST)
 
 .c.s:
 	$(CC) $(CFLAGS) -S -o $*.s $<
@@ -18,7 +18,7 @@ CFLAGS = -O6 -DSTDC_HEADERS $(TEST)
 all:	zSystem
 
 zSystem:	piggy.o $(zOBJECTS)
-		$(LD) $(LDFLAGS) -o zSystem -T 1000 $(zOBJECTS) piggy.o
+		$(LD) $(LDFLAGS) -o zSystem -Ttext 1000 $(zOBJECTS) piggy.o
 
 head.o:	head.s
 

@@ -30,6 +30,11 @@
 #define MIN_WRITE_SPACE	2048
 #define TCP_WINDOW_DIFF	2048
 
+/* urg_data states */
+#define URG_VALID	0x0100
+#define URG_NOTYET	0x0200
+#define URG_READ	0x0400
+
 #define TCP_RETR1	7	/*
 				 * This is howmany retries it does before it
 				 * tries to figure out if the gateway is
@@ -75,16 +80,12 @@
  */
 static inline int before(unsigned long seq1, unsigned long seq2)
 {
-	/* this inequality is strict. */
-	if (seq1 == seq2)
-		return 0;
-	seq2 -= seq1;
-	return (seq2 < 65536);
+        return (long)(seq1-seq2) < 0;
 }
 
 static inline int after(unsigned long seq1, unsigned long seq2)
 {
-	return before(seq2, seq1);
+	return (long)(seq1-seq2) > 0;
 }
 
 
@@ -113,7 +114,6 @@ tcp_connected(const int state)
 extern struct proto tcp_prot;
 
 
-extern void	print_th(struct tcphdr *);
 extern void	tcp_err(int err, unsigned char *header, unsigned long daddr,
 			unsigned long saddr, struct inet_protocol *protocol);
 extern void	tcp_shutdown (struct sock *sk, int how);
@@ -124,6 +124,7 @@ extern int	tcp_rcv(struct sk_buff *skb, struct device *dev,
 
 extern int	tcp_ioctl(struct sock *sk, int cmd, unsigned long arg);
 
+extern void tcp_send_probe0(struct sock *sk);
 extern void tcp_enqueue_partial(struct sk_buff *, struct sock *);
 extern struct sk_buff * tcp_dequeue_partial(struct sock *);
 

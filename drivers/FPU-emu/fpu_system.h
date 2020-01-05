@@ -23,6 +23,7 @@
 #define FPU_info		(I387.soft.info)
 
 #define FPU_CS			(*(unsigned short *) &(FPU_info->___cs))
+#define FPU_SS			(*(unsigned short *) &(FPU_info->___ss))
 #define FPU_DS			(*(unsigned short *) &(FPU_info->___ds))
 #define FPU_EAX			(FPU_info->___eax)
 #define FPU_EFLAGS		(FPU_info->___eflags)

@@ -12,7 +12,7 @@
 */
 
 static char *version =
-	"atp.c:v0.03 1/19/94 Donald Becker (becker@super.org)\n";
+	"atp.c:v0.04 2/25/94 Donald Becker (becker@super.org)\n";
 
 /*
 	This file is a device driver for the RealTek (aka AT-Lan-Tec) pocket
@@ -611,7 +611,7 @@ net_interrupt(int reg_ptr)
 		} else if (num_tx_since_rx > 8
 				   && jiffies > dev->last_rx + 100) {
 			if (net_debug > 2)
-				printk("%s: Missed packet? No Rx after %d Tx and %d jiffies"
+				printk("%s: Missed packet? No Rx after %d Tx and %ld jiffies"
 					   " status %02x  CMR1 %02x.\n", dev->name,
 					   num_tx_since_rx, jiffies - dev->last_rx, status,
 					   (read_nibble(ioaddr, CMR1) >> 3) & 15);
@@ -623,6 +623,8 @@ net_interrupt(int reg_ptr)
 			break;
     }
 
+	/* This following code fixes a rare (and very difficult to track down)
+	   problem where the adaptor forgets its ethernet address. */
 	{
 		int i;
 		for (i = 0; i < 6; i++)
@@ -686,12 +688,12 @@ static void net_rx(struct device *dev)
 		skb->len = pkt_len;
 		skb->dev = dev;
 		
-		/* 'skb->data' points to the start of sk_buff data area. */
 		read_block(ioaddr, pkt_len, skb->data, dev->if_port);
 
 		if (net_debug > 6) {
 			unsigned char *data = skb->data;
-			printk(" data %02x%02x%02x %02x%02x%02x %02x%02x%02x %02x%02x%02x %02x%02x..",
+			printk(" data %02x%02x%02x %02x%02x%02x %02x%02x%02x"
+				   "%02x%02x%02x %02x%02x..",
 				   data[0], data[1], data[2], data[3], data[4], data[5],
 				   data[6], data[7], data[8], data[9], data[10], data[11],
 				   data[12], data[13]);

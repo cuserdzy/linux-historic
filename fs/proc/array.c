@@ -42,10 +42,10 @@ static int read_core(struct inode * inode, struct file * file,char * buf, int co
 
 	if (count < 0)
 		return -EINVAL;
-	if (p >= high_memory)
+	if (p >= high_memory + PAGE_SIZE)
 		return 0;
-	if (count > high_memory - p)
-		count = high_memory - p;
+	if (count > high_memory + PAGE_SIZE - p)
+		count = high_memory + PAGE_SIZE - p;
 	read = 0;
 
 	if (p < sizeof(struct user) && count > 0) {
@@ -441,7 +441,7 @@ static int get_maps(int pid, char *buf)
 	return sz;
 }
 
-asmlinkage int get_module_list( char *);
+extern int get_module_list(char *);
 
 static int array_read(struct inode * inode, struct file * file,char * buf, int count)
 {

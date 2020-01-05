@@ -119,8 +119,8 @@ print_sk(struct sock *sk)
   printk("  daddr = %lX, saddr = %lX\n", sk->daddr,sk->saddr);
   printk("  num = %d", sk->num);
   printk(" next = %p\n", sk->next);
-  printk("  send_seq = %ld, acked_seq = %ld, copied_seq = %ld\n",
-	  sk->send_seq, sk->acked_seq, sk->copied_seq);
+  printk("  write_seq = %ld, acked_seq = %ld, copied_seq = %ld\n",
+	  sk->write_seq, sk->acked_seq, sk->copied_seq);
   printk("  rcv_ack_seq = %ld, window_seq = %ld, fin_seq = %ld\n",
 	  sk->rcv_ack_seq, sk->window_seq, sk->fin_seq);
   printk("  prot = %p\n", sk->prot);
@@ -130,7 +130,7 @@ print_sk(struct sock *sk)
   printk("  retransmits = %ld, timeout = %d\n", sk->retransmits, sk->timeout);
   printk("  cong_window = %d, packets_out = %d\n", sk->cong_window,
 	  sk->packets_out);
-  printk("  urg = %d shutdown=%d\n", sk->urg, sk->shutdown);
+  printk("  shutdown=%d\n", sk->shutdown);
 }
 
 
@@ -497,7 +497,7 @@ static int inet_setsockopt(struct socket *sock, int level, int optname,
 static int inet_getsockopt(struct socket *sock, int level, int optname,
 		    char *optval, int *optlen)
 {
-  	struct sock *sk = sock->data;  	
+  	struct sock *sk = (struct sock *) sock->data;  	
   	if (level == SOL_SOCKET) 
   		return sock_getsockopt(sk,level,optname,optval,optlen);
   	if(sk->prot->getsockopt==NULL)  	
@@ -838,10 +838,12 @@ inet_create(struct socket *sock, int protocol)
   sk->rcvbuf = SK_RMEM_MAX;
   sk->pair = NULL;
   sk->opt = NULL;
-  sk->send_seq = 0;
+  sk->write_seq = 0;
   sk->acked_seq = 0;
   sk->copied_seq = 0;
   sk->fin_seq = 0;
+  sk->urg_seq = 0;
+  sk->urg_data = 0;
   sk->proc = 0;
   sk->rtt = TCP_WRITE_TIME << 3;
   sk->rto = TCP_WRITE_TIME;
@@ -859,7 +861,6 @@ inet_create(struct socket *sock, int protocol)
 
   sk->priority = 1;
   sk->shutdown = 0;
-  sk->urg = 0;
   sk->keepopen = 0;
   sk->zapped = 0;
   sk->done = 0;
@@ -981,9 +982,13 @@ inet_release(struct socket *sock, struct socket *peer)
 	while(sk->state != TCP_CLOSE && current->timeout>0) {
 		interruptible_sleep_on(sk->sleep);
 		if (current->signal & ~current->blocked) {
+			break;
+#if 0
+			/* not working now - closes can't be restarted */
 			sti();
 			current->timeout=0;
 			return(-ERESTARTSYS);
+#endif
 		}
 	}
 	current->timeout=0;
@@ -1531,8 +1536,8 @@ inet_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 	case DDIOCSDBG:
 		return(dbg_ioctl((void *) arg, DBG_INET));
 
-	case SIOCADDRT:
-	case SIOCDELRT:
+	case SIOCADDRT: case SIOCADDRTOLD:
+	case SIOCDELRT: case SIOCDELRTOLD:
 		return(rt_ioctl(cmd,(void *) arg));
 
 	case SIOCDARP:
@@ -1577,10 +1582,13 @@ sock_wmalloc(struct sock *sk, unsigned long size, int force,
 {
   if (sk) {
 	if (sk->wmem_alloc + size < sk->sndbuf || force) {
-		cli();
-		sk->wmem_alloc+= size;
-		sti();
-		return(alloc_skb(size, priority));
+		struct sk_buff * c = alloc_skb(size, priority);
+		if (c) {
+			cli();
+			sk->wmem_alloc+= size;
+			sti();
+		}
+		return c;
 	}
 	DPRINTF((DBG_INET, "sock_wmalloc(%X,%d,%d,%d) returning NULL\n",
 						sk, size, force, priority));
@@ -1595,10 +1603,12 @@ sock_rmalloc(struct sock *sk, unsigned long size, int force, int priority)
 {
   if (sk) {
 	if (sk->rmem_alloc + size < sk->rcvbuf || force) {
-		void *c = alloc_skb(size, priority);
-		cli();
-		if (c) sk->rmem_alloc += size;
-		sti();
+		struct sk_buff *c = alloc_skb(size, priority);
+		if (c) {
+			cli();
+			sk->rmem_alloc += size;
+			sti();
+		}
 		return(c);
 	}
 	DPRINTF((DBG_INET, "sock_rmalloc(%X,%d,%d,%d) returning NULL\n",
@@ -1849,7 +1859,7 @@ void inet_proto_init(struct ddi_proto *pro)
   struct inet_protocol *p;
   int i;
 
-  printk("Swansea University Computer Society Net2Debugged [1.27]\n");
+  printk("Swansea University Computer Society Net2Debugged [1.30]\n");
   /* Set up our UNIX VFS major device. */
   if (register_chrdev(AF_INET_MAJOR, "af_inet", &inet_fops) < 0) {
 	printk("%s: cannot register major device %d!\n",

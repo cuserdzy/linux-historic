@@ -13,7 +13,7 @@
 */
 
 static char *version =
-	"hp.c:v0.99.14a 12/2/93 Donald Becker (becker@super.org)\n";
+	"hp.c:v0.99.15k 3/3/94 Donald Becker (becker@super.org)\n";
 
 #include <linux/config.h>
 #include <linux/kernel.h>
@@ -56,7 +56,7 @@ static void hp_block_output(struct device *dev, int count,
 static void hp_init_card(struct device *dev);
 
 /* The map from IRQ number to HP_CONFIGURE register setting. */
-/* My default is IRQ5	   0  1	 2	3  4  5	 6	7  8  9 10 11 */
+/* My default is IRQ5	   0  1	 2  3  4  5  6	7  8  9 10 11 */
 static char irqmap[16] = { 0, 0, 4, 6, 8,10, 0,14, 0, 4, 2,12,0,0,0,0};
 
 
@@ -86,22 +86,17 @@ int hp_probe(struct device *dev)
 
 int hpprobe1(struct device *dev, int ioaddr)
 {
-	int status, i, board_id, wordmode;
+	int i, board_id, wordmode;
 	char *name;
 	unsigned char *station_addr = dev->dev_addr;
 
 	/* Check for the HP physical address, 08 00 09 xx xx xx. */
+	/* This really isn't good enough: we may pick up HP LANCE boards
+	   also!  Avoid the lance 0x5757 signature. */
 	if (inb(ioaddr) != 0x08
 		|| inb(ioaddr+1) != 0x00
-		|| inb(ioaddr+2) != 0x09)
-		return ENODEV;
-
-	/* This really isn't good enough, we may pick up HP LANCE boards also! */
-	/* Verify that there is a 8390 at the expected location. */
-	outb(E8390_NODMA + E8390_STOP, ioaddr);
-	SLOW_DOWN_IO;
-	status = inb(ioaddr);
-	if (status != 0x21 && status != 0x23)
+		|| inb(ioaddr+2) != 0x09
+		|| inb(ioaddr+14) == 0x57)
 		return ENODEV;
 
 	/* Set up the parameters based on the board ID.
@@ -182,31 +177,22 @@ hp_reset_8390(struct device *dev)
 {
 	int hp_base = dev->base_addr - NIC_OFFSET;
 	int saved_config = inb_p(hp_base + HP_CONFIGURE);
-	int reset_start_time = jiffies;
 
-	if (ei_debug > 1) printk("resetting the 8390 time=%d...", jiffies);
+	if (ei_debug > 1) printk("resetting the 8390 time=%ld...", jiffies);
 	outb_p(0x00, hp_base + HP_CONFIGURE);
 	ei_status.txing = 0;
-
-	sti();
-	/* We shouldn't use the boguscount for timing, but this hasn't been
-	   checked yet, and you could hang your machine if jiffies break... */
-	{
-		int boguscount = 150000;
-		while(jiffies - reset_start_time < 2)
-			if (boguscount-- < 0) {
-				printk("jiffy failure (t=%d)...", jiffies);
-				break;
-			}
-	}
+	/* Pause just a few cycles for the hardware reset to take place. */
+	SLOW_DOWN_IO;
+	SLOW_DOWN_IO;
 
 	outb_p(saved_config, hp_base + HP_CONFIGURE);
-	while ((inb_p(hp_base+NIC_OFFSET+EN0_ISR) & ENISR_RESET) == 0)
-		if (jiffies - reset_start_time > 2) {
-			printk("%s: hp_reset_8390() did not complete.\n", dev->name);
-			return;
-		}
-	if (ei_debug > 1) printk("8390 reset done (%d).", jiffies);
+	SLOW_DOWN_IO; SLOW_DOWN_IO;
+	
+	if ((inb_p(hp_base+NIC_OFFSET+EN0_ISR) & ENISR_RESET) == 0)
+		printk("%s: hp_reset_8390() did not complete.\n", dev->name);
+
+	if (ei_debug > 1) printk("8390 reset done (%ld).", jiffies);
+	return;
 }
 
 /* Block input and output, similar to the Crynwr packet driver.	 If you
@@ -320,9 +306,10 @@ hp_init_card(struct device *dev)
 
 /*
  * Local variables:
- *	compile-command: "gcc -D__KERNEL__ -I/usr/src/linux/net/inet -Wall -Wstrict-prototypes -O6 -m486 -c hp.c"
- *  version-control: t
- *  kept-new-versions: 5
- *  tab-width: 4
+ * compile-command: "gcc -D__KERNEL__ -I/usr/src/linux/net/inet -Wall -Wstrict-prototypes -O6 -m486 -c hp.c"
+ * version-control: t
+ * kept-new-versions: 5
+ * tab-width: 4
+ * c-indent-level: 4
  * End:
  */

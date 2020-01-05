@@ -205,7 +205,7 @@ struct lance_private {
     int pad0, pad1;		/* Used for alignment */
 };
 
-static unsigned long lance_probe1(short ioaddr, unsigned long mem_start);
+unsigned long lance_probe1(short ioaddr, unsigned long mem_start);
 static int lance_open(struct device *dev);
 static void lance_init_ring(struct device *dev);
 static int lance_start_xmit(struct sk_buff *skb, struct device *dev);
@@ -236,7 +236,7 @@ unsigned long lance_init(unsigned long mem_start, unsigned long mem_end)
     return mem_start;
 }
 
-static unsigned long lance_probe1(short ioaddr, unsigned long mem_start)
+unsigned long lance_probe1(short ioaddr, unsigned long mem_start)
 {
     struct device *dev;
     struct lance_private *lp;
@@ -556,18 +556,18 @@ lance_start_xmit(struct sk_buff *skb, struct device *dev)
     if ((int)(skb->data) + skb->len > 0x01000000) {
 	if (lance_debug > 5)
 	    printk("%s: bouncing a high-memory packet (%#x).\n",
-		   dev->name, (int)skb->data);
+		   dev->name, (int)(skb->data));
 	memcpy(&lp->tx_bounce_buffs[entry], skb->data, skb->len);
 	lp->tx_ring[entry].base =
 	    (int)(lp->tx_bounce_buffs + entry) | 0x83000000;
 	if (skb->free)
 	    kfree_skb (skb, FREE_WRITE);
-    } else
-    {
-    	/* Gimme!!! */
+    } else {
+    	/* We can't free the packet yet, so we inform the memory management
+	   code that we are still using it. */
     	if(skb->free==0)
     		skb_kept_by_device(skb);
-	lp->tx_ring[entry].base = (int)skb->data | 0x83000000;
+	lp->tx_ring[entry].base = (int)(skb->data) | 0x83000000;
     }
     lp->cur_tx++;
 
@@ -638,11 +638,12 @@ lance_interrupt(int reg_ptr)
 		if (err_status & 0x0800) lp->stats.tx_carrier_errors++;
 		if (err_status & 0x1000) lp->stats.tx_window_errors++;
 		if (err_status & 0x4000) lp->stats.tx_fifo_errors++;
-		/* We should re-init() after the FIFO error. */
-	    } else if (status & 0x18000000)
-		lp->stats.collisions++;
-	    else
+		/* Perhaps we should re-init() after the FIFO error. */
+	    } else {
+		if (status & 0x18000000)
+		    lp->stats.collisions++;
 		lp->stats.tx_packets++;
+	    }
 
 	    /* We don't free the skb if it's a data-only copy in the bounce
 	       buffer.  The address checks here are sorted -- the first test
@@ -654,7 +655,8 @@ lance_interrupt(int reg_ptr)
 		    kfree_skb(skb, FREE_WRITE);
 		else
 		    skb_device_release(skb,FREE_WRITE);
-		/* Warning: skb may well vanish at the point you call device_release! */
+		/* Warning: skb may well vanish at the point you call
+		   device_release! */
 	    }
 	    dirty_tx++;
 	}
@@ -704,8 +706,13 @@ lance_rx(struct device *dev)
     while (lp->rx_ring[entry].base >= 0) {
 	int status = lp->rx_ring[entry].base >> 24;
 
-	if (status & 0x40) {	/* There was an error. */
-	    lp->stats.rx_errors++;
+	if (status != 0x03) {		/* There was an error. */
+	    /* There is an tricky error noted by John Murphy,
+	       <murf@perftech.com> to Russ Nelson: Even with full-sized
+	       buffers it's possible for a jabber packet to use two
+	       buffers, with only the last correctly noting the error. */
+	    if (status & 0x01)	/* Only count a general error at the */
+		lp->stats.rx_errors++; /* end of a packet.*/
 	    if (status & 0x20) lp->stats.rx_frame_errors++;
 	    if (status & 0x10) lp->stats.rx_over_errors++;
 	    if (status & 0x08) lp->stats.rx_crc_errors++;
@@ -835,6 +842,12 @@ set_multicast_list(struct device *dev, int num_addrs, void *addrs)
     outw(0, ioaddr+LANCE_ADDR);
     outw(0x0142, ioaddr+LANCE_DATA); /* Resume normal operation. */
 }
+#endif
+
+#ifdef HAVE_DEVLIST
+static unsigned int lance_portlist[] = {0x300, 0x320, 0x340, 0x360, 0};
+struct netdev_entry lance_drv =
+{"lance", lance_probe1, LANCE_TOTAL_SIZE, lance_portlist};
 #endif
 
 /*

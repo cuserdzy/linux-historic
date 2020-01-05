@@ -6,7 +6,7 @@
  *  Chris Smith 1993
  *
  *  Sources & references:
- *   Duncan, _Design ... of HPFS_, MSSJ 4(5)   (C) 1989 Microsoft Corp
+ *   Duncan, _Design ... of HPFS_, MSJ 4(5)   (C) 1989 Microsoft Corp
  *   linux/fs/minix  Copyright (C) 1991, 1992, 1993  Linus Torvalds
  *   linux/fs/msdos  Written 1992, 1993 by Werner Almesberger
  *   linux/fs/isofs  Copyright (C) 1991  Eric Youngdale
@@ -124,7 +124,7 @@ typedef void nonconst;
 static void hpfs_read_inode(struct inode *);
 static void hpfs_put_super(struct super_block *);
 static void hpfs_statfs(struct super_block *, struct statfs *);
-static int hpfs_remount_fs(struct super_block *, int *);
+static int hpfs_remount_fs(struct super_block *, int *, char *);
 
 static const struct super_operations hpfs_sops =
 {
@@ -752,7 +752,7 @@ static void hpfs_statfs(struct super_block *s, struct statfs *buf)
  * remount.  Don't let read only be turned off.
  */
 
-static int hpfs_remount_fs(struct super_block *s, int *flags)
+static int hpfs_remount_fs(struct super_block *s, int *flags, char *data)
 {
 	if (!(*flags & MS_RDONLY))
 		return -EINVAL;

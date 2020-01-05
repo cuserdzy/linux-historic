@@ -17,7 +17,7 @@
 /* Routines for the NatSemi-based designs (NE[12]000). */
 
 static char *version =
-    "ne.c:v0.99-14a 12/3/93 Donald Becker (becker@super.org)\n";
+    "ne.c:v0.99-15k 3/3/94 Donald Becker (becker@super.org)\n";
 
 #include <linux/config.h>
 #include <linux/kernel.h>
@@ -155,11 +155,10 @@ static int neprobe1(int ioaddr, struct device *dev, int verbose)
     }
 
     if (wordlength == 2) {
-	/* We must set the 8390 for word mode, AND RESET IT. */
-	int tmp;
+	/* We must set the 8390 for word mode. */
 	outb_p(0x49, ioaddr + EN0_DCFG);
-	tmp = inb_p(NE_BASE + NE_RESET);
-	outb(tmp, NE_BASE + NE_RESET);
+	/* We used to reset the ethercard here, but it doesn't seem
+	   to be necessary. */
 	/* Un-double the SA_prom values. */
 	for (i = 0; i < 16; i++)
 	    SA_prom[i] = SA_prom[i+i];
@@ -265,7 +264,7 @@ ne_reset_8390(struct device *dev)
     int tmp = inb_p(NE_BASE + NE_RESET);
     int reset_start_time = jiffies;
 
-    if (ei_debug > 1) printk("resetting the 8390 t=%d...", jiffies);
+    if (ei_debug > 1) printk("resetting the 8390 t=%ld...", jiffies);
     ei_status.txing = 0;
 
     outb_p(tmp, NE_BASE + NE_RESET);

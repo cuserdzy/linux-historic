@@ -192,8 +192,8 @@ asmlinkage void math_emulate(long arg)
 
 #endif /* CONFIG_MATH_EMULATION */
 
-static unsigned long itimer_ticks = 0;
-static unsigned long itimer_next = ~0;
+unsigned long itimer_ticks = 0;
+unsigned long itimer_next = ~0;
 static unsigned long lost_ticks = 0;
 
 /*
@@ -359,6 +359,19 @@ void wake_up_interruptible(struct wait_queue **q)
 		}
 		tmp = tmp->next;
 	} while (tmp != *q);
+}
+
+void __down(struct semaphore * sem)
+{
+	struct wait_queue wait = { current, NULL };
+	add_wait_queue(&sem->wait, &wait);
+	current->state = TASK_UNINTERRUPTIBLE;
+	while (sem->count <= 0) {
+		schedule();
+		current->state = TASK_UNINTERRUPTIBLE;
+	}
+	current->state = TASK_RUNNING;
+	remove_wait_queue(&sem->wait, &wait);
 }
 
 static inline void __sleep_on(struct wait_queue **p, int state)

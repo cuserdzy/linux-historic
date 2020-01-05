@@ -29,12 +29,19 @@
 
 #define SIZE(x) (sizeof(x)/sizeof((x)[0]))
 
+#define KBD_REPORT_ERR
+#define KBD_REPORT_UNKN
+
 #ifndef KBD_DEFMODE
 #define KBD_DEFMODE ((1 << VC_REPEAT) | (1 << VC_META))
 #endif
 
 #ifndef KBD_DEFLEDS
-#define KBD_DEFLEDS (1 << VC_NUMLOCK)
+/*
+ * Some laptops take the 789uiojklm,. keys as number pad when NumLock
+ * is on. This seems a good reason to start with NumLock off.
+ */
+#define KBD_DEFLEDS 0
 #endif
 
 #ifndef KBD_DEFLOCK
@@ -205,6 +212,17 @@ static void keyboard_interrupt(int int_pt_regs)
 	} else if (scancode == 0xfe) {
 		resend = 1;
 		goto end_kbd_intr;
+	} else if (scancode == 0) {
+#ifdef KBD_REPORT_ERR
+	        printk("keyboard buffer overflow\n");
+#endif
+		goto end_kbd_intr;
+	} else if (scancode == 0xff) {
+#ifdef KBD_REPORT_ERR
+	        printk("keyboard error\n");
+#endif
+	        prev_scancode = 0;
+	        goto end_kbd_intr;
 	}
 	tty = TTY_TABLE(0);
  	kbd = kbd_table + fg_console;
@@ -263,13 +281,17 @@ static void keyboard_interrupt(int int_pt_regs)
 	      if (e0_keys[scancode])
 		scancode = e0_keys[scancode];
 	      else if (!raw_mode) {
+#ifdef KBD_REPORT_UNKN
 		  printk("keyboard: unknown scancode e0 %02x\n", scancode);
+#endif
 		  goto end_kbd_intr;
 	      }
 	  }
 	} else if (scancode >= E0_BASE && !raw_mode) {
+#ifdef KBD_REPORT_UNKN
 	  printk("keyboard: scancode (%02x) not in range 00 - %2x\n",
 		 scancode, E0_BASE - 1);
+#endif
 	  goto end_kbd_intr;
  	}
   

@@ -171,6 +171,7 @@ struct inode {
 	time_t		i_ctime;
 	unsigned long	i_blksize;
 	unsigned long	i_blocks;
+	struct semaphore i_sem;
 	struct inode_operations * i_op;
 	struct super_block * i_sb;
 	struct wait_queue * i_wait;
@@ -319,12 +320,13 @@ extern int getname(const char * filename, char **result);
 extern void putname(char * name);
 
 extern int register_blkdev(unsigned int, const char *, struct file_operations *);
+extern int unregister_blkdev(unsigned int major, const char * name);
 extern int blkdev_open(struct inode * inode, struct file * filp);
 extern struct file_operations def_blk_fops;
 extern struct inode_operations blkdev_inode_operations;
 
 extern int register_chrdev(unsigned int, const char *, struct file_operations *);
-extern int unregister_chrdev( unsigned int major, const char * name);
+extern int unregister_chrdev(unsigned int major, const char * name);
 extern int chrdev_open(struct inode * inode, struct file * filp);
 extern struct file_operations def_chr_fops;
 extern struct inode_operations chrdev_inode_operations;
@@ -392,6 +394,7 @@ extern struct buffer_head * breada(dev_t dev,int block,...);
 extern void put_super(dev_t dev);
 extern dev_t ROOT_DEV;
 
+extern void show_buffers(void);
 extern void mount_root(void);
 
 extern int char_read(struct inode *, struct file *, char *, int);

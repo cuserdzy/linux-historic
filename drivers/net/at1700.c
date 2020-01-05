@@ -12,13 +12,16 @@
 */
 
 static char *version =
-	"at1700.c:v0.03 11/16/93  Donald Becker (becker@super.org)\n";
+	"at1700.c:v0.06 3/3/94  Donald Becker (becker@super.org)\n";
 
 #include <linux/config.h>
 
 /*
   Sources:
     The Fujitsu MB86695 datasheet.
+
+	After this driver was written, ATI provided their EEPROM configuration
+	code header file.  Thanks to Gerry Sockins of ATI.
 */
 
 #include <linux/kernel.h>
@@ -30,12 +33,12 @@ static char *version =
 #include <linux/ioport.h>
 #include <linux/in.h>
 #include <linux/malloc.h>
+#include <linux/string.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
 #include <asm/dma.h>
 #include <errno.h>
-#include <memory.h>
 
 #include "dev.h"
 #include "eth.h"
@@ -142,24 +145,28 @@ at1700_probe(struct device *dev)
 
 	for (port = &ports[0]; *port; port++) {
 		int ioaddr = *port;
-#ifdef HAVE_PORTRESERVE
 		if (check_region(ioaddr, 32))
-			continue;
-#endif
-		if (inw(ioaddr) != 0x0000)
 			continue;
 		if (at1700_probe1(dev, ioaddr) == 0)
 			return 0;
 	}
 
-	return ENODEV;			/* ENODEV would be more accurate. */
+	return ENODEV;
 }
+
+/* The Fujitsu datasheet suggests that the NIC be probed for by checking its
+   "signature", the default bit pattern after a reset.  This *doesn't* work --
+   there is no way to reset the bus interface without a complete power-cycle!
+
+   It turns out that ATI came to the same conclusion I did: the only thing
+   that can be done is checking a few bits and then diving right into an
+   EEPROM read. */
 
 int at1700_probe1(struct device *dev, short ioaddr)
 {
-	unsigned short signature[4]         = {0x0000, 0xffff, 0x41f6, 0xefb6};
-	unsigned short signature_invalid[4] = {0x0000, 0xffff, 0x00f0, 0x2f00};
-	char irqmap[4] = {3, 4, 5, 9};
+	unsigned short signature[4]         = {0xffff, 0xffff, 0x7ff7, 0xff5f};
+	unsigned short signature_invalid[4] = {0xffff, 0xffff, 0x7ff7, 0xdf0f};
+	char irqmap[8] = {3, 4, 5, 9, 10, 11, 14, 15};
 	unsigned short *station_address = (unsigned short *)dev->dev_addr;
 	unsigned int i, irq;
 
@@ -168,18 +175,21 @@ int at1700_probe1(struct device *dev, short ioaddr)
 	   */
 	for (i = 0; i < 4; i++)
 		if ((inw(ioaddr + 2*i) | signature_invalid[i]) != signature[i]) {
-			if (net_debug > 1)
+			if (net_debug > 2)
 				printk("AT1700 signature match failed at %d (%04x vs. %04x)\n",
 					   i, inw(ioaddr + 2*i), signature[i]);
 			return -ENODEV;
 		}
-#ifdef HAVE_PORTRESERVE
+	if (read_eeprom(ioaddr, 4) != 0x0000
+		|| read_eeprom(ioaddr, 5) & 0x00ff != 0x00F4)
+		return -ENODEV;
+
 	/* Grab the region so that we can find another board if the IRQ request
 	   fails. */
 	snarf_region(ioaddr, 32);
-#endif
 
-	irq = irqmap[ read_eeprom(ioaddr, 0) >> 14 ];
+	irq = irqmap[(read_eeprom(ioaddr, 12)&0x04)
+				 | (read_eeprom(ioaddr, 0)>>14)];
 
 	/* Snarf the interrupt vector now. */
 	if (request_irq(irq, &net_interrupt)) {
@@ -417,10 +427,6 @@ net_send_packet(struct sk_buff *skb, struct device *dev)
 		short length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
 		unsigned char *buf = skb->data;
 
-		if (net_debug > 4)
-			printk("%s: Transmitting a packet of length %d.\n", dev->name,
-				   skb->len);
-
 		/* Turn off the possible Tx interrupts. */
 		outb(0x00, ioaddr + TX_INTR);
 		
@@ -551,7 +557,6 @@ net_rx(struct device *dev)
 			skb->len = pkt_len;
 			skb->dev = dev;
 
-			/* 'skb->data' points to the start of sk_buff data area. */
 			insw(ioaddr + DATAPORT, skb->data, (pkt_len + 1) >> 1);
 
 			if (net_debug > 5) {

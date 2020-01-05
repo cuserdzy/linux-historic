@@ -382,12 +382,18 @@ static void set_origin(int currcons)
 	__set_origin(__real_origin);
 }
 
-static inline void hide_cursor(int currcons)
+/*
+ * Put the cursor just beyond the end of the display adaptor memory.
+ */
+static inline void hide_cursor(void)
 {
+  /* This is inefficient, we could just put the cursor at 0xffff,
+     but perhaps the delays due to the inefficiency are useful for
+     some hardware... */
 	outb_p(14, video_port_reg);
-	outb_p(0xff&((scr_end-video_mem_base)>>9), video_port_val);
+	outb_p(0xff&((video_mem_term-video_mem_base)>>9), video_port_val);
 	outb_p(15, video_port_reg);
-	outb_p(0xff&((scr_end-video_mem_base)>>1), video_port_val);
+	outb_p(0xff&((video_mem_term-video_mem_base)>>1), video_port_val);
 }
 
 static inline void set_cursor(int currcons)
@@ -405,7 +411,7 @@ static inline void set_cursor(int currcons)
 		outb_p(15, video_port_reg);
 		outb_p(0xff&((pos-video_mem_base)>>1), video_port_val);
 	} else
-		hide_cursor(currcons);
+		hide_cursor();
 	restore_flags(flags);
 }
 
@@ -1546,7 +1552,7 @@ void blank_screen(void)
 		return;
 	timer_table[BLANK_TIMER].fn = unblank_screen;
 	get_scrmem(fg_console);
-	hide_cursor(fg_console);
+	hide_cursor();
 	console_blanked = 1;
 	memsetw((void *)video_mem_base, 0x0020, video_mem_term-video_mem_base );
 }
@@ -1800,12 +1806,11 @@ int paste_selection(struct tty_struct *tty)
 	if (! *bp)
 		return 0;
 	unblank_screen();
-	while (*bp)
-	{
+	while (*bp) {
 		put_tty_queue(*bp, &tty->read_q);
 		bp++;
+		TTY_READ_FLUSH(tty);
 	}
-	TTY_READ_FLUSH(tty);
 	return 0;
 }
 
@@ -1823,6 +1828,14 @@ static void clear_selection()
 
 /*
  * PIO_FONT support.
+ *
+ * The font loading code goes back to the codepage package by
+ * Joel Hoffman (joel@wam.umd.edu). (He reports that the original
+ * reference is: "From: p. 307 of _Programmer's Guide to PC & PS/2
+ * Video Systems_ by Richard Wilton. 1987.  Microsoft Press".)
+ *
+ * Change for certain monochrome monitors by Yury Shevchuck
+ * (sizif@botik.yaroslavl.su).
  */
 
 #define colourmap ((char *)0xa0000)
@@ -1838,14 +1851,17 @@ static int set_get_font(char * arg, int set)
 #ifdef CAN_LOAD_EGA_FONTS
 	int i;
 	char *charmap;
+	int beg;
 
 	/* no use to "load" CGA... */
 
-	if (video_type == VIDEO_TYPE_EGAC)
+	if (video_type == VIDEO_TYPE_EGAC) {
 		charmap = colourmap;
-	else if (video_type == VIDEO_TYPE_EGAM)
+		beg = 0x0e;
+	} else if (video_type == VIDEO_TYPE_EGAM) {
 		charmap = blackwmap;
-	else
+		beg = 0x0a;
+	} else
 		return -EINVAL;
 
 	i = verify_area(set ? VERIFY_READ : VERIFY_WRITE, (void *)arg, cmapsz);
@@ -1892,7 +1908,7 @@ static int set_get_font(char * arg, int set)
 	outb_p( 0x05, gr_port_reg );
 	outb_p( 0x10, gr_port_val );    /* enable even-odd addressing */
 	outb_p( 0x06, gr_port_reg );
-	outb_p( 0x0e, gr_port_val );    /* map starts at b800:0000 */
+	outb_p( beg, gr_port_val );     /* map starts at b800:0 or b000:0 */
 	sti();
 
 	return 0;

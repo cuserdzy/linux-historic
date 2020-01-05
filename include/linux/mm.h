@@ -11,7 +11,7 @@
 
 int __verify_write(unsigned long addr, unsigned long count);
 
-extern inline int verify_area(int type, void * addr, unsigned long size)
+extern inline int verify_area(int type, const void * addr, unsigned long size)
 {
 	if (TASK_SIZE <= (unsigned long) addr)
 		return -EFAULT;
@@ -81,7 +81,7 @@ extern unsigned long free_page_list;
 extern int nr_secondary_pages;
 extern unsigned long secondary_page_list;
 
-#define MAX_SECONDARY_PAGES 10
+#define MAX_SECONDARY_PAGES 20
 
 /*
  * This is timing-critical - most of the time in getting a new page

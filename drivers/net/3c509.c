@@ -13,7 +13,7 @@
 	C/O Supercomputing Research Ctr., 17100 Science Dr., Bowie MD 20715
 */
 
-static char *version = "3c509.c:pl13t 11/24/93 becker@super.org\n";
+static char *version = "3c509.c:pl15k 3/5/94 becker@super.org\n";
 
 #include <linux/config.h>
 #include <linux/kernel.h>
@@ -190,7 +190,7 @@ int el3_probe(struct device *dev)
 
 	{
 		char *if_names[] = {"10baseT", "AUI", "undefined", "BNC"};
-		printk("%s: 3c509 at %#3.3x	 tag %d, %s port, address ",
+		printk("%s: 3c509 at %#3.3x tag %d, %s port, address ",
 			   dev->name, dev->base_addr, current_tag, if_names[dev->if_port]);
 	}
 
@@ -377,7 +377,7 @@ el3_start_xmit(struct sk_buff *skb, struct device *dev)
 		return 0;
 
 	if (el3_debug > 4) {
-		printk("%s: el3_start_xmit(lenght = %d) called, status %4.4x.\n",
+		printk("%s: el3_start_xmit(lenght = %ld) called, status %4.4x.\n",
 			   dev->name, skb->len, inw(ioaddr + EL3_STATUS));
 	}
 #ifndef final_version
@@ -477,10 +477,12 @@ el3_interrupt(int reg_ptr)
 		if (++i > 10) {
 			printk("%s: Infinite loop in interrupt, status %4.4x.\n",
 				   dev->name, status);
+			/* Clear all interrupts we have handled. */
+			outw(0x68FF, ioaddr + EL3_CMD);
 			break;
 		}
-		/* Clear the other interrupts we have handled. */
-		outw(0x6899, ioaddr + EL3_CMD); /* Ack IRQ */
+		/* Acknowledge the IRQ. */
+		outw(0x6891, ioaddr + EL3_CMD); /* Ack IRQ */
 	}
 
 	if (el3_debug > 4) {
@@ -549,19 +551,19 @@ el3_rx(struct device *dev)
 			   inw(ioaddr+EL3_STATUS), inw(ioaddr+RX_STATUS));
 	while ((rx_status = inw(ioaddr + RX_STATUS)) > 0) {
 		if (rx_status & 0x4000) { /* Error, update stats. */
-			short error = rx_status & 0x3C00;
+			short error = rx_status & 0x3800;
 			lp->stats.rx_errors++;
 			switch (error) {
-			case 0x2000:		lp->stats.rx_over_errors++; break;
-			case 0x2C00:		lp->stats.rx_length_errors++; break;
-			case 0x3400:		lp->stats.rx_crc_errors++; break;
-			case 0x2400:		lp->stats.rx_length_errors++; break;
-			case 0x3000:		lp->stats.rx_frame_errors++; break;
-			case 0x0800:		lp->stats.rx_frame_errors++; break;
+			case 0x0000:		lp->stats.rx_over_errors++; break;
+			case 0x0800:		lp->stats.rx_length_errors++; break;
+			case 0x1000:		lp->stats.rx_frame_errors++; break;
+			case 0x1800:		lp->stats.rx_length_errors++; break;
+			case 0x2000:		lp->stats.rx_frame_errors++; break;
+			case 0x2800:		lp->stats.rx_crc_errors++; break;
 			}
 		}
 		if ( (! (rx_status & 0x4000))
-			|| ! (rx_status & 0x2000)) { /* Dribble bits are OK. */
+			|| ! (rx_status & 0x1000)) { /* Dribble bits are OK. */
 			short pkt_len = rx_status & 0x7ff;
 			int sksize = sizeof(struct sk_buff) + pkt_len + 3;
 			struct sk_buff *skb;

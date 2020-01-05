@@ -258,7 +258,13 @@ static void rs_stop(struct tty_struct *tty)
 	struct async_struct *info;
 	
 	info = rs_table + DEV_TO_SL(tty->line);
-	
+
+	if (info->flags & ASYNC_CLOSING) {
+		tty->stopped = 0;
+		tty->hw_stopped = 0;
+		return;
+	}
+
 	info->IER = UART_IER_MSI | UART_IER_RLSI | UART_IER_RDI;
 #ifdef ISR_HACK
 	serial_out(info, UART_IER, info->IER);
@@ -431,7 +437,7 @@ static inline int check_modem_status(struct async_struct *info)
 			rs_sched_event(info, RS_EVENT_HANGUP);
 		}
 	}
-	if (C_CRTSCTS(info->tty)) {
+	if (C_CRTSCTS(info->tty) && !(info->flags & ASYNC_CLOSING)) {
 		if (info->tty->hw_stopped) {
 			if (status & UART_MSR_CTS) {
 #ifdef SERIAL_DEBUG_INTR
@@ -456,7 +462,7 @@ static inline int check_modem_status(struct async_struct *info)
 
 static inline void figure_RS_timer(void)
 {
-	int	timeout = 6000;	/* 60 seconds; really big :-) */
+	int	timeout = jiffies + 60*HZ; /* 60 seconds; really big :-) */
 	int	i, mask;
 	
 	if (!IRQ_active)
@@ -467,7 +473,7 @@ static inline void figure_RS_timer(void)
 		if (IRQ_timer[i] < timeout)
 			timeout = IRQ_timer[i];
 	}
-	timer_table[RS_TIMER].expires = jiffies + timeout;
+	timer_table[RS_TIMER].expires = timeout;
 	timer_active |= 1 << RS_TIMER;
 }
 
@@ -1029,9 +1035,11 @@ void rs_write(struct tty_struct * tty)
 	if (!tty || tty->stopped || tty->hw_stopped)
 		return;
 	info = rs_table + DEV_TO_SL(tty->line);
-	if (!info || !info->tty || !(info->flags & ASYNC_INITIALIZED))
-		return;
 	cli();
+	if (!info || !info->tty || !(info->flags & ASYNC_INITIALIZED)) {
+		sti();
+		return;
+	}
 	restart_port(info);
 	info->IER = (UART_IER_MSI | UART_IER_RLSI |
 		     UART_IER_THRI | UART_IER_RDI);
@@ -1520,11 +1528,7 @@ static void rs_close(struct tty_struct *tty, struct file * filp)
 	tty->hw_stopped = 0;
 	if (info->flags & ASYNC_INITIALIZED) {
 		rs_start(tty);
-		/*
-		 * XXX There should be a timeout added to
-		 * wait_until_sent, eventually.  TYT 1/19/94
-		 */
-		wait_until_sent(tty);
+		wait_until_sent(tty, 6000); /* 60 seconds timeout */
 	} else
 		flush_output(tty);
 	flush_input(tty);

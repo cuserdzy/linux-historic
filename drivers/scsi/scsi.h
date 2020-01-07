@@ -62,7 +62,7 @@
 #define SET_LIMITS		0x33
 #define PRE_FETCH		0x34
 #define READ_POSITION		0x34
-#define SYNCRONIZE_CACHE	0x35
+#define SYNCHRONIZE_CACHE	0x35
 #define LOCK_UNLOCK_CACHE	0x36
 #define READ_DEFECT_DATA	0x37
 #define COMPARE			0x39
@@ -144,7 +144,7 @@ extern const unsigned char scsi_command_size[8];
 	lsb		msb
 	status	msg	host code	
 
-        Our errors returned by OUR driver, NOT SCSI message.  Orr'd with
+        Our errors returned by OUR driver, NOT SCSI message.  Or'd with
         SCSI message passed back to driver <IF any>.
 */
 
@@ -183,7 +183,7 @@ extern const unsigned char scsi_command_size[8];
 #define DRIVER_OK		0x00
 
 /*
-	These indicate the error that occured, and what is available.
+	These indicate the error that occurred, and what is available.
 */
 
 #define DRIVER_BUSY		0x01
@@ -234,8 +234,10 @@ extern const unsigned char scsi_command_size[8];
 
 #define TYPE_DISK	0x00
 #define TYPE_TAPE	0x01
+#define TYPE_PROCESSOR	0x03	/* HP scanners use this */
 #define TYPE_WORM	0x04	/* Treated as ROM by our system */
 #define TYPE_ROM	0x05
+#define TYPE_SCANNER	0x06
 #define TYPE_MOD	0x07  /* Magneto-optical disk - treated as TYPE_DISK */
 #define TYPE_NO_LUN	0x7f
 
@@ -259,6 +261,13 @@ extern const unsigned char scsi_command_size[8];
 	as the LUN.
 */
 
+/*
+        Manufacturers list
+*/
+
+#define SCSI_MAN_UNKNOWN     0
+#define SCSI_MAN_NEC         1
+#define SCSI_MAN_TOSHIBA     2
 
 /*
 	The scsi_device struct contains what we know about each given scsi
@@ -268,6 +277,7 @@ extern const unsigned char scsi_command_size[8];
 typedef struct scsi_device {
         struct scsi_device * next; /* Used for linked list */
 	unsigned char id, lun;
+	unsigned int manufacturer; /* Manufacturer of device, for using vendor-specific cmd's */
 	int attached;          /* # of high level drivers attached to this */
 	int access_count;	/* Count of open channels/mounts */
 	struct wait_queue * device_wait;  /* Used to wait if device is busy */
@@ -284,8 +294,8 @@ typedef struct scsi_device {
 	unsigned lockable:1;    /* Able to prevent media removal */
 	unsigned borken:1;	/* Tell the Seagate driver to be 
 				   painfully slow on this device */ 
-	unsigned tagged_supported:1; /* Supports SCSI-II tagged queing */
-	unsigned tagged_queue:1;   /*SCSI-II tagged queing enabled */
+	unsigned tagged_supported:1; /* Supports SCSI-II tagged queuing */
+	unsigned tagged_queue:1;   /*SCSI-II tagged queuing enabled */
 	unsigned disconnect:1;     /* can disconnect */
 	unsigned soft_reset:1;		/* Uses soft reset option */
 	unsigned char current_tag; /* current tag */
@@ -301,7 +311,7 @@ typedef struct scsi_device {
 #define msg_byte(result) (((result) >> 8) & 0xff)
 #define host_byte(result) (((result) >> 16) & 0xff)
 #define driver_byte(result) (((result) >> 24) & 0xff)
-#define sugestion(result) (driver_byte(result) & SUGGEST_MASK)
+#define suggestion(result) (driver_byte(result) & SUGGEST_MASK)
 
 #define sense_class(sense) (((sense) >> 4) & 0x7)
 #define sense_error(sense) ((sense) & 0xf)
@@ -420,6 +430,8 @@ typedef struct scsi_cmnd {
 	struct Scsi_Host * host;
 	Scsi_Device * device;
 	unsigned char target, lun;
+	unsigned char cmd_len;
+	unsigned char old_cmd_len;
 	struct scsi_cmnd *next, *prev;	
 
 /* These elements define the operation we are about to perform */
@@ -442,7 +454,7 @@ typedef struct scsi_cmnd {
 	unsigned underflow;	/* Return error if less than this amount is 
 				   transfered */
 
-	unsigned transfersize;	/* How much we are guranteed to transfer with
+	unsigned transfersize;	/* How much we are guaranteed to transfer with
 				   each SCSI transfer (ie, between disconnect /
 				   reconnects.   Probably == sector size */
 	
@@ -500,7 +512,7 @@ typedef struct scsi_cmnd {
 	DID_ABORT is returned in the hostbyte.
 */
 
-extern int scsi_abort (Scsi_Cmnd *, int code);
+extern int scsi_abort (Scsi_Cmnd *, int code, int pid);
 
 extern void scsi_do_cmd (Scsi_Cmnd *, const void *cmnd ,
                   void *buffer, unsigned bufflen, void (*done)(struct scsi_cmnd *),
@@ -515,7 +527,7 @@ extern int scsi_reset (Scsi_Cmnd *);
 extern int max_scsi_hosts;
 
 #if defined(MAJOR_NR) && (MAJOR_NR != SCSI_TAPE_MAJOR)
-static void end_scsi_request(Scsi_Cmnd * SCpnt, int uptodate, int sectors)
+static Scsi_Cmnd * end_scsi_request(Scsi_Cmnd * SCpnt, int uptodate, int sectors)
 {
 	struct request * req;
 	struct buffer_head * bh;
@@ -547,15 +559,16 @@ static void end_scsi_request(Scsi_Cmnd * SCpnt, int uptodate, int sectors)
 	} while(sectors && bh);
 	if (req->bh){
 	  req->buffer = bh->b_data;
-	  return;
+	  return SCpnt;
 	};
 	DEVICE_OFF(req->dev);
 	if (req->sem != NULL) {
 		up(req->sem);
 	}
 	req->dev = -1;
+	wake_up(&wait_for_request);
 	wake_up(&SCpnt->device->device_wait);
-	return;
+	return NULL;
 }
 
 
@@ -566,7 +579,7 @@ static void end_scsi_request(Scsi_Cmnd * SCpnt, int uptodate, int sectors)
 #define INIT_SCSI_REQUEST \
 	if (!CURRENT) {\
 		CLEAR_INTR; \
-		sti();   \
+		restore_flags(flags);   \
 		return; \
 	} \
 	if (MAJOR(CURRENT->dev) != MAJOR_NR) \

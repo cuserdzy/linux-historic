@@ -36,33 +36,38 @@
 #include <linux/fcntl.h>
 #include <linux/ptrace.h>
 #include <linux/user.h>
-#include <linux/segment.h>
 #include <linux/malloc.h>
-
-#include <asm/system.h>
-
 #include <linux/binfmts.h>
 #include <linux/personality.h>
 
-#include <asm/segment.h>
 #include <asm/system.h>
+#include <asm/segment.h>
+
+#include <linux/config.h>
 
 asmlinkage int sys_exit(int exit_code);
 asmlinkage int sys_brk(unsigned long);
-
-extern void shm_exit (void);
 
 static int load_aout_binary(struct linux_binprm *, struct pt_regs * regs);
 static int load_aout_library(int fd);
 static int aout_core_dump(long signr, struct pt_regs * regs);
 
+extern void dump_thread(struct pt_regs *, struct user *);
+
 /*
  * Here are the actual binaries that will be accepted:
  * add more with "register_binfmt()"..
  */
+extern struct linux_binfmt elf_format;
+
 static struct linux_binfmt aout_format = {
-	NULL, NULL, load_aout_binary, load_aout_library, aout_core_dump
+#ifndef CONFIG_BINFMT_ELF
+ 	NULL, NULL, load_aout_binary, load_aout_library, aout_core_dump
+#else
+ 	&elf_format, NULL, load_aout_binary, load_aout_library, aout_core_dump
+#endif
 };
+
 static struct linux_binfmt *formats = &aout_format;
 
 int register_binfmt(struct linux_binfmt * fmt)
@@ -163,8 +168,7 @@ static int aout_core_dump(long signr, struct pt_regs * regs)
 	unsigned short fs;
 	int has_dumped = 0;
 	char corefile[6+sizeof(current->comm)];
-	int i;
-	register int dump_start, dump_size;
+	unsigned long dump_start, dump_size;
 	struct user dump;
 
 	if (!current->dumpable)
@@ -190,6 +194,8 @@ static int aout_core_dump(long signr, struct pt_regs * regs)
 		goto end_coredump;
 	if (!inode->i_op || !inode->i_op->default_file_ops)
 		goto end_coredump;
+	if (get_write_access(inode))
+		goto end_coredump;
 	file.f_mode = 3;
 	file.f_flags = 0;
 	file.f_count = 1;
@@ -199,48 +205,26 @@ static int aout_core_dump(long signr, struct pt_regs * regs)
 	file.f_op = inode->i_op->default_file_ops;
 	if (file.f_op->open)
 		if (file.f_op->open(inode,&file))
-			goto end_coredump;
+			goto done_coredump;
 	if (!file.f_op->write)
 		goto close_coredump;
 	has_dumped = 1;
-/* changed the size calculations - should hopefully work better. lbt */
-	dump.magic = CMAGIC;
-	dump.start_code = 0;
-	dump.start_stack = regs->esp & ~(PAGE_SIZE - 1);
-	dump.u_tsize = ((unsigned long) current->mm->end_code) >> 12;
-	dump.u_dsize = ((unsigned long) (current->mm->brk + (PAGE_SIZE-1))) >> 12;
-	dump.u_dsize -= dump.u_tsize;
-	dump.u_ssize = 0;
-	for(i=0; i<8; i++) dump.u_debugreg[i] = current->debugreg[i];  
-	if (dump.start_stack < TASK_SIZE)
-		dump.u_ssize = ((unsigned long) (TASK_SIZE - dump.start_stack)) >> 12;
+       	strncpy(dump.u_comm, current->comm, sizeof(current->comm));
+	dump.u_ar0 = (struct pt_regs *)(((unsigned long)(&dump.regs)) - ((unsigned long)(&dump)));
+	dump.signal = signr;
+	dump_thread(regs, &dump);
+
 /* If the size of the dump file exceeds the rlimit, then see what would happen
    if we wrote the stack, but not the data area.  */
 	if ((dump.u_dsize+dump.u_ssize+1) * PAGE_SIZE >
 	    current->rlim[RLIMIT_CORE].rlim_cur)
 		dump.u_dsize = 0;
+
 /* Make sure we have enough room to write the stack and data areas. */
 	if ((dump.u_ssize+1) * PAGE_SIZE >
 	    current->rlim[RLIMIT_CORE].rlim_cur)
 		dump.u_ssize = 0;
-       	strncpy(dump.u_comm, current->comm, sizeof(current->comm));
-	dump.u_ar0 = (struct pt_regs *)(((int)(&dump.regs)) -((int)(&dump)));
-	dump.signal = signr;
-	dump.regs = *regs;
-/* Flag indicating the math stuff is valid. We don't support this for the
-   soft-float routines yet */
-	if (hard_math) {
-		if ((dump.u_fpvalid = current->used_math) != 0) {
-			if (last_task_used_math == current)
-				__asm__("clts ; fnsave %0": :"m" (dump.i387));
-			else
-				memcpy(&dump.i387,&current->tss.i387.hard,sizeof(dump.i387));
-		}
-	} else {
-		/* we should dump the emulator state here, but we need to
-		   convert it into standard 387 format first.. */
-		dump.u_fpvalid = 0;
-	}
+
 	set_fs(KERNEL_DS);
 /* struct user */
 	DUMP_WRITE(&dump,sizeof(dump));
@@ -266,6 +250,8 @@ static int aout_core_dump(long signr, struct pt_regs * regs)
 close_coredump:
 	if (file.f_op->release)
 		file.f_op->release(inode,&file);
+done_coredump:
+	put_write_access(inode);
 end_coredump:
 	set_fs(fs);
 	iput(inode);
@@ -321,7 +307,6 @@ unsigned long * create_tables(char * p,int argc,int envc,int ibcs)
 		mpnt->vm_end = TASK_SIZE;
 		mpnt->vm_page_prot = PAGE_PRIVATE|PAGE_DIRTY;
 		mpnt->vm_flags = VM_STACK_FLAGS;
-		mpnt->vm_share = NULL;
 		mpnt->vm_ops = NULL;
 		mpnt->vm_offset = 0;
 		mpnt->vm_inode = NULL;
@@ -356,16 +341,26 @@ unsigned long * create_tables(char * p,int argc,int envc,int ibcs)
 
 /*
  * count() counts the number of arguments/envelopes
+ *
+ * We also do some limited EFAULT checking: this isn't complete, but
+ * it does cover most cases. I'll have to do this correctly some day..
  */
 static int count(char ** argv)
 {
-	int i=0;
-	char ** tmp;
+	int error, i = 0;
+	char ** tmp, *p;
 
-	if ((tmp = argv) != 0)
-		while (get_fs_long((unsigned long *) (tmp++)))
+	if ((tmp = argv) != NULL) {
+		error = verify_area(VERIFY_READ, tmp, sizeof(char *));
+		if (error)
+			return error;
+		while ((p = (char *) get_fs_long((unsigned long *) (tmp++))) != NULL) {
 			i++;
-
+			error = verify_area(VERIFY_READ, p, 1);
+			if (error)
+				return error;
+		}
+	}
 	return i;
 }
 
@@ -383,7 +378,7 @@ static int count(char ** argv)
  *    2          kernel space  kernel space
  * 
  * We do this by playing games with the fs segment register.  Since it
- * it is expensive to load a segment register, we try to avoid calling
+ * is expensive to load a segment register, we try to avoid calling
  * set_fs() unless we absolutely have to.
  */
 unsigned long copy_strings(int argc,char ** argv,unsigned long *page,
@@ -436,7 +431,7 @@ unsigned long copy_strings(int argc,char ** argv,unsigned long *page,
 	return p;
 }
 
-unsigned long change_ldt(unsigned long text_size,unsigned long * page)
+unsigned long setup_arg_pages(unsigned long text_size,unsigned long * page)
 {
 	unsigned long code_limit,data_limit,code_base,data_base;
 	int i;
@@ -522,8 +517,6 @@ void flush_old_exec(struct linux_binprm * bprm)
 				current->comm[i++] = ch;
 	}
 	current->comm[i] = '\0';
-	if (current->shm)
-		shm_exit();
 	/* Release all of the old mmap stuff. */
 
 	mpnt = current->mm->mmap;
@@ -532,29 +525,17 @@ void flush_old_exec(struct linux_binprm * bprm)
 		mpnt1 = mpnt->vm_next;
 		if (mpnt->vm_ops && mpnt->vm_ops->close)
 			mpnt->vm_ops->close(mpnt);
+		remove_shared_vm_struct(mpnt);
 		if (mpnt->vm_inode)
 			iput(mpnt->vm_inode);
 		kfree(mpnt);
 		mpnt = mpnt1;
 	}
 
-	/* Flush the old ldt stuff... */
-	if (current->ldt) {
-		free_page((unsigned long) current->ldt);
-		current->ldt = NULL;
-		for (i=1 ; i<NR_TASKS ; i++) {
-			if (task[i] == current)  {
-				set_ldt_desc(gdt+(i<<1)+
-					     FIRST_LDT_ENTRY,&default_ldt, 1);
-				load_ldt(i);
-			}
-		}	
-	}
-
-	for (i=0 ; i<8 ; i++) current->debugreg[i] = 0;
+	flush_thread();
 
 	if (bprm->e_uid != current->euid || bprm->e_gid != current->egid || 
-	    !permission(bprm->inode,MAY_READ))
+	    permission(bprm->inode,MAY_READ))
 		current->dumpable = 0;
 	current->signal = 0;
 	for (i=0 ; i<32 ; i++) {
@@ -585,8 +566,6 @@ int do_execve(char * filename, char ** argv, char ** envp, struct pt_regs * regs
 	int retval;
 	int sh_bang = 0;
 
-	if (regs->cs != USER_CS)
-		return -EINVAL;
 	bprm.p = PAGE_SIZE*MAX_ARG_PAGES-4;
 	for (i=0 ; i<MAX_ARG_PAGES ; i++)	/* clear page-table */
 		bprm.page[i] = 0;
@@ -594,8 +573,10 @@ int do_execve(char * filename, char ** argv, char ** envp, struct pt_regs * regs
 	if (retval)
 		return retval;
 	bprm.filename = filename;
-	bprm.argc = count(argv);
-	bprm.envc = count(envp);
+	if ((bprm.argc = count(argv)) < 0)
+		return bprm.argc;
+	if ((bprm.envc = count(envp)) < 0)
+		return bprm.envc;
 	
 restart_interp:
 	if (!S_ISREG(bprm.inode->i_mode)) {	/* must be regular file */
@@ -624,13 +605,15 @@ restart_interp:
 		bprm.e_uid = (i & S_ISUID) ? bprm.inode->i_uid : current->euid;
 		bprm.e_gid = (i & S_ISGID) ? bprm.inode->i_gid : current->egid;
 	}
-	if (current->euid == bprm.inode->i_uid)
-		i >>= 6;
-	else if (in_group_p(bprm.inode->i_gid))
-		i >>= 3;
-	if (!(i & 1) &&
-	    !((bprm.inode->i_mode & 0111) && suser())) {
+	if ((retval = permission(bprm.inode, MAY_EXEC)) != 0)
+		goto exec_error2;
+	if (!(bprm.inode->i_mode & 0111) && fsuser()) {
 		retval = -EACCES;
+		goto exec_error2;
+	}
+	/* better not execute files which are being written to */
+	if (bprm.inode->i_wcount > 0) {
+		retval = -ETXTBSY;
 		goto exec_error2;
 	}
 	memset(bprm.buf,0,sizeof(bprm.buf));
@@ -728,10 +711,10 @@ restart_interp:
 		if (!fn)
 			break;
 		retval = fn(&bprm, regs);
-		if (retval == 0) {
+		if (retval >= 0) {
 			iput(bprm.inode);
 			current->did_exec = 1;
-			return 0;
+			return retval;
 		}
 		if (retval != -ENOEXEC)
 			break;
@@ -742,22 +725,6 @@ exec_error1:
 	for (i=0 ; i<MAX_ARG_PAGES ; i++)
 		free_page(bprm.page[i]);
 	return(retval);
-}
-
-/*
- * sys_execve() executes a new program.
- */
-asmlinkage int sys_execve(struct pt_regs regs)
-{
-	int error;
-	char * filename;
-
-	error = getname((char *) regs.ebx, &filename);
-	if (error)
-		return error;
-	error = do_execve(filename, (char **) regs.ecx, (char **) regs.edx, &regs);
-	putname(filename);
-	return error;
 }
 
 static void set_brk(unsigned long start, unsigned long end)
@@ -841,17 +808,15 @@ static int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 			goto beyond_if;
 		}
 
-		if (ex.a_text) {
-			error = do_mmap(file, N_TXTADDR(ex), ex.a_text,
-				PROT_READ | PROT_EXEC,
-				MAP_FIXED | MAP_SHARED | MAP_DENYWRITE | MAP_EXECUTABLE,
-				fd_offset);
+		error = do_mmap(file, N_TXTADDR(ex), ex.a_text,
+			PROT_READ | PROT_EXEC,
+			MAP_FIXED | MAP_PRIVATE | MAP_DENYWRITE | MAP_EXECUTABLE,
+			fd_offset);
 
-			if (error != N_TXTADDR(ex)) {
-				sys_close(fd);
-				send_sig(SIGSEGV, current, 0);
-				return -EINVAL;
-			}
+		if (error != N_TXTADDR(ex)) {
+			sys_close(fd);
+			send_sig(SIGKILL, current, 0);
+			return error;
 		}
 		
  		error = do_mmap(file, N_TXTADDR(ex) + ex.a_text, ex.a_data,
@@ -860,8 +825,8 @@ static int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 				fd_offset + ex.a_text);
 		sys_close(fd);
 		if (error != N_TXTADDR(ex) + ex.a_text) {
-			send_sig(SIGSEGV, current, 0);
-			return -EINVAL;
+			send_sig(SIGKILL, current, 0);
+			return error;
 		}
 	}
 beyond_if:
@@ -878,14 +843,13 @@ beyond_if:
 
 	set_brk(current->mm->start_brk, current->mm->brk);
 	
-	p += change_ldt(ex.a_text,bprm->page);
+	p += setup_arg_pages(ex.a_text,bprm->page);
 	p -= MAX_ARG_PAGES*PAGE_SIZE;
 	p = (unsigned long)create_tables((char *)p,
 					bprm->argc, bprm->envc,
 					current->personality != PER_LINUX);
 	current->mm->start_stack = p;
-	regs->eip = ex.a_entry;		/* eip, magic happens :-) */
-	regs->esp = p;			/* stack pointer */
+	start_thread(regs, ex.a_entry, p);
 	if (current->flags & PF_PTRACED)
 		send_sig(SIGTRAP, current, 0);
 	return 0;

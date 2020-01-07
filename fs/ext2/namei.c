@@ -43,8 +43,6 @@
 static int ext2_match (int len, const char * const name,
 		       struct ext2_dir_entry * de)
 {
-	unsigned char same;
-
 	if (!de || !de->inode || len > EXT2_NAME_LEN)
 		return 0;
 	/*
@@ -55,13 +53,7 @@ static int ext2_match (int len, const char * const name,
 		return 1;
 	if (len != de->name_len)
 		return 0;
-	__asm__("cld\n\t"
-		"repe ; cmpsb\n\t"
-		"setz %0"
-		:"=q" (same)
-		:"S" ((long) name), "D" ((long) de->name), "c" (len)
-		:"cx", "di", "si");
-	return (int) same;
+	return !memcmp(name, de->name, len);
 }
 
 /*
@@ -326,6 +318,7 @@ static struct buffer_head * ext2_add_entry (struct inode * dir,
 			 */
 			dir->i_mtime = dir->i_ctime = CURRENT_TIME;
 			dir->i_dirt = 1;
+			dir->i_version = ++event;
 			mark_buffer_dirty(bh, 1);
 			*res_dir = de;
 			*err = 0;
@@ -704,6 +697,8 @@ repeat:
 	retval = -EPERM;
 	if (S_ISDIR(inode->i_mode))
 		goto end_unlink;
+	if (IS_APPEND(inode) || IS_IMMUTABLE(inode))
+		goto end_unlink;
 	if (de->inode != inode->i_ino) {
 		iput(inode);
 		brelse(bh);
@@ -835,6 +830,11 @@ int ext2_link (struct inode * oldinode, struct inode * dir,
 		iput (dir);
 		return -EPERM;
 	}
+	if (IS_APPEND(oldinode) || IS_IMMUTABLE(oldinode)) {
+		iput (oldinode);
+		iput (dir);
+		return -EPERM;
+	}
 	if (oldinode->i_nlink >= EXT2_LINK_MAX) {
 		iput (oldinode);
 		iput (dir);
@@ -924,8 +924,10 @@ static int do_ext2_rename (struct inode * old_dir, const char * old_name,
 
 	goto start_up;
 try_again:
-	if (new_bh && new_de)
+	if (new_bh && new_de) {
 		ext2_delete_entry(new_de, new_bh);
+		new_dir->i_version = ++event;
+	}
 	brelse (old_bh);
 	brelse (new_bh);
 	brelse (dir_bh);
@@ -948,6 +950,8 @@ start_up:
 	if ((old_dir->i_mode & S_ISVTX) && 
 	    current->fsuid != old_inode->i_uid &&
 	    current->fsuid != old_dir->i_uid && !fsuser())
+		goto end_rename;
+	if (IS_APPEND(old_inode) || IS_IMMUTABLE(old_inode))
 		goto end_rename;
 	new_bh = ext2_find_entry (new_dir, new_name, new_len, &new_de);
 	if (new_bh) {
@@ -1001,6 +1005,7 @@ start_up:
 					 &retval);
 	if (!new_bh)
 		goto end_rename;
+	new_dir->i_version = ++event;
 	/*
 	 * sanity checking before doing the rename - avoid races
 	 */
@@ -1014,7 +1019,6 @@ start_up:
 	 * ok, that's it
 	 */
 	new_de->inode = old_inode->i_ino;
-	new_dir->i_version = ++event;
 	dcache_add(new_dir, new_de->name, new_de->name_len, new_de->inode);
 	retval = ext2_delete_entry (old_de, old_bh);
 	if (retval == -ENOENT)

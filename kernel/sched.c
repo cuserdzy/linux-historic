@@ -21,10 +21,10 @@
 #include <linux/errno.h>
 #include <linux/time.h>
 #include <linux/ptrace.h>
-#include <linux/segment.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/tqueue.h>
+#include <linux/resource.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
@@ -42,6 +42,7 @@ volatile struct timeval xtime;		/* The current time */
 int tickadj = 500/HZ;			/* microsecs */
 
 DECLARE_TASK_QUEUE(tq_timer);
+DECLARE_TASK_QUEUE(tq_immediate);
 
 /*
  * phase-lock loop variables
@@ -64,20 +65,6 @@ long time_adjust_step = 0;
 int need_resched = 0;
 unsigned long event = 0;
 
-/*
- * Tell us the machine setup..
- */
-int hard_math = 0;		/* set by boot/head.S */
-int x86 = 0;			/* set by boot/head.S to 3 or 4 */
-int ignore_irq13 = 0;		/* set if exception 16 works */
-int wp_works_ok = 0;		/* set if paging hardware honours WP */ 
-int hlt_works_ok = 1;		/* set if the "hlt" instruction works */
-
-/*
- * Bus types ..
- */
-int EISA_bus = 0;
-
 extern int _setitimer(int, struct itimerval *, struct itimerval *);
 unsigned long * prof_buffer = NULL;
 unsigned long prof_len = 0;
@@ -87,9 +74,10 @@ unsigned long prof_len = 0;
 extern void mem_use(void);
 
 extern int timer_interrupt(void);
-asmlinkage int system_call(void);
-
+ 
 static unsigned long init_kernel_stack[1024] = { STACK_MAGIC, };
+unsigned long init_user_stack[1024] = { STACK_MAGIC, };
+static struct vm_area_struct init_mmap = INIT_MMAP;
 struct task_struct init_task = INIT_TASK;
 
 unsigned long volatile jiffies=0;
@@ -99,54 +87,7 @@ struct task_struct *last_task_used_math = NULL;
 
 struct task_struct * task[NR_TASKS] = {&init_task, };
 
-long user_stack [ PAGE_SIZE>>2 ] = { STACK_MAGIC, };
-
-struct {
-	long * a;
-	short b;
-	} stack_start = { & user_stack [PAGE_SIZE>>2] , KERNEL_DS };
-
 struct kernel_stat kstat = { 0 };
-
-/*
- *  'math_state_restore()' saves the current math information in the
- * old math state array, and gets the new ones from the current task
- *
- * Careful.. There are problems with IBM-designed IRQ13 behaviour.
- * Don't touch unless you *really* know how it works.
- */
-asmlinkage void math_state_restore(void)
-{
-	__asm__ __volatile__("clts");
-	if (last_task_used_math == current)
-		return;
-	timer_table[COPRO_TIMER].expires = jiffies+50;
-	timer_active |= 1<<COPRO_TIMER;	
-	if (last_task_used_math)
-		__asm__("fnsave %0":"=m" (last_task_used_math->tss.i387));
-	else
-		__asm__("fnclex");
-	last_task_used_math = current;
-	if (current->used_math) {
-		__asm__("frstor %0": :"m" (current->tss.i387));
-	} else {
-		__asm__("fninit");
-		current->used_math=1;
-	}
-	timer_active &= ~(1<<COPRO_TIMER);
-}
-
-#ifndef CONFIG_MATH_EMULATION
-
-asmlinkage void math_emulate(long arg)
-{
-  printk("math-emulation not enabled and no coprocessor found.\n");
-  printk("killing %s.\n",current->comm);
-  send_sig(SIGFPE,current,1);
-  schedule();
-}
-
-#endif /* CONFIG_MATH_EMULATION */
 
 unsigned long itimer_ticks = 0;
 unsigned long itimer_next = ~0;
@@ -243,14 +184,6 @@ confuse_gcc2:
 		return;
 	kstat.context_swtch++;
 	switch_to(next);
-	/* Now maybe reload the debug registers */
-	if(current->debugreg[7]){
-		loaddebug(0);
-		loaddebug(1);
-		loaddebug(2);
-		loaddebug(3);
-		loaddebug(6);
-	};
 }
 
 asmlinkage int sys_pause(void)
@@ -285,7 +218,8 @@ void wake_up(struct wait_queue **q)
 			}
 		}
 		if (!tmp->next) {
-			printk("wait_queue is bad (eip = %08lx)\n",((unsigned long *) q)[-1]);
+			printk("wait_queue is bad (eip = %p)\n",
+				__builtin_return_address(0));
 			printk("        q = %p\n",q);
 			printk("       *q = %p\n",*q);
 			printk("      tmp = %p\n",tmp);
@@ -311,7 +245,8 @@ void wake_up_interruptible(struct wait_queue **q)
 			}
 		}
 		if (!tmp->next) {
-			printk("wait_queue is bad (eip = %08lx)\n",((unsigned long *) q)[-1]);
+			printk("wait_queue is bad (eip = %p)\n",
+				__builtin_return_address(0));
 			printk("        q = %p\n",q);
 			printk("       *q = %p\n",*q);
 			printk("      tmp = %p\n",tmp);
@@ -376,8 +311,8 @@ void add_timer(struct timer_list * timer)
 
 #if SLOW_BUT_DEBUGGING_TIMERS
 	if (timer->next || timer->prev) {
-		printk("add_timer() called with non-zero list from %08lx\n",
-			((unsigned long *) &timer)[-1]);
+		printk("add_timer() called with non-zero list from %p\n",
+			__builtin_return_address(0));
 		return;
 	}
 #endif
@@ -415,8 +350,8 @@ int del_timer(struct timer_list * timer)
 		}
 	}
 	if (timer->next || timer->prev)
-		printk("del_timer() called from %08lx with timer not initialized\n",
-			((unsigned long *) &timer)[-1]);
+		printk("del_timer() called from %p with timer not initialized\n",
+			__builtin_return_address(0));
 	restore_flags(flags);
 	return 0;
 #else	
@@ -538,7 +473,7 @@ static void second_overflow(void)
 		time_status = TIME_OK;
 		break;
 	}
-	if (xtime.tv_sec > last_rtc_update + 660)
+	if (time_status != TIME_BAD && xtime.tv_sec > last_rtc_update + 660)
 	  if (set_rtc_mmss(xtime.tv_sec) == 0)
 	    last_rtc_update = xtime.tv_sec;
 	  else
@@ -585,18 +520,23 @@ void tqueue_bh(void * unused)
 	run_task_queue(&tq_timer);
 }
 
+void immediate_bh(void * unused)
+{
+	run_task_queue(&tq_immediate);
+}
+
 /*
  * The int argument is really a (struct pt_regs *), in case the
  * interrupt wants to know from where it was called. The timer
  * irq uses this to decide if it should update the user or system
  * times.
  */
-static void do_timer(struct pt_regs * regs)
+static void do_timer(int irq, struct pt_regs * regs)
 {
 	unsigned long mask;
 	struct timer_struct *tp;
 
-	long ltemp;
+	long ltemp, psecs;
 
 	/* Advance the phase, once it gets to one microsecond, then
 	 * advance the tick more.
@@ -646,7 +586,7 @@ static void do_timer(struct pt_regs * regs)
 
 	jiffies++;
 	calc_load();
-	if ((VM_MASK & regs->eflags) || (3 & regs->cs)) {
+	if (user_mode(regs)) {
 		current->utime++;
 		if (current != task[0]) {
 			if (current->priority < 15)
@@ -666,12 +606,30 @@ static void do_timer(struct pt_regs * regs)
 #ifdef CONFIG_PROFILE
 		if (prof_buffer && current != task[0]) {
 			unsigned long eip = regs->eip;
-			eip >>= 2;
+			eip >>= CONFIG_PROFILE_SHIFT;
 			if (eip < prof_len)
 				prof_buffer[eip]++;
 		}
 #endif
 	}
+	/*
+	 * check the cpu time limit on the process.
+	 */
+	if ((current->rlim[RLIMIT_CPU].rlim_max != RLIM_INFINITY) &&
+	    (((current->stime + current->utime) / HZ) >= current->rlim[RLIMIT_CPU].rlim_max))
+		send_sig(SIGKILL, current, 1);
+	if ((current->rlim[RLIMIT_CPU].rlim_cur != RLIM_INFINITY) &&
+	    (((current->stime + current->utime) % HZ) == 0)) {
+		psecs = (current->stime + current->utime) / HZ;
+		/* send when equal */
+		if (psecs == current->rlim[RLIMIT_CPU].rlim_cur)
+			send_sig(SIGXCPU, current, 1);
+		/* and every five seconds thereafter. */
+		else if ((psecs > current->rlim[RLIMIT_CPU].rlim_cur) &&
+		        ((psecs - current->rlim[RLIMIT_CPU].rlim_cur) % 5) == 0)
+			send_sig(SIGXCPU, current, 1);
+	}
+
 	if (current != task[0] && 0 > --current->counter) {
 		current->counter = 0;
 		need_resched = 1;
@@ -767,10 +725,12 @@ static void show_task(int nr,struct task_struct * p)
 		printk(stat_nam[p->state]);
 	else
 		printk(" ");
+#ifdef __i386__
 	if (p == current)
 		printk(" current  ");
 	else
 		printk(" %08lX ", ((unsigned long *)p->tss.esp)[3]);
+#endif
 	for (free = 1; free < 1024 ; free++) {
 		if (((unsigned long *)p->kernel_stack_page)[free])
 			break;
@@ -803,31 +763,9 @@ void show_state(void)
 
 void sched_init(void)
 {
-	int i;
-	struct desc_struct * p;
-
 	bh_base[TIMER_BH].routine = timer_bh;
 	bh_base[TQUEUE_BH].routine = tqueue_bh;
-	if (sizeof(struct sigaction) != 16)
-		panic("Struct sigaction MUST be 16 bytes");
-	set_tss_desc(gdt+FIRST_TSS_ENTRY,&init_task.tss);
-	set_ldt_desc(gdt+FIRST_LDT_ENTRY,&default_ldt,1);
-	set_system_gate(0x80,&system_call);
-	p = gdt+2+FIRST_TSS_ENTRY;
-	for(i=1 ; i<NR_TASKS ; i++) {
-		task[i] = NULL;
-		p->a=p->b=0;
-		p++;
-		p->a=p->b=0;
-		p++;
-	}
-/* Clear NT, so that we won't have troubles with that later on */
-	__asm__("pushfl ; andl $0xffffbfff,(%esp) ; popfl");
-	load_TR(0);
-	load_ldt(0);
-	outb_p(0x34,0x43);		/* binary, mode 2, LSB/MSB, ch 0 */
-	outb_p(LATCH & 0xff , 0x40);	/* LSB */
-	outb(LATCH >> 8 , 0x40);	/* MSB */
-	if (request_irq(TIMER_IRQ,(void (*)(int)) do_timer, 0, "timer") != 0)
+	bh_base[IMMEDIATE_BH].routine = immediate_bh;
+	if (request_irq(TIMER_IRQ, do_timer, 0, "timer") != 0)
 		panic("Could not allocate timer IRQ!");
 }

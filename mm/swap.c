@@ -19,6 +19,7 @@
 #include <linux/stat.h>
 #include <linux/fs.h>
 
+#include <asm/dma.h>
 #include <asm/system.h> /* for cli()/sti() */
 #include <asm/bitops.h>
 
@@ -30,6 +31,8 @@
 #define SWP_TYPE(entry) (((entry) & 0xfe) >> 1)
 #define SWP_OFFSET(entry) ((entry) >> PAGE_SHIFT)
 #define SWP_ENTRY(type,offset) (((type) << 1) | ((offset) << PAGE_SHIFT))
+
+int min_free_pages = 20;
 
 static int nr_swapfiles = 0;
 static struct wait_queue * lock_queue = NULL;
@@ -74,14 +77,8 @@ extern inline int add_to_swap_cache(unsigned long addr, unsigned long entry)
 #ifdef SWAP_CACHE_INFO
 	swap_cache_add_total++;
 #endif
-	if ((p->flags & SWP_WRITEOK) == SWP_WRITEOK) { 
-		__asm__ __volatile__ (
-				      "xchgl %0,%1\n"
-				      : "=m" (swap_cache[addr >> PAGE_SHIFT]),
-				       "=r" (entry)
-				      : "0" (swap_cache[addr >> PAGE_SHIFT]),
-				       "1" (entry)
-				      );
+	if ((p->flags & SWP_WRITEOK) == SWP_WRITEOK) {
+		entry = (unsigned long) xchg_ptr(swap_cache + MAP_NR(addr), (void *) entry);
 		if (entry)  {
 			printk("swap_cache: replacing non-NULL entry\n");
 		}
@@ -100,7 +97,7 @@ static unsigned long init_swap_cache(unsigned long mem_start,
 
 	mem_start = (mem_start + 15) & ~15;
 	swap_cache = (unsigned long *) mem_start;
-	swap_cache_size = mem_end >> PAGE_SHIFT;
+	swap_cache_size = MAP_NR(mem_end);
 	memset(swap_cache, 0, swap_cache_size * sizeof (unsigned long));
 	return (unsigned long) (swap_cache + swap_cache_size);
 }
@@ -280,12 +277,12 @@ unsigned long swap_in(unsigned long entry)
 	}
 	read_swap_page(entry, (char *) page);
 	if (add_to_swap_cache(page, entry))
-		return page | PAGE_PRIVATE;
+		return page | PAGE_PRESENT;
   	swap_free(entry);
-	return page | PAGE_DIRTY | PAGE_PRIVATE;
+	return page | PAGE_DIRTY | PAGE_PRESENT;
 }
 
-static inline int try_to_swap_out(unsigned long * table_ptr)
+static inline int try_to_swap_out(struct vm_area_struct* vma, unsigned offset, unsigned long * table_ptr)
 {
 	unsigned long page, entry;
 
@@ -309,13 +306,18 @@ static inline int try_to_swap_out(unsigned long * table_ptr)
 		page &= PAGE_MASK;
 		if (mem_map[MAP_NR(page)] != 1)
 			return 0;
-		if (!(entry = get_swap_page()))
-			return 0;
-		*table_ptr = entry;
-		invalidate();
-		write_swap_page(entry, (char *) page);
+		if (vma->vm_ops && vma->vm_ops->swapout)
+			vma->vm_ops->swapout(vma, offset, table_ptr);
+		else
+		{
+			if (!(entry = get_swap_page()))
+				return 0;
+			*table_ptr = entry;
+			invalidate();
+			write_swap_page(entry, (char *) page);
+		}
 		free_page(page);
-		return 1;
+		return 1 + mem_map[MAP_NR(page)];
 	}
         if ((entry = find_in_swap_cache(page)))  {
 		if (mem_map[MAP_NR(page)] != 1) {
@@ -368,12 +370,29 @@ static int swap_out_process(struct task_struct * p)
 	unsigned long offset;
 	unsigned long *pgdir;
 	unsigned long pg_table;
+	struct vm_area_struct* vma;
 
 	/*
 	 * Go through process' page directory.
 	 */
 	address = p->mm->swap_address;
-	pgdir = (address >> PGDIR_SHIFT) + (unsigned long *) p->tss.cr3;
+	p->mm->swap_address = 0;
+
+	/*
+	 * Find the proper vm-area
+	 */
+	vma = p->mm->mmap;
+	for (;;) {
+		if (!vma)
+			return 0;
+		if (address <= vma->vm_end)
+			break;
+		vma = vma->vm_next;
+	}
+	if (address < vma->vm_start)
+		address = vma->vm_start;
+
+	pgdir = PAGE_DIR_OFFSET(p, address);
 	offset = address & ~PGDIR_MASK;
 	address &= PGDIR_MASK;
 	for ( ; address < TASK_SIZE ;
@@ -395,7 +414,18 @@ static int swap_out_process(struct task_struct * p)
 		 * Go through this page table.
 		 */
 		for( ; offset < ~PGDIR_MASK ; offset += PAGE_SIZE) {
-			switch(try_to_swap_out((unsigned long *) (pg_table + (offset >> 10)))) {
+			/*
+			 * Update vma again..
+			 */
+			for (;;) {
+				if (address+offset < vma->vm_end)
+					break;
+				vma = vma->vm_next;
+				if (!vma)
+					return 0;
+			}
+
+			switch(try_to_swap_out(vma, offset+address-vma->vm_start, (unsigned long *) (pg_table + (offset >> 10)))) {
 				case 0:
 					break;
 
@@ -413,9 +443,8 @@ static int swap_out_process(struct task_struct * p)
 	}
 	/*
 	 * Finish work with this process, if we reached the end of the page
-	 * directory.  Mark restart from the beginning the next time.
+	 * directory.
 	 */
-	p->mm->swap_address = 0;
 	return 0;
 }
 
@@ -491,8 +520,7 @@ static int try_to_free_page(int priority)
 static inline void add_mem_queue(struct mem_list * head, struct mem_list * entry)
 {
 	entry->prev = head;
-	entry->next = head->next;
-	entry->next->prev = entry;
+	(entry->next = head->next)->prev = entry;
 	head->next = entry;
 }
 
@@ -519,7 +547,7 @@ static inline void remove_mem_queue(struct mem_list * head, struct mem_list * en
  */
 static inline void free_pages_ok(unsigned long addr, unsigned long order)
 {
-	unsigned long index = addr >> (PAGE_SHIFT + 1 + order);
+	unsigned long index = MAP_NR(addr) >> (1 + order);
 	unsigned long mask = PAGE_MASK << order;
 
 	addr &= mask;
@@ -555,7 +583,7 @@ void free_pages(unsigned long addr, unsigned long order)
 {
 	if (addr < high_memory) {
 		unsigned long flag;
-		unsigned short * map = mem_map + MAP_NR(addr);
+		mem_map_t * map = mem_map + MAP_NR(addr);
 		if (*map) {
 			if (!(*map & MAP_PAGE_RESERVED)) {
 				save_flags(flag);
@@ -584,8 +612,7 @@ do { struct mem_list * queue = free_area_list+order; \
      unsigned long new_order = order; \
 	do { struct mem_list *next = queue->next; \
 		if (queue != next) { \
-			queue->next = next->next; \
-			next->next->prev = queue; \
+			(queue->next = next->next)->prev = queue; \
 			mark_used((unsigned long) next, new_order); \
 			nr_free_pages -= 1 << order; \
 			restore_flags(flags); \
@@ -597,7 +624,7 @@ do { struct mem_list * queue = free_area_list+order; \
 
 static inline int mark_used(unsigned long addr, unsigned long order)
 {
-	return change_bit(addr >> (PAGE_SHIFT+1+order), free_area_map[order]);
+	return change_bit(MAP_NR(addr) >> (1+order), free_area_map[order]);
 }
 
 #define EXPAND(addr,low,high) \
@@ -614,19 +641,23 @@ do { unsigned long size = PAGE_SIZE << high; \
 unsigned long __get_free_pages(int priority, unsigned long order)
 {
 	unsigned long flags;
+	int reserved_pages;
 
 	if (intr_count && priority != GFP_ATOMIC) {
 		static int count = 0;
 		if (++count < 5) {
-			printk("gfp called nonatomically from interrupt %08lx\n",
-				((unsigned long *)&priority)[-1]);
+			printk("gfp called nonatomically from interrupt %p\n",
+				__builtin_return_address(0));
 			priority = GFP_ATOMIC;
 		}
 	}
+	reserved_pages = 5;
+	if (priority != GFP_NFS)
+		reserved_pages = min_free_pages;
 	save_flags(flags);
 repeat:
 	cli();
-	if ((priority==GFP_ATOMIC) || nr_free_pages > MAX_SECONDARY_PAGES) {
+	if ((priority==GFP_ATOMIC) || nr_free_pages > reserved_pages) {
 		RMQUEUE(order);
 		restore_flags(flags);
 		return 0;
@@ -635,6 +666,33 @@ repeat:
 	if (priority != GFP_BUFFER && try_to_free_page(priority))
 		goto repeat;
 	return 0;
+}
+
+/*
+ * Yes, I know this is ugly. Don't tell me.
+ */
+unsigned long __get_dma_pages(int priority, unsigned long order)
+{
+	unsigned long list = 0;
+	unsigned long result;
+	unsigned long limit = MAX_DMA_ADDRESS;
+
+	/* if (EISA_bus) limit = ~0UL; */
+	if (priority != GFP_ATOMIC)
+		priority = GFP_BUFFER;
+	for (;;) {
+		result = __get_free_pages(priority, order);
+		if (result < limit) /* covers failure as well */
+			break;
+		*(unsigned long *) result = list;
+		list = result;
+	}
+	while (list) {
+		unsigned long tmp = list;
+		list = *(unsigned long *) list;
+		free_pages(tmp, order);
+	}
+	return result;
 }
 
 /*
@@ -690,7 +748,7 @@ repeat:
 		if (!p)
 			continue;
 		for (pgt = 0 ; pgt < PTRS_PER_PAGE ; pgt++) {
-			ppage = pgt + ((unsigned long *) p->tss.cr3);
+			ppage = pgt + PAGE_DIR_OFFSET(p, 0);
 			page = *ppage;
 			if (!page)
 				continue;
@@ -704,6 +762,8 @@ repeat:
 				if (!page)
 					continue;
 				if (page & PAGE_PRESENT) {
+					if (page >= high_memory)
+						continue;
 					if (!(page = in_swap_cache(page)))
 						continue;
 					if (SWP_TYPE(page) != type)
@@ -739,6 +799,7 @@ asmlinkage int sys_swapoff(const char * specialfile)
 	struct swap_info_struct * p;
 	struct inode * inode;
 	unsigned int type;
+	struct file filp;
 	int i;
 
 	if (!suser())
@@ -760,15 +821,32 @@ asmlinkage int sys_swapoff(const char * specialfile)
 				break;
 		}
 	}
-	iput(inode);
-	if (type >= nr_swapfiles)
+
+	if (type >= nr_swapfiles){
+		iput(inode);
 		return -EINVAL;
+	}
 	p->flags = SWP_USED;
 	i = try_to_unuse(type);
 	if (i) {
+		iput(inode);
 		p->flags = SWP_WRITEOK;
 		return i;
 	}
+
+	if(p->swap_device){
+		memset(&filp, 0, sizeof(filp));		
+		filp.f_inode = inode;
+		filp.f_mode = 3; /* read write */
+		/* open it again to get fops */
+		if( !blkdev_open(inode, &filp) &&
+		   filp.f_op && filp.f_op->release){
+			filp.f_op->release(inode,&filp);
+			filp.f_op->release(inode,&filp);
+		}
+	}
+	iput(inode);
+
 	nr_swap_pages -= p->pages;
 	iput(p->swap_file);
 	p->swap_file = NULL;
@@ -793,7 +871,9 @@ asmlinkage int sys_swapon(const char * specialfile)
 	unsigned int type;
 	int i,j;
 	int error;
+	struct file filp;
 
+	memset(&filp, 0, sizeof(filp));
 	if (!suser())
 		return -EPERM;
 	p = swap_info;
@@ -814,16 +894,23 @@ asmlinkage int sys_swapon(const char * specialfile)
 	p->max = 1;
 	error = namei(specialfile,&swap_inode);
 	if (error)
-		goto bad_swap;
+		goto bad_swap_2;
 	p->swap_file = swap_inode;
 	error = -EBUSY;
 	if (swap_inode->i_count != 1)
-		goto bad_swap;
+		goto bad_swap_2;
 	error = -EINVAL;
+
 	if (S_ISBLK(swap_inode->i_mode)) {
 		p->swap_device = swap_inode->i_rdev;
+
+		filp.f_inode = swap_inode;
+		filp.f_mode = 3; /* read write */
+		error = blkdev_open(swap_inode, &filp);
 		p->swap_file = NULL;
 		iput(swap_inode);
+		if(error)
+			goto bad_swap_2;
 		error = -ENODEV;
 		if (!p->swap_device)
 			goto bad_swap;
@@ -885,6 +972,9 @@ asmlinkage int sys_swapon(const char * specialfile)
 	printk("Adding Swap: %dk swap-space\n",j<<2);
 	return 0;
 bad_swap:
+	if(filp.f_op && filp.f_op->release)
+		filp.f_op->release(filp.f_inode,&filp);
+bad_swap_2:
 	free_page((long) p->swap_lockmap);
 	vfree(p->swap_map);
 	iput(p->swap_file);
@@ -927,23 +1017,33 @@ void si_swapinfo(struct sysinfo *val)
  */
 unsigned long free_area_init(unsigned long start_mem, unsigned long end_mem)
 {
-	unsigned short * p;
+	mem_map_t * p;
 	unsigned long mask = PAGE_MASK;
 	int i;
 
+	/*
+	 * select nr of pages we try to keep free for important stuff
+	 * with a minimum of 16 pages. This is totally arbitrary
+	 */
+	i = (end_mem - PAGE_OFFSET) >> (PAGE_SHIFT+6);
+	if (i < 16)
+		i = 16;
+	min_free_pages = i;
 	start_mem = init_swap_cache(start_mem, end_mem);
-	mem_map = (unsigned short *) start_mem;
+	mem_map = (mem_map_t *) start_mem;
 	p = mem_map + MAP_NR(end_mem);
 	start_mem = (unsigned long) p;
 	while (p > mem_map)
 		*--p = MAP_PAGE_RESERVED;
 
-	for (i = 0 ; i < NR_MEM_LISTS ; i++, mask <<= 1) {
+	for (i = 0 ; i < NR_MEM_LISTS ; i++) {
 		unsigned long bitmap_size;
 		free_area_list[i].prev = free_area_list[i].next = &free_area_list[i];
+		mask += mask;
 		end_mem = (end_mem + ~mask) & mask;
-		bitmap_size = end_mem >> (PAGE_SHIFT + i);
+		bitmap_size = (end_mem - PAGE_OFFSET) >> (PAGE_SHIFT + i);
 		bitmap_size = (bitmap_size + 7) >> 3;
+		bitmap_size = (bitmap_size + sizeof(unsigned long) - 1) & ~(sizeof(unsigned long)-1);
 		free_area_map[i] = (unsigned char *) start_mem;
 		memset((void *) start_mem, 0, bitmap_size);
 		start_mem += bitmap_size;

@@ -19,8 +19,9 @@
 !
 
 ! NOTE! These had better be the same as in bootsect.s!
+#define __ASSEMBLY__
 #include <linux/config.h>
-#include <linux/segment.h>
+#include <asm/segment.h>
 
 #ifndef SVGA_MODE
 #define SVGA_MODE ASK_VGA
@@ -45,6 +46,11 @@ begbss:
 
 entry start
 start:
+! Bootlin depends on this being done early
+	mov	ax,#0x01500
+	mov	dl,#0x81
+	int	0x13
+
 ! Check signature at end of setup
 	mov	ax,#SETUPSEG
 	mov	ds,ax

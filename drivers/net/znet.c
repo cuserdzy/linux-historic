@@ -1,6 +1,6 @@
 /* znet.c: An Zenith Z-Note ethernet driver for linux. */
 
-static char *version = "znet.c:v1.01 7/1/94 becker@cesdis.gsfc.nasa.gov\n";
+static char *version = "znet.c:v1.02 9/23/94 becker@cesdis.gsfc.nasa.gov\n";
 
 /*
 	Written by Donald Becker.
@@ -62,7 +62,6 @@ static char *version = "znet.c:v1.01 7/1/94 becker@cesdis.gsfc.nasa.gov\n";
 	functionality from the serial subsystem.
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/string.h>
@@ -81,7 +80,7 @@ static char *version = "znet.c:v1.01 7/1/94 becker@cesdis.gsfc.nasa.gov\n";
 #include <linux/if_arp.h>
 
 #ifndef ZNET_DEBUG
-#define ZNET_DEBUG 3
+#define ZNET_DEBUG 1
 #endif
 static unsigned int znet_debug = ZNET_DEBUG;
 
@@ -183,7 +182,7 @@ struct netidblk {
 int znet_probe(struct device *dev);
 static int	znet_open(struct device *dev);
 static int	znet_send_packet(struct sk_buff *skb, struct device *dev);
-static void	znet_interrupt(int reg_ptr);
+static void	znet_interrupt(int irq, struct pt_regs *regs);
 static void	znet_rx(struct device *dev);
 static int	znet_close(struct device *dev);
 static struct enet_statistics *net_get_stats(struct device *dev);
@@ -248,8 +247,8 @@ int znet_probe(struct device *dev)
 
 	/* These should never fail.  You can't add devices to a sealed box! */
 	if (request_irq(dev->irq, &znet_interrupt, 0, "ZNet")
-		|| request_dma(zn.rx_dma)
-		|| request_dma(zn.tx_dma)) {
+		|| request_dma(zn.rx_dma,"ZNet rx")
+		|| request_dma(zn.tx_dma,"ZNet tx")) {
 		printk(KERN_WARNING "%s: Not opened -- resource busy?!?\n", dev->name);
 		return EBUSY;
 	}
@@ -403,9 +402,8 @@ static int znet_send_packet(struct sk_buff *skb, struct device *dev)
 }
 
 /* The ZNET interrupt handler. */
-static void	znet_interrupt(int reg_ptr)
+static void	znet_interrupt(int irq, struct pt_regs * regs)
 {
-	int irq = -(((struct pt_regs *)reg_ptr)->orig_eax+2);
 	struct device *dev = irq2dev_map[irq];
 	int ioaddr;
 	int boguscnt = 20;
@@ -548,18 +546,15 @@ static void znet_rx(struct device *dev)
 			lp->stats.rx_length_errors++;
 		} else {
 			/* Malloc up new buffer. */
-			int sksize = sizeof(struct sk_buff) + pkt_len;
 			struct sk_buff *skb;
 
-			skb = alloc_skb(sksize, GFP_ATOMIC);
+			skb = alloc_skb(pkt_len, GFP_ATOMIC);
 			if (skb == NULL) {
 				if (znet_debug)
 				  printk(KERN_WARNING "%s: Memory squeeze, dropping packet.\n", dev->name);
 				lp->stats.rx_dropped++;
 				break;
 			}
-			skb->mem_len = sksize;
-			skb->mem_addr = skb;
 			skb->len = pkt_len;
 			skb->dev = dev;
 

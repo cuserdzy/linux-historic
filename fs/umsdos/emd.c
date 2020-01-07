@@ -25,9 +25,10 @@ int umsdos_readdir_kmem(
 	int count)
 {
 	int ret;
+	int old_fs = get_fs();
 	set_fs (KERNEL_DS);
 	ret = msdos_readdir(inode,filp,dirent,count);
-	set_fs (USER_DS);
+	set_fs (old_fs);
 	return ret;
 }
 /*
@@ -39,10 +40,11 @@ int umsdos_file_read_kmem(
 	char *buf,
 	int count)
 {
-	int ret;	
+	int ret;
+	int old_fs = get_fs();	
 	set_fs (KERNEL_DS);
 	ret = msdos_file_read(inode,filp,buf,count);
-	set_fs (USER_DS);
+	set_fs (old_fs);
 	return ret;
 }
 /*
@@ -55,9 +57,10 @@ int umsdos_file_write_kmem(
 	int count)
 {
 	int ret;
+	int old_fs = get_fs();
 	set_fs (KERNEL_DS);
 	ret = msdos_file_write(inode,filp,buf,count);
-	set_fs (USER_DS);
+	set_fs (old_fs);
 	return ret;
 }
 
@@ -197,6 +200,7 @@ int umsdos_writeentry (
 		memset (entry->spare,0,sizeof(entry->spare));
 	}
 	filp.f_pos = info->f_pos;
+	filp.f_reada = 0;
 	ret = umsdos_emd_dir_write(emd_dir,&filp,(char*)entry,info->recsize);
 	if (ret != 0){
 		printk ("UMSDOS: problem with EMD file. Can't write\n");
@@ -207,7 +211,7 @@ int umsdos_writeentry (
 	return ret;
 }
 
-#define CHUNK_SIZE (16*UMSDOS_REC_SIZE)
+#define CHUNK_SIZE (8*UMSDOS_REC_SIZE)
 struct find_buffer{
 	char buffer[CHUNK_SIZE];
 	int pos;	/* read offset in buffer */
@@ -296,6 +300,7 @@ static int umsdos_find (
 		buf.pos = 0;
 		buf.size = 0;
 		buf.filp.f_pos = 0;
+		buf.filp.f_reada = 1;
 		empty.found = 0;
 		empty.posok = emd_dir->i_size;
 		empty.onesize = 0;
@@ -454,6 +459,7 @@ int umsdos_isempty (struct inode *dir)
 		struct file filp;
 		/* Find an empty slot */
 		filp.f_pos = 0;
+		filp.f_reada = 1;
 		filp.f_flags = O_RDONLY;
 		ret = 1;
 		while (filp.f_pos < emd_dir->i_size){

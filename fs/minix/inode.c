@@ -4,6 +4,14 @@
  *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
+#ifdef MODULE
+#include <linux/module.h>
+#include <linux/version.h>
+#else
+#define MOD_INC_USE_COUNT
+#define MOD_DEC_USE_COUNT
+#endif
+
 #include <linux/sched.h>
 #include <linux/minix_fs.h>
 #include <linux/kernel.h>
@@ -63,6 +71,7 @@ void minix_put_super(struct super_block *sb)
 		brelse(sb->u.minix_sb.s_zmap[i]);
 	brelse (sb->u.minix_sb.s_sbh);
 	unlock_super(sb);
+	MOD_DEC_USE_COUNT;
 	return;
 }
 
@@ -121,11 +130,14 @@ struct super_block *minix_read_super(struct super_block *s,void *data,
 
 	if (32 != sizeof (struct minix_inode))
 		panic("bad i-node size");
+	MOD_INC_USE_COUNT;
 	lock_super(s);
+	set_blocksize(dev, BLOCK_SIZE);
 	if (!(bh = bread(dev,1,BLOCK_SIZE))) {
 		s->s_dev=0;
 		unlock_super(s);
 		printk("MINIX-fs: unable to read superblock\n");
+		MOD_DEC_USE_COUNT;
 		return NULL;
 	}
 	ms = (struct minix_super_block *) bh->b_data;
@@ -154,6 +166,7 @@ struct super_block *minix_read_super(struct super_block *s,void *data,
 		brelse(bh);
 		if (!silent)
 			printk("VFS: Can't find a minix filesystem on dev 0x%04x.\n", dev);
+		MOD_DEC_USE_COUNT;
 		return NULL;
 	}
 	for (i=0;i < MINIX_I_MAP_SLOTS;i++)
@@ -180,6 +193,7 @@ struct super_block *minix_read_super(struct super_block *s,void *data,
 		unlock_super(s);
 		brelse(bh);
 		printk("MINIX-fs: bad superblock or unable to read bitmaps\n");
+		MOD_DEC_USE_COUNT;
 		return NULL;
 	}
 	set_bit(0,s->u.minix_sb.s_imap[0]->b_data);
@@ -193,6 +207,7 @@ struct super_block *minix_read_super(struct super_block *s,void *data,
 		s->s_dev = 0;
 		brelse(bh);
 		printk("MINIX-fs: get root inode failed\n");
+		MOD_DEC_USE_COUNT;
 		return NULL;
 	}
 	if (!(s->s_flags & MS_RDONLY)) {
@@ -510,3 +525,25 @@ int minix_sync_inode(struct inode * inode)
 	brelse (bh);
 	return err;
 }
+
+#ifdef MODULE
+
+char kernel_version[] = UTS_RELEASE;
+
+static struct file_system_type minix_fs_type = {
+	minix_read_super, "minix", 1, NULL
+};
+
+int init_module(void)
+{
+	register_filesystem(&minix_fs_type);
+	return 0;
+}
+
+void cleanup_module(void)
+{
+	unregister_filesystem(&minix_fs_type);
+}
+
+#endif
+

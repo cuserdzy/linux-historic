@@ -93,7 +93,7 @@ struct snd_wait {
 #define SOMEONE_WAITING(q, f) (f.mode & WK_SLEEP)
 #define WAKE_UP(q, f)			{f.mode = WK_WAKEUP;wake_up(&q);}
 
-#define ALLOC_DMA_CHN(chn)		request_dma(chn)
+#define ALLOC_DMA_CHN(chn,deviceID)	request_dma(chn,deviceID)
 #define RELEASE_DMA_CHN(chn)		free_dma(chn)
 
 #define GET_TIME()			jiffies
@@ -102,7 +102,7 @@ struct snd_wait {
 
 /* DISABLE_INTR is used to disable interrupts.
    These macros store the current flags to the (unsigned long) variable given
-   as a parameter. RESTORE_INTR returns the interrupt ebable bit to state
+   as a parameter. RESTORE_INTR returns the interrupt enable bit to state
    before DISABLE_INTR or ENABLE_INTR */
 
 #define DISABLE_INTR(flags)	__asm__ __volatile__("pushfl ; popl %0 ; cli":"=r" (flags));

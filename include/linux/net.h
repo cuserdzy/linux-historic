@@ -23,7 +23,8 @@
 #include <linux/socket.h>
 
 
-#define NSOCKETS	128		/* should be dynamic, later...	*/
+#define NSOCKETS	2000		/* Dynamic, this is MAX LIMIT	*/
+#define NSOCKETS_UNIX	128		/* unix domain static limit	*/
 #define NPROTO		16		/* should be enough for now..	*/
 
 
@@ -53,6 +54,8 @@ typedef enum {
 } socket_state;
 
 #define SO_ACCEPTCON	(1<<16)		/* performed a listen		*/
+#define SO_WAITDATA	(1<<17)		/* wait data to read		*/
+#define SO_NOSPACE	(1<<18)		/* no space to write		*/
 
 #ifdef __KERNEL__
 /*
@@ -77,6 +80,7 @@ struct socket {
   struct socket		*next;
   struct wait_queue	**wait;		/* ptr to place to wait on	*/
   struct inode		*inode;
+  struct fasync_struct  *fasync_list;	/* Asynchronous wake up list	*/
 };
 
 #define SOCK_INODE(S)	((S)->inode)
@@ -127,8 +131,10 @@ struct net_proto {
 	void (*init_func)(struct net_proto *);	/* Bootstrap */
 };
 
-extern int	sock_awaitconn(struct socket *mysock, struct socket *servsock);
+extern int	sock_awaitconn(struct socket *mysock, struct socket *servsock, int flags);
+extern int	sock_wake_async(struct socket *sock, int how);
 extern int	sock_register(int family, struct proto_ops *ops);
+extern int	sock_unregister(int family);
 
 #endif /* __KERNEL__ */
 #endif	/* _LINUX_NET_H */

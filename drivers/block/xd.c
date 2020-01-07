@@ -69,6 +69,7 @@ static XD_SIGNATURE xd_sigs[] = {
 	{ 0x0008,"06/24/88(C) Copyright 1988 Western Digital Corp.",xd_wd_init_controller,xd_wd_init_drive," Western Digital WDXT-GEN2" }, /* Dan Newcombe, newcombe@aa.csc.peachnet.edu */
 	{ 0x0015,"SEAGATE ST11 BIOS REVISION",xd_seagate_init_controller,xd_seagate_init_drive," Seagate ST11M/R" }, /* Salvador Abreu, spa@fct.unl.pt */
 	{ 0x0010,"ST11R BIOS",xd_seagate_init_controller,xd_seagate_init_drive," Seagate ST11M/R" }, /* Risto Kankkunen, risto.kankkunen@cs.helsinki.fi */
+	{ 0x0010,"ST11 BIOS V1.7",xd_seagate_init_controller,xd_seagate_init_drive," Seagate ST11R" }, /* Alan Hourihane, alanh@fairlite.demon.co.uk */
 	{ 0x1000,"(c)Copyright 1987 SMS",xd_omti_init_controller,xd_omti_init_drive,"n OMTI 5520" }, /* Dirk Melchers, dirk@merlin.nbg.sub.org */
 };
 static u_char *xd_bases[] =
@@ -167,7 +168,7 @@ static void xd_geninit (void)
 			printk("xd_geninit: drive %d geometry - heads = %d, cylinders = %d, sectors = %d\n",i,xd_info[i].heads,xd_info[i].cylinders,xd_info[i].sectors);
 
 		if (!request_irq(xd_irq,xd_interrupt_handler, 0, "XT harddisk")) {
-			if (request_dma(xd_dma)) {
+			if (request_dma(xd_dma,"xd")) {
 				printk("xd_geninit: unable to get DMA%d\n",xd_dma);
 				free_irq(xd_irq);
 			}
@@ -379,7 +380,7 @@ static void xd_recalibrate (u_char drive)
 }
 
 /* xd_interrupt_handler: interrupt service routine */
-static void xd_interrupt_handler (int unused)
+static void xd_interrupt_handler(int irq, struct pt_regs * regs)
 {
 	if (inb(XD_STATUS) & STAT_INTERRUPT) {							/* check if it was our device */
 #ifdef DEBUG_OTHER

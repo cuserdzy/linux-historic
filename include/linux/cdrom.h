@@ -334,6 +334,28 @@ struct cdrom_read_audio
 	  u_char *buf; /* frame buffer (size: nframes*2352 bytes) */
 	};
 
+/*
+ * preliminary extension for obtaining multi session info
+ * (still may change if other drivers will use it, too):
+ * this has to be the "arg" of the CDROMMULTISESSION ioctl.
+ * The returned "addr" is valid only if "xa_flag" is true.
+ */
+struct cdrom_multisession
+	{
+	  union
+	    {
+	      struct 			
+		{
+		  u_char minute;
+		  u_char second;
+		  u_char frame;
+		} msf;
+	      int lba;
+	    } addr; /* frame address: start-of-last-session (not the new "frame 16"!)*/
+	  u_char xa_flag; /* 1: "is XA disk" */
+	  u_char addr_format; /* CDROM_LBA or CDROM_MSF */
+	};
+
 #ifdef FIVETWELVE
 #define	CDROM_MODE1_SIZE	512
 #else
@@ -377,10 +399,24 @@ struct cdrom_read_audio
                                                 /* read type-1 data 		*/
 /*
  * preliminary extension for transferring audio frames
- * currently used by sbpcd.c
+ * currently used by cdu31a.c and sbpcd.c
  * (still may change if other drivers will use it, too):
  */
 #define	CDROMREADAUDIO		0x530e		/* (struct cdrom_read_audio)	*/
+/*
+ * preliminary extension for enable (1) / disable (0) auto-ejecting
+ * currently used by sbpcd.c
+ * (still may change if other drivers will use it, too):
+ */
+#define	CDROMEJECT_SW		0x530f		/* arg: 0 or 1 */
+ 
+/*
+ * preliminary extension for obtaining the start-of-last-session
+ * address of multi session disks
+ * currently used by sbpcd.c
+ * (still may change if more drivers will use it).
+ */
+#define	CDROMMULTISESSION_SYS	0x5310 /* internal use only (linux/fs/isofs/inode.c) */
+#define	CDROMMULTISESSION	0x5311 /* "user" interface (arg has to be a "cdrom_multisession" struct) */
 
 #endif  _LINUX_CDROM_H
-

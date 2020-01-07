@@ -17,7 +17,7 @@ int seagate_st0x_command(Scsi_Cmnd *);
 int seagate_st0x_queue_command(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
 
 int seagate_st0x_abort(Scsi_Cmnd *);
-const char *seagate_st0x_info(void);
+const char *seagate_st0x_info(struct Scsi_Host *);
 int seagate_st0x_reset(Scsi_Cmnd *); 
 
 #ifndef NULL
@@ -26,7 +26,7 @@ int seagate_st0x_reset(Scsi_Cmnd *);
 
 int seagate_st0x_biosparam(Disk *, int, int*);
 
-#define SEAGATE_ST0X  {NULL, "Seagate ST-01/ST-02", seagate_st0x_detect, \
+#define SEAGATE_ST0X  {NULL, NULL, NULL, seagate_st0x_detect, 		\
 			 NULL, 						\
 			 seagate_st0x_info, seagate_st0x_command,  	\
 			 seagate_st0x_queue_command, seagate_st0x_abort, \
@@ -129,6 +129,8 @@ extern volatile int seagate_st0x_timeout;
 #define SEAGATE 1	/* these determine the type of the controller */
 #define FD	2
 
+#define ST0X_ID_STR	"Seagate ST-01/ST-02"
+#define FD_ID_STR	"TMC-8XX/TMC-950"
 
 #endif
 

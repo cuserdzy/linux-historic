@@ -30,6 +30,7 @@
 #include <linux/sched.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
+#include <linux/config.h>
 
 /* forward references */
 static int proc_readnet(struct inode * inode, struct file * file,
@@ -50,6 +51,11 @@ extern int rarp_get_info(char *, char **, off_t, int);
 extern int dev_get_info(char *, char **, off_t, int);
 extern int rt_get_info(char *, char **, off_t, int);
 extern int snmp_get_info(char *, char **, off_t, int);
+extern int afinet_get_info(char *, char **, off_t, int);
+extern int ip_acct_procinfo(char *, char **, off_t, int);
+extern int ip_fw_blk_procinfo(char *, char **, off_t, int);
+extern int ip_fw_fwd_procinfo(char *, char **, off_t, int);
+extern int ip_mc_procinfo(char *, char **, off_t, int);
 #endif /* CONFIG_INET */
 #ifdef CONFIG_IPX
 extern int ipx_get_info(char *, char **, off_t, int);
@@ -112,8 +118,19 @@ static struct proc_dir_entry net_dir[] = {
 	{ PROC_NET_TCP,		3, "tcp" },
 	{ PROC_NET_UDP,		3, "udp" },
 	{ PROC_NET_SNMP,	4, "snmp" },
+	{ PROC_NET_SOCKSTAT,	8, "sockstat" },
 #ifdef CONFIG_INET_RARP
 	{ PROC_NET_RARP,	4, "rarp"},
+#endif
+#ifdef CONFIG_IP_MULTICAST
+	{ PROC_NET_IGMP,	4, "igmp"},
+#endif
+#ifdef CONFIG_IP_FIREWALL
+	{ PROC_NET_IPFWFWD,	10, "ip_forward"},
+	{ PROC_NET_IPBLFWD,	8,  "ip_block"},
+#endif
+#ifdef CONFIG_IP_ACCT
+	{ PROC_NET_IPACCT,	7,  "ip_acct"},
 #endif
 #endif	/* CONFIG_INET */
 #ifdef CONFIG_IPX
@@ -155,6 +172,7 @@ static int proc_lookupnet(struct inode * dir,const char * name, int len,
 			return -ENOENT;
 		return 0;
 	}
+	iput(dir);
 	return -ENOENT;
 }
 
@@ -216,6 +234,9 @@ static int proc_readnet(struct inode * inode, struct file * file,
 				length = unix_get_info(page,&start,file->f_pos,thistime);
 				break;
 #ifdef CONFIG_INET
+			case PROC_NET_SOCKSTAT:
+				length = afinet_get_info(page,&start,file->f_pos,thistime);
+				break;
 			case PROC_NET_ARP:
 				length = arp_get_info(page,&start,file->f_pos,thistime);
 				break;
@@ -237,6 +258,24 @@ static int proc_readnet(struct inode * inode, struct file * file,
 			case PROC_NET_SNMP:
 				length = snmp_get_info(page, &start, file->f_pos,thistime);
 				break;
+#ifdef CONFIG_IP_MULTICAST
+			case PROC_NET_IGMP:
+				length = ip_mc_procinfo(page, &start, file->f_pos,thistime);
+				break;
+#endif
+#ifdef CONFIG_IP_FIREWALL
+			case PROC_NET_IPFWFWD:
+				length = ip_fw_fwd_procinfo(page, &start, file->f_pos,thistime);
+				break;
+			case PROC_NET_IPBLFWD:
+				length = ip_fw_blk_procinfo(page, &start, file->f_pos,thistime);
+				break;
+#endif
+#ifdef CONFIG_IP_ACCT
+			case PROC_NET_IPACCT:
+				length = ip_acct_procinfo(page, &start, file->f_pos,thistime);
+				break;
+#endif
 #ifdef CONFIG_INET_RARP				
 			case PROC_NET_RARP:
 				length = rarp_get_info(page,&start,file->f_pos,thistime);

@@ -56,7 +56,6 @@ static char *rcsid = "$Id: sk_g16.c,v 1.1 1994/06/30 16:25:15 root Exp $";
  *        - (Try to make it slightly faster.) 
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/ptrace.h>
@@ -69,7 +68,7 @@ static char *rcsid = "$Id: sk_g16.c,v 1.1 1994/06/30 16:25:15 root Exp $";
 #include <asm/system.h>
 #include <asm/io.h>
 #include <asm/bitops.h> 
-#include <errno.h>
+#include <linux/errno.h>
 
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -232,8 +231,8 @@ static char *rcsid = "$Id: sk_g16.c,v 1.1 1994/06/30 16:25:15 root Exp $";
 #define SK_IORUN        0x20   
 
 /* 
- * LANCE interrupt: 0 = LANCE interrupt occured	
- *                  1 = no LANCE interrupt occured
+ * LANCE interrupt: 0 = LANCE interrupt occurred	
+ *                  1 = no LANCE interrupt occurred
  */
 #define SK_IRQ          0x10   
 			
@@ -330,7 +329,7 @@ static char *rcsid = "$Id: sk_g16.c,v 1.1 1994/06/30 16:25:15 root Exp $";
 #ifndef HAVE_PORTRESERVE
 
 #define check_region(ioaddr, size)              0
-#define snarf_region(ioaddr, size);             do ; while (0)
+#define request_region(ioaddr, size,name)       do ; while (0)
 
 #endif
 
@@ -488,7 +487,7 @@ static int   SK_probe(struct device *dev, short ioaddr);
 
 static int   SK_open(struct device *dev);
 static int   SK_send_packet(struct sk_buff *skb, struct device *dev);
-static void  SK_interrupt(int reg_ptr);
+static void  SK_interrupt(int irq, struct pt_regs * regs);
 static void  SK_rxintr(struct device *dev);
 static void  SK_txintr(struct device *dev);
 static int   SK_close(struct device *dev);
@@ -783,7 +782,7 @@ int SK_probe(struct device *dev, short ioaddr)
 	    dev->dev_addr[5]);
 
     /* Grab the I/O Port region */
-    snarf_region(ioaddr, ETHERCARD_TOTAL_SIZE);
+    request_region(ioaddr, ETHERCARD_TOTAL_SIZE,"sk_g16");
 
     /* Initialize device structure */
 
@@ -1301,7 +1300,7 @@ static int SK_send_packet(struct sk_buff *skb, struct device *dev)
  * Description    : SK_G16 interrupt handler which checks for LANCE
  *                  Errors, handles transmit and receive interrupts
  *
- * Parameters     : I : int reg_ptr -
+ * Parameters     : I : int irq, struct pt_regs * regs -
  * Return Value   : None
  * Errors         : None
  * Globals        : None
@@ -1310,9 +1309,8 @@ static int SK_send_packet(struct sk_buff *skb, struct device *dev)
  *     YY/MM/DD  uid  Description
 -*/
 
-static void SK_interrupt(int reg_ptr)
+static void SK_interrupt(int irq, struct pt_regs * regs)
 {
-    int irq = - (((struct pt_regs *)reg_ptr)->orig_eax+2);
     int csr0;
     struct device *dev = (struct device *) irq2dev_map[irq];
     struct priv *p = (struct priv *) dev->priv;
@@ -1408,7 +1406,7 @@ static void SK_txintr(struct device *dev)
      * We check status of transmitted packet.
      * see LANCE data-sheet for error explanation
      */
-    if (tmdstat & TX_ERR) /* Error occured */
+    if (tmdstat & TX_ERR) /* Error occurred */
     {
 	printk("%s: TX error: %04x %04x\n", dev->name, (int) tmdstat,
 		(int) tmdp->status2);
@@ -1440,7 +1438,7 @@ static void SK_txintr(struct device *dev)
 
 	tmdp->status2 = 0;             /* Clear error flags */
     }
-    else if (tmdstat & TX_MORE)        /* Collisions occured ? */
+    else if (tmdstat & TX_MORE)        /* Collisions occurred ? */
     {
         /* 
          * Here I have a problem.

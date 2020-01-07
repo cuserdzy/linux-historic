@@ -5,7 +5,6 @@
  *
  *  Rock Ridge Extensions to iso9660
  */
-#include <linux/config.h>
 #include <linux/stat.h>
 #include <linux/sched.h>
 #include <linux/iso_fs.h>
@@ -56,6 +55,7 @@
     int block, offset, offset1; \
     struct buffer_head * bh; \
     buffer = kmalloc(cont_size,GFP_KERNEL); \
+    if (!buffer) goto out; \
     block = cont_extent; \
     offset = cont_offset; \
     offset1 = 0; \
@@ -214,6 +214,7 @@ int get_rock_ridge_filename(struct iso_directory_record * de,
 	     deallocate the mem fairly soon
 	     after control is returned */
 
+	  if (!retname) goto out;
 	  *retname = 0; /* Zero length string */
 	  retnamlen = 0;
 	};
@@ -357,8 +358,8 @@ int parse_rock_ridge_inode(struct iso_directory_record * de,
 	printk("RR CL (%x)\n",inode->i_ino);
 #endif
 	inode->u.isofs_i.i_first_extent = isonum_733(rr->u.CL.location) <<
-		(ISOFS_BLOCK_BITS - ISOFS_BUFFER_BITS(inode));
-	reloc = iget(inode->i_sb, inode->u.isofs_i.i_first_extent << ISOFS_BUFFER_BITS(inode));
+		inode -> i_sb -> u.isofs_sb.s_log_zone_size;
+	reloc = iget(inode->i_sb, inode->u.isofs_i.i_first_extent);
 	inode->i_mode = reloc->i_mode;
 	inode->i_nlink = reloc->i_nlink;
 	inode->i_uid = reloc->i_uid;
@@ -467,6 +468,7 @@ char * get_rock_ridge_symlink(struct inode * inode)
        while (slen > 1){
 	 if (!rpnt){
 	   rpnt = (char *) kmalloc (inode->i_size +1, GFP_KERNEL);
+	   if (!rpnt) goto out;
 	   *rpnt = 0;
 	 };
 	 rootflag = 0;

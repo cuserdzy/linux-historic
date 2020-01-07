@@ -597,7 +597,7 @@ mcd_transfer(void)
  */
 
 static void
-mcd_interrupt(int unused)
+mcd_interrupt(int irq, struct pt_regs * regs)
 {
 	int st;
 
@@ -1168,7 +1168,7 @@ mcd_init(unsigned long mem_start, unsigned long mem_end)
 		printk("Unable to get IRQ%d for Mitsumi CD-ROM\n", mcd_irq);
 		return mem_start;
 	}
-	snarf_region(mcd_port, 4);
+	request_region(mcd_port, 4,"mcd");
 
 	outb(MCMD_CONFIG_DRIVE, MCDPORT(0));
 	outb(0x02,MCDPORT(0));
@@ -1182,7 +1182,6 @@ mcd_init(unsigned long mem_start, unsigned long mem_end)
 
 	mcd_invalidate_buffers();
 	mcdPresent = 1;
-	printk("\n");
 	return mem_start;
 }
 

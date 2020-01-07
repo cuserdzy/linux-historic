@@ -4,16 +4,24 @@
  *  Provide support for fcntl()'s F_GETLK, F_SETLK, and F_SETLKW calls.
  *  Doug Evans, 92Aug07, dje@sspiff.uucp.
  *
- * FIXME: two things aren't handled yet:
- *	- deadlock detection/avoidance (of dubious merit, but since it's in
- *	  the definition, I guess it should be provided eventually)
+ *  Deadlock Detection added by Kelly Carmichael, kelly@[142.24.8.65]
+ *  September 17, 1994.
+ *
+ * FIXME: one thing isn't handled yet:
  *	- mandatory locks (requires lots of changes elsewhere)
  *
  *  Edited by Kai Petzke, wpp@marie.physik.tu-berlin.de
+ *
+ *  Converted file_lock_table to a linked list from an array, which eliminates
+ *  the limits on how many active file locks are open - Chad Page
+ *  (pageone@netcom.com), November 27, 1994 
  */
+
+#define DEADLOCK_DETECTION
 
 #include <asm/segment.h>
 
+#include <linux/malloc.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -30,26 +38,12 @@ static int lock_it(struct file *filp, struct file_lock *caller, unsigned int fd)
 static struct file_lock *alloc_lock(struct file_lock **pos, struct file_lock *fl,
                                     unsigned int fd);
 static void free_lock(struct file_lock **fl);
+#ifdef DEADLOCK_DETECTION
+int locks_deadlocked(int my_pid,int blocked_pid);
+#endif
 
-static struct file_lock file_lock_table[NR_FILE_LOCKS];
-static struct file_lock *file_lock_free_list;
-
-/*
- * Called at boot time to initialize the lock table ...
- */
-
-void fcntl_init_locks(void)
-{
-	struct file_lock *fl;
-
-	for (fl = &file_lock_table[0]; fl < file_lock_table + NR_FILE_LOCKS - 1; fl++) {
-		fl->fl_next = fl + 1;
-		fl->fl_owner = NULL;
-	}
-	file_lock_table[NR_FILE_LOCKS - 1].fl_next = NULL;
-	file_lock_table[NR_FILE_LOCKS - 1].fl_owner = NULL;
-	file_lock_free_list = &file_lock_table[0];
-}
+static struct file_lock *file_lock_table = NULL;
+static struct file_lock *file_lock_free_list = NULL;
 
 int fcntl_getlk(unsigned int fd, struct flock *l)
 {
@@ -104,7 +98,7 @@ int fcntl_setlk(unsigned int fd, unsigned int cmd, struct flock *l)
 
 	if (fd >= NR_OPEN || !(filp = current->files->fd[fd]))
 		return -EBADF;
-	error = verify_area(VERIFY_WRITE, l, sizeof(*l));
+	error = verify_area(VERIFY_READ, l, sizeof(*l));
 	if (error)
 		return error;
 	memcpy_fromfs(&flock, l, sizeof(flock));
@@ -145,11 +139,13 @@ repeat:
 			/*
 			 * File is locked by another process. If this is
 			 * F_SETLKW wait for the lock to be released.
-			 * FIXME: We need to check for deadlocks here.
 			 */
 			if (cmd == F_SETLKW) {
 				if (current->signal & ~current->blocked)
 					return -ERESTARTSYS;
+#ifdef DEADLOCK_DETECTION
+				if (locks_deadlocked(file_lock.fl_owner->pid,fl->fl_owner->pid)) return -EDEADLOCK;
+#endif
 				interruptible_sleep_on(&fl->fl_wait);
 				if (current->signal & ~current->blocked)
 					return -ERESTARTSYS;
@@ -165,6 +161,36 @@ repeat:
 
 	return lock_it(filp, &file_lock, fd);
 }
+
+#ifdef DEADLOCK_DETECTION
+/*
+ * This function tests for deadlock condition before putting a process to sleep
+ * this detection scheme is recursive... we may need some test as to make it
+ * exit if the function gets stuck due to bad lock data.
+ */
+
+int locks_deadlocked(int my_pid,int blocked_pid)
+{
+	int ret_val;
+	struct wait_queue *dlock_wait;
+	struct file_lock *fl;
+	for (fl = file_lock_table; fl != NULL; fl = fl->fl_nextlink) {
+		if (fl->fl_owner == NULL) continue;	/* not a used lock */
+		if (fl->fl_owner->pid != my_pid) continue;
+		if (fl->fl_wait == NULL) continue;	/* no queues */
+		dlock_wait = fl->fl_wait;
+		do {
+			if (dlock_wait->task != NULL) {
+				if (dlock_wait->task->pid == blocked_pid) return -EDEADLOCK;
+				ret_val = locks_deadlocked(dlock_wait->task->pid,blocked_pid);
+				if (ret_val) return -EDEADLOCK;
+			}
+			dlock_wait = dlock_wait->next;
+		} while (dlock_wait != fl->fl_wait);
+	}
+	return 0;
+}
+#endif
 
 /*
  * This function is called when the file is closed.
@@ -416,6 +442,9 @@ next_lock:
 
 /*
  * File_lock() inserts a lock at the position pos of the linked list.
+ *
+ *  Modified to create a new node if no free entries available - Chad Page
+ *
  */
 
 static struct file_lock *alloc_lock(struct file_lock **pos,
@@ -425,15 +454,24 @@ static struct file_lock *alloc_lock(struct file_lock **pos,
 	struct file_lock *tmp;
 
 	tmp = file_lock_free_list;
+
 	if (tmp == NULL)
-		return NULL;			/* no available entry */
+	{
+		/* Okay, let's make a new file_lock structure... */
+		tmp = (struct file_lock *)kmalloc(sizeof(struct file_lock), GFP_KERNEL);
+		tmp -> fl_owner = NULL;
+		tmp -> fl_next = file_lock_free_list;
+		tmp -> fl_nextlink = file_lock_table;
+		file_lock_table = tmp;
+	}
+	else
+	{
+		/* remove from free list */
+		file_lock_free_list = tmp->fl_next;
+	}
+
 	if (tmp->fl_owner != NULL)
 		panic("alloc_lock: broken free list\n");
-
-	/* remove from free list */
-	file_lock_free_list = tmp->fl_next;
-
-	*tmp = *fl;
 
 	tmp->fl_next = *pos;	/* insert into file's list */
 	*pos = tmp;
@@ -441,6 +479,12 @@ static struct file_lock *alloc_lock(struct file_lock **pos,
 	tmp->fl_owner = current;	/* FIXME: needed? */
 	tmp->fl_fd = fd;		/* FIXME: needed? */
 	tmp->fl_wait = NULL;
+
+	tmp->fl_type = fl->fl_type;
+	tmp->fl_whence = fl->fl_whence;
+	tmp->fl_start = fl->fl_start;
+	tmp->fl_end = fl->fl_end;
+
 	return tmp;
 }
 

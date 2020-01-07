@@ -14,7 +14,7 @@
  */
 
 #ifndef _HOSTS_H
-	#define _HOSTS_H
+#define _HOSTS_H
 
 /*
 	$Header: /usr/src/linux/kernel/blk_drv/scsi/RCS/hosts.h,v 1.3 1993/09/24 12:21:00 drew Exp drew $
@@ -40,7 +40,7 @@
 
 /*
 	The Scsi_Host_Template type has all that is needed to interface with a SCSI
-	host in a device independant matter.  There is one entry for each different
+	host in a device independent matter.  There is one entry for each different
 	type of host adapter that is supported on the system.
 */
 
@@ -51,6 +51,9 @@ typedef struct  SHT
 
 	  /* Used with loadable modules so we can construct a linked list. */
 	  struct SHT * next;
+
+	  /* Used with loadable modules so that we know when it is safe to unload */
+	  int * usage_count;
 
 	/*
 		The name pointer is a pointer to the name of the SCSI
@@ -71,20 +74,24 @@ typedef struct  SHT
 		functions to queue commands because things are not guaranteed
 		to be set up yet.  The detect routine can send commands to
 		the host adapter as long as the program control will not be
-		passed to scsi.c in the processesing of the command.  Note
+		passed to scsi.c in the processing of the command.  Note
 		especially that scsi_malloc/scsi_free must not be called.
 	*/
 
 	int (* detect)(struct SHT *); 
 
-	  /* Used with loadable modules to unload the host structures */
+	  /* Used with loadable modules to unload the host structures.  Note:
+	   there is a default action built into the modules code which may
+	   be sufficient for most host adapters.  Thus you may not have to supply
+	   this at all. */
 	int (*release)(struct Scsi_Host *);
 	/*
 		The info function will return whatever useful
-		information the developer sees fit.              
+		information the developer sees fit.  If not provided, then
+		the name field will be used instead.
 	*/
 
-        const char *(* info)(void);
+        const char *(* info)(struct Scsi_Host *);
 
 	/*
 		The command function takes a target, a command (this is a SCSI 
@@ -159,7 +166,7 @@ typedef struct  SHT
 	/*
 		This determines if we will use a non-interrupt driven
 		or an interrupt driven scheme,  It is set to the maximum number
-		of simulataneous commands a given host adapter will accept.
+		of simultaneous commands a given host adapter will accept.
 	*/
 	int can_queue;
 
@@ -167,7 +174,7 @@ typedef struct  SHT
 		In many instances, especially where disconnect / reconnect are 
 		supported, our host also has an ID on the SCSI bus.  If this is 
 		the case, then it must be reserved.  Please set this_id to -1 if
- 		your settup is in single initiator mode, and the host lacks an 
+ 		your setup is in single initiator mode, and the host lacks an 
 		ID.
 	*/
 	
@@ -232,22 +239,39 @@ struct Scsi_Host
 		Scsi_Cmnd *host_queue; 
 		Scsi_Host_Template * hostt;
 
+		/* Pointer to a circularly linked list - this indicates the hosts
+		   that should be locked out of performing I/O while we have an active
+		   command on this host. */
+		struct Scsi_Host * block;
+
 		/* These parameters should be set by the detect routine */
 		unsigned char *base;
 		short unsigned int io_port;
+		unsigned char n_io_port;
 		unsigned char irq;
 		unsigned char dma_channel;
+
+		/*
+		  Set these if there are conflicts between memory
+		  in the < 1mb region and regions at 16mb multiples.
+		  The address must be on a page boundary.
+		*/
+		unsigned long forbidden_addr;
+		unsigned long forbidden_size;
+
 		/*
 		  The rest can be copied from the template, or specifically
 		  initialized, as required.
-		  */
+		*/
 		
 		int this_id;
+		int can_queue;
+		short cmd_per_lun;
 		short unsigned int sg_tablesize;
 		unsigned unchecked_isa_dma:1;
 		/*
 		   True if this host was loaded as a loadable module
-		   */
+		*/
 		unsigned loaded_as_module:1;
 		
 		int hostdata[0];  /* Used for storage of host specific stuff */
@@ -268,9 +292,12 @@ extern Scsi_Host_Template * scsi_hosts;
    looks normal.  Also, it makes it possible to use the same code for a
    loadable module. */
 
-extern void * scsi_init_malloc(unsigned int size);
+extern void * scsi_init_malloc(unsigned int size, int priority);
 extern void scsi_init_free(char * ptr, unsigned int size);
 
+void scan_scsis (struct Scsi_Host * shpnt);
+
+extern int next_scsi_host;
 
 extern int scsi_loadable_module_flag;
 unsigned int scsi_init(void);
@@ -278,7 +305,6 @@ extern struct Scsi_Host * scsi_register(Scsi_Host_Template *, int j);
 extern void scsi_unregister(struct Scsi_Host * i);
 
 #define BLANK_HOST {"", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-#endif
 
 struct Scsi_Device_Template
 {
@@ -294,7 +320,7 @@ struct Scsi_Device_Template
   int (*detect)(Scsi_Device *); /* Returns 1 if we can attach this device */
   void (*init)(void);  /* Sizes arrays based upon number of devices detected */
   void (*finish)(void);  /* Perform initialization after attachment */
-  void (*attach)(Scsi_Device *); /* Attach devices to arrays */
+  int (*attach)(Scsi_Device *); /* Attach devices to arrays */
   void (*detach)(Scsi_Device *);
 };
 
@@ -304,3 +330,27 @@ extern struct Scsi_Device_Template sr_template;
 extern struct Scsi_Device_Template sg_template;
 
 int scsi_register_device(struct Scsi_Device_Template * sdpnt);
+
+/* These are used by loadable modules */
+extern int scsi_register_module(int, void *);
+extern void scsi_unregister_module(int, void *);
+
+/* The different types of modules that we can load and unload */
+#define MODULE_SCSI_HA 1
+#define MODULE_SCSI_CONST 2
+#define MODULE_SCSI_IOCTL 3
+#define MODULE_SCSI_DEV 4
+
+
+/*
+ * This is an ugly hack.  If we expect to be able to load devices at run time, we need
+ * to leave extra room in some of the data structures.  Doing a realloc to enlarge
+ * the structures would be riddled with race conditions, so until a better solution 
+ * is discovered, we use this crude approach
+ */
+#define SD_EXTRA_DEVS 2
+#define ST_EXTRA_DEVS 2
+#define SR_EXTRA_DEVS 2
+#define SG_EXTRA_DEVS (SD_EXTRA_DEVS + SR_EXTRA_DEVS + ST_EXTRA_DEVS)
+
+#endif

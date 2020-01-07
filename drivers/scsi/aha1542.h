@@ -37,7 +37,7 @@
 /* READ */
 #define STATUS(base) base
 #define STST	0x80		/* Self Test in Progress */
-#define DIAGF	0x40		/* Internal Diagonostic Failure */
+#define DIAGF	0x40		/* Internal Diagnostic Failure */
 #define INIT	0x20		/* Mailbox Initialization Required */
 #define IDLE	0x10		/* SCSI Host Adapter Idle */
 #define CDF	0x08		/* Command/Data Out Port Full */
@@ -69,6 +69,7 @@
 #define CMD_EMBOI	0x05	/* Enable MailBox Out Interrupt */
 #define CMD_BUSON_TIME	0x07	/* Set Bus-On Time */
 #define CMD_BUSOFF_TIME	0x08	/* Set Bus-Off Time */
+#define CMD_DMASPEED	0x09	/* Set AT Bus Transfer Speed */
 #define CMD_RETDEVS	0x0a	/* Return Installed Devices */
 #define CMD_RETCONF	0x0b	/* Return Configuration Data */
 #define CMD_RETSETUP	0x0d	/* Return Setup Data */
@@ -132,7 +133,6 @@ int aha1542_detect(Scsi_Host_Template *);
 int aha1542_command(Scsi_Cmnd *);
 int aha1542_queuecommand(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
 int aha1542_abort(Scsi_Cmnd *);
-const char *aha1542_info(void);
 int aha1542_reset(Scsi_Cmnd *);
 int aha1542_biosparam(Disk *, int, int*);
 
@@ -144,11 +144,11 @@ int aha1542_biosparam(Disk *, int, int*);
 	#define NULL 0
 #endif
 
-#define AHA1542 {  NULL,				\
+#define AHA1542 {  NULL, NULL,				\
 		     "Adaptec 1542", 			\
 		     aha1542_detect,			\
 		     NULL,				\
-		     aha1542_info, 			\
+		     NULL,	 			\
 		     aha1542_command,			\
 		     aha1542_queuecommand,		\
 		     aha1542_abort,			\

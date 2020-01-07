@@ -16,7 +16,6 @@
  * invalidate changed floppy-disk-caches.
  */
  
-#include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/major.h>
@@ -56,7 +55,6 @@ int buffers_lav[NR_SIZES] = {0,};  /* Load average of buffer usage */
 int nr_free[NR_SIZES] = {0,};
 int buffermem = 0;
 int nr_buffer_heads = 0;
-static int min_free_pages = 20;	/* nr free pages needed before buffer grows */
 extern int *blksize_size[];
 
 /* Here is the parameter block for the bdflush process. */
@@ -147,6 +145,7 @@ static int sync_buffers(dev_t dev, int wait)
 	   2) wait for completion by waiting for all buffers to unlock. */
  repeat:
 	retry = 0;
+ repeat2:
 	ncount = 0;
 	/* We search all lists as a failsafe mechanism, not because we expect
 	   there to be dirty buffers on any of the other lists. */
@@ -170,6 +169,7 @@ static int sync_buffers(dev_t dev, int wait)
 					  continue;
 				  }
 				  wait_on_buffer (bh);
+				  goto repeat2;
 			  }
 			 /* If an unlocked buffer is not uptodate, there has
 			     been an IO error. Skip it. */
@@ -183,6 +183,9 @@ static int sync_buffers(dev_t dev, int wait)
 			    on the third pass. */
 			 if (!bh->b_dirt || pass>=2)
 				  continue;
+			 /* don't bother about locked buffers */
+			 if (bh->b_lock)
+				 continue;
 			 bh->b_count++;
 			 bh->b_flushtime = 0;
 			 ll_rw_block(WRITE, 1, &bh);
@@ -513,7 +516,7 @@ void refill_freelist(int size)
 	/* We are going to try and locate this much memory */
 	needed =bdf_prm.b_un.nrefill * size;  
 
-	while (nr_free_pages > min_free_pages && needed > 0 &&
+	while (nr_free_pages > min_free_pages*2 && needed > 0 &&
 	       grow_buffers(GFP_BUFFER, size)) {
 		needed -= PAGE_SIZE;
 	}
@@ -975,6 +978,22 @@ static void read_buffers(struct buffer_head * bh[], int nrbuf)
 	}
 }
 
+/*
+ * This actually gets enough info to try to align the stuff,
+ * but we don't bother yet.. We'll have to check that nobody
+ * else uses the buffers etc.
+ *
+ * "address" points to the new page we can use to move things
+ * around..
+ */
+static unsigned long try_to_align(struct buffer_head ** bh, int nrbuf,
+	unsigned long address)
+{
+	while (nrbuf-- > 0)
+		brelse(bh[nrbuf]);
+	return 0;
+}
+
 static unsigned long check_aligned(struct buffer_head * first, unsigned long address,
 	dev_t dev, int *b, int size)
 {
@@ -983,15 +1002,13 @@ static unsigned long check_aligned(struct buffer_head * first, unsigned long add
 	unsigned long offset;
 	int block;
 	int nrbuf;
+	int aligned = 1;
 
-	page = (unsigned long) first->b_data;
-	if (page & ~PAGE_MASK) {
-		brelse(first);
-		return 0;
-	}
-	mem_map[MAP_NR(page)]++;
 	bh[0] = first;
 	nrbuf = 1;
+	page = (unsigned long) first->b_data;
+	if (page & ~PAGE_MASK)
+		aligned = 0;
 	for (offset = size ; offset < PAGE_SIZE ; offset += size) {
 		block = *++b;
 		if (!block)
@@ -1001,8 +1018,11 @@ static unsigned long check_aligned(struct buffer_head * first, unsigned long add
 			goto no_go;
 		bh[nrbuf++] = first;
 		if (page+offset != (unsigned long) first->b_data)
-			goto no_go;
+			aligned = 0;
 	}
+	if (!aligned)
+		return try_to_align(bh, nrbuf, address);
+	mem_map[MAP_NR(page)]++;
 	read_buffers(bh,nrbuf);		/* make sure they are actually read correctly */
 	while (nrbuf-- > 0)
 		brelse(bh[nrbuf]);
@@ -1012,7 +1032,6 @@ static unsigned long check_aligned(struct buffer_head * first, unsigned long add
 no_go:
 	while (nrbuf-- > 0)
 		brelse(bh[nrbuf]);
-	free_page(page);
 	return 0;
 }
 
@@ -1061,7 +1080,7 @@ static unsigned long try_to_load_aligned(unsigned long address,
 	buffermem += PAGE_SIZE;
 	bh->b_this_page = tmp;
 	mem_map[MAP_NR(address)]++;
-	buffer_pages[address >> PAGE_SHIFT] = bh;
+	buffer_pages[MAP_NR(address)] = bh;
 	read_buffers(arr,block);
 	while (block-- > 0)
 		brelse(arr[block]);
@@ -1101,11 +1120,6 @@ static inline unsigned long try_to_share_buffers(unsigned long address,
 	return try_to_load_aligned(address, dev, b, size);
 }
 
-#define COPYBLK(size,from,to) \
-__asm__ __volatile__("rep ; movsl": \
-	:"c" (((unsigned long) size) >> 2),"S" (from),"D" (to) \
-	:"cx","di","si")
-
 /*
  * bread_page reads four buffers into memory at the desired address. It's
  * a function of its own, as there is some speed to be got by reading them
@@ -1135,7 +1149,7 @@ unsigned long bread_page(unsigned long address, dev_t dev, int b[], int size, in
  	for (i=0, j=0; j<PAGE_SIZE ; i++, j += size, where += size) {
 		if (bh[i]) {
 			if (bh[i]->b_uptodate)
-				COPYBLK(size, (unsigned long) bh[i]->b_data, where);
+				memcpy((void *) where, bh[i]->b_data, size);
 			brelse(bh[i]);
 		}
 	}
@@ -1190,7 +1204,7 @@ static int grow_buffers(int pri, int size)
 			break;
 	}
 	free_list[isize] = bh;
-	buffer_pages[page >> PAGE_SHIFT] = bh;
+	buffer_pages[MAP_NR(page)] = bh;
 	tmp->b_this_page = bh;
 	wake_up(&buffer_wait);
 	buffermem += PAGE_SIZE;
@@ -1234,7 +1248,7 @@ static int try_to_free(struct buffer_head * bh, struct buffer_head ** bhp)
 		put_unused_buffer_head(p);
 	} while (tmp != bh);
 	buffermem -= PAGE_SIZE;
-	buffer_pages[page >> PAGE_SHIFT] = NULL;
+	buffer_pages[MAP_NR(page)] = NULL;
 	free_page(page);
 	return !mem_map[MAP_NR(page)];
 }
@@ -1436,7 +1450,7 @@ static inline int try_to_reassign(struct buffer_head * bh, struct buffer_head **
 	} while (tmp != bh);
 	tmp = bh;
 	
-	while((unsigned int) tmp->b_data & (PAGE_SIZE - 1)) 
+	while((unsigned long) tmp->b_data & (PAGE_SIZE - 1)) 
 		 tmp = tmp->b_this_page;
 	
 	/* This is the buffer at the head of the page */
@@ -1538,7 +1552,7 @@ static unsigned long try_to_generate_cluster(dev_t dev, int block, int size)
 			break;
 	}
 	buffermem += PAGE_SIZE;
-	buffer_pages[page >> PAGE_SHIFT] = bh;
+	buffer_pages[MAP_NR(page)] = bh;
 	bh->b_this_page = tmp;
 	while (nblock-- > 0)
 		brelse(arr[nblock]);
@@ -1572,7 +1586,7 @@ unsigned long generate_cluster(dev_t dev, int b[], int size)
 		 if(retval) return retval;
 	 };
 	
-	if (nr_free_pages > min_free_pages) 
+	if (nr_free_pages > min_free_pages*2) 
 		 return try_to_generate_cluster(dev, b[0], size);
 	else
 		 return reassign_cluster(dev, b[0], size);
@@ -1591,13 +1605,11 @@ void buffer_init(void)
         int isize = BUFSIZE_INDEX(BLOCK_SIZE);
 
 	if (high_memory >= 4*1024*1024) {
-		min_free_pages = 200;
 		if(high_memory >= 16*1024*1024)
 			 nr_hash = 16381;
 		else
 			 nr_hash = 4093;
 	} else {
-		min_free_pages = 20;
 		nr_hash = 997;
 	};
 	
@@ -1605,9 +1617,9 @@ void buffer_init(void)
 						     sizeof(struct buffer_head *));
 
 
-	buffer_pages = (struct buffer_head **) vmalloc((high_memory >>PAGE_SHIFT) * 
+	buffer_pages = (struct buffer_head **) vmalloc(MAP_NR(high_memory) * 
 						     sizeof(struct buffer_head *));
-	for (i = 0 ; i < high_memory >> PAGE_SHIFT ; i++)
+	for (i = 0 ; i < MAP_NR(high_memory) ; i++)
 		buffer_pages[i] = NULL;
 
 	for (i = 0 ; i < nr_hash ; i++)
@@ -1727,7 +1739,7 @@ asmlinkage int sync_old_buffers(void)
  * the tuning parameters.  We would want to verify each parameter, however,
  * to make sure that it is reasonable. */
 
-asmlinkage int sys_bdflush(int func, int data)
+asmlinkage int sys_bdflush(int func, long data)
 {
 	int i, error;
 	int ndirty;
@@ -1735,31 +1747,37 @@ asmlinkage int sys_bdflush(int func, int data)
 	int ncount;
 	struct buffer_head * bh, *next;
 
-	if(!suser()) return -EPERM;
+	if (!suser())
+		return -EPERM;
 
-	if(func == 1)
+	if (func == 1)
 		 return sync_old_buffers();
 
 	/* Basically func 0 means start, 1 means read param 1, 2 means write param 1, etc */
-	if(func >= 2){
+	if (func >= 2) {
 		i = (func-2) >> 1;
-		if (i < 0 || i >= N_PARAM) return -EINVAL;
+		if (i < 0 || i >= N_PARAM)
+			return -EINVAL;
 		if((func & 1) == 0) {
 			error = verify_area(VERIFY_WRITE, (void *) data, sizeof(int));
-			if(error) return error;
+			if (error)
+				return error;
 			put_fs_long(bdf_prm.data[i], data);
 			return 0;
 		};
-		if(data < bdflush_min[i] || data > bdflush_max[i]) return -EINVAL;
+		if (data < bdflush_min[i] || data > bdflush_max[i])
+			return -EINVAL;
 		bdf_prm.data[i] = data;
 		return 0;
 	};
 	
-	if(bdflush_running++) return -EBUSY; /* Only one copy of this running at one time */
+	if (bdflush_running)
+		return -EBUSY; /* Only one copy of this running at one time */
+	bdflush_running++;
 	
 	/* OK, from here on is the daemon */
 	
-	while(1==1){
+	for (;;) {
 #ifdef DEBUG
 		printk("bdflush() activated...");
 #endif

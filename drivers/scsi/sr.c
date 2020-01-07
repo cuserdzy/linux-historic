@@ -19,6 +19,7 @@
 #include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/errno.h>
+#include <linux/cdrom.h>
 #include <asm/system.h>
 
 #define MAJOR_NR SCSI_CDROM_MAJOR
@@ -34,13 +35,14 @@
 
 static void sr_init(void);
 static void sr_finish(void);
-static void sr_attach(Scsi_Device *);
+static int sr_attach(Scsi_Device *);
 static int sr_detect(Scsi_Device *);
+static void sr_detach(Scsi_Device *);
 
 struct Scsi_Device_Template sr_template = {NULL, "cdrom", "sr", TYPE_ROM, 
 					     SCSI_CDROM_MAJOR, 0, 0, 0, 1,
 					     sr_detect, sr_init,
-					     sr_finish, sr_attach, NULL};
+					     sr_finish, sr_attach, sr_detach};
 
 Scsi_CD * scsi_CDs;
 static int * sr_sizes;
@@ -60,6 +62,8 @@ static void sr_release(struct inode * inode, struct file * file)
 	sync_dev(inode->i_rdev);
 	if(! --scsi_CDs[MINOR(inode->i_rdev)].device->access_count)
 	  sr_ioctl(inode, NULL, SCSI_IOCTL_DOORUNLOCK, 0);
+	if (scsi_CDs[MINOR(inode->i_rdev)].device->host->hostt->usage_count)
+	  (*scsi_CDs[MINOR(inode->i_rdev)].device->host->hostt->usage_count)--;
 }
 
 static struct file_operations sr_fops = 
@@ -195,7 +199,7 @@ static void rw_intr (Scsi_Cmnd * SCpnt)
 				  SCpnt->request.sector, this_count);
 			}
 
-		  end_scsi_request(SCpnt, 1, this_count);  /* All done */
+		  SCpnt = end_scsi_request(SCpnt, 1, this_count);  /* All done */
 		  requeue_sr_request(SCpnt);
 		  return;
 		} /* Normal completion */
@@ -225,7 +229,7 @@ static void rw_intr (Scsi_Cmnd * SCpnt)
 				/* further access.					*/
 		    
 				scsi_CDs[DEVICE_NR(SCpnt->request.dev)].device->changed = 1;
-				end_scsi_request(SCpnt, 0, this_count);
+				SCpnt = end_scsi_request(SCpnt, 0, this_count);
 			        requeue_sr_request(SCpnt);
 				return;
 			}
@@ -240,7 +244,7 @@ static void rw_intr (Scsi_Cmnd * SCpnt)
 				return;
 			} else {
 			  printk("CD-ROM error: Drive reports %d.\n", SCpnt->sense_buffer[2]);				
-			  end_scsi_request(SCpnt, 0, this_count);
+			  SCpnt = end_scsi_request(SCpnt, 0, this_count);
 			  requeue_sr_request(SCpnt); /* Do next request */
 			  return;
 			}
@@ -249,7 +253,7 @@ static void rw_intr (Scsi_Cmnd * SCpnt)
 
 		if (SCpnt->sense_buffer[2] == NOT_READY) {
 			printk("CDROM not ready.  Make sure you have a disc in the drive.\n");
-			end_scsi_request(SCpnt, 0, this_count);
+			SCpnt = end_scsi_request(SCpnt, 0, this_count);
 			requeue_sr_request(SCpnt); /* Do next request */
 			return;
 		};
@@ -266,9 +270,138 @@ static void rw_intr (Scsi_Cmnd * SCpnt)
 	  if (status_byte(result) == CHECK_CONDITION)
 		  print_sense("sr", SCpnt);
 	  
-	  end_scsi_request(SCpnt, 0, SCpnt->request.current_nr_sectors);
+	  SCpnt = end_scsi_request(SCpnt, 0, SCpnt->request.current_nr_sectors);
 	  requeue_sr_request(SCpnt);
   }
+}
+
+/*
+ * Here I tried to implement better support for PhotoCD's.
+ * 
+ * Much of this has do be done with vendor-specific SCSI-commands.
+ * So I have to complete it step by step. Useful information is welcome.
+ *
+ * Actually works:
+ *   - NEC:     Detection and support of multisession CD's. Special handling
+ *              for XA-disks is not necessary.
+ *     
+ *   - TOSHIBA: setting density is done here now, mounting PhotoCD's should
+ *              work now without running the program "set_density"
+ *              People reported that it is necessary to eject and reinsert
+ *              the CD after the set-density call to get this working for
+ *              old drives.
+ *              And some very new drives don't need this call any more...
+ *              Multisession CD's are supported too.
+ *
+ * Dec 1994: completely rewritten, uses kernel_scsi_ioctl() now
+ *
+ *   kraxel@cs.tu-berlin.de (Gerd Knorr)
+ */
+
+static void sr_photocd(struct inode *inode)
+{
+  unsigned long   sector,min,sec,frame;
+  unsigned char   buf[40];
+  int             rc;
+
+  if (!suser()) {
+    /* I'm not the superuser, so SCSI_IOCTL_SEND_COMMAND isn't allowed for me.
+     * That's why mpcd_sector will be initialized with zero, because I'm not
+     * able to get the right value. Necessary only if access_count is 1, else
+     * no disk change happened since the last call of this function and we can
+     * keep the old value.
+     */
+    if (1 == scsi_CDs[MINOR(inode->i_rdev)].device->access_count)
+      scsi_CDs[MINOR(inode->i_rdev)].mpcd_sector = 0;
+    return;
+  }
+  
+  switch(scsi_CDs[MINOR(inode->i_rdev)].device->manufacturer) {
+
+  case SCSI_MAN_NEC:
+#ifdef DEBUG
+    printk("sr_photocd: use NEC code\n");
+#endif
+    memset(buf,0,40);
+    *((unsigned long*)buf)   = 0;
+    *((unsigned long*)buf+1) = 0x16;
+    buf[8+0] = 0xde;
+    buf[8+1] = 0x03;
+    buf[8+2] = 0xb0;
+    rc = kernel_scsi_ioctl(scsi_CDs[MINOR(inode->i_rdev)].device,
+			   SCSI_IOCTL_SEND_COMMAND, buf);
+    if (rc != 0) {
+      printk("sr_photocd: ioctl error (NEC): 0x%x\n",rc);
+      sector = 0;
+    } else {
+      min   = (unsigned long)buf[8+15]/16*10 + (unsigned long)buf[8+15]%16;
+      sec   = (unsigned long)buf[8+16]/16*10 + (unsigned long)buf[8+16]%16;
+      frame = (unsigned long)buf[8+17]/16*10 + (unsigned long)buf[8+17]%16;
+      sector = min*60*75 + sec*75 + frame;
+#ifdef DEBUG
+      if (sector) {
+	printk("sr_photocd: multisession CD detected. start: %lu\n",sector);
+      }
+#endif
+    }
+    break;
+
+  case SCSI_MAN_TOSHIBA:
+#ifdef DEBUG
+    printk("sr_photocd: use TOSHIBA code\n");
+#endif
+    
+    /* first I do a set_density-call (for reading XA-sectors) ... */
+    memset(buf,0,40);
+    *((unsigned long*)buf)   = 12;
+    *((unsigned long*)buf+1) = 12;
+    buf[8+0] = 0x15;
+    buf[8+1] = (1 << 4);
+    buf[8+4] = 12;
+    buf[14+ 3] = 0x08;
+    buf[14+ 4] = 0x83;
+    buf[14+10] = 0x08;
+    rc = kernel_scsi_ioctl(scsi_CDs[MINOR(inode->i_rdev)].device,
+			   SCSI_IOCTL_SEND_COMMAND, buf);
+    if (rc != 0) {
+      printk("sr_photocd: ioctl error (TOSHIBA #1): 0x%x\n",rc);
+    }
+
+    /* ... and then I ask, if there is a multisession-Disk */
+    memset(buf,0,40);
+    *((unsigned long*)buf)   = 0;
+    *((unsigned long*)buf+1) = 4;
+    buf[8+0] = 0xc7;
+    buf[8+1] = 3;
+    rc = kernel_scsi_ioctl(scsi_CDs[MINOR(inode->i_rdev)].device,
+			   SCSI_IOCTL_SEND_COMMAND, buf);
+    if (rc != 0) {
+      printk("sr_photocd: ioctl error (TOSHIBA #2): 0x%x\n",rc);
+      sector = 0;
+    } else {
+      min   = (unsigned long)buf[8+1]/16*10 + (unsigned long)buf[8+1]%16;
+      sec   = (unsigned long)buf[8+2]/16*10 + (unsigned long)buf[8+2]%16;
+      frame = (unsigned long)buf[8+3]/16*10 + (unsigned long)buf[8+3]%16;
+      sector = min*60*75 + sec*75 + frame;
+      if (sector) {
+        sector -= CD_BLOCK_OFFSET;
+#ifdef DEBUG
+        printk("sr_photocd: multisession CD detected: start: %lu\n",sector);
+#endif
+      }
+    }
+    break;
+
+  case SCSI_MAN_UNKNOWN:
+  default:
+#ifdef DEBUG
+    printk("sr_photocd: unknown drive, no special multisession code\n");
+#endif
+    sector = 0;
+    break; }
+
+  scsi_CDs[MINOR(inode->i_rdev)].mpcd_sector = sector;
+  return;
 }
 
 static int sr_open(struct inode * inode, struct file * filp)
@@ -283,6 +416,8 @@ static int sr_open(struct inode * inode, struct file * filp)
 
 	if(!scsi_CDs[MINOR(inode->i_rdev)].device->access_count++)
 	  sr_ioctl(inode, NULL, SCSI_IOCTL_DOORLOCK, 0);
+	if (scsi_CDs[MINOR(inode->i_rdev)].device->host->hostt->usage_count)
+	  (*scsi_CDs[MINOR(inode->i_rdev)].device->host->hostt->usage_count)++;
 
 	/* If this device did not have media in the drive at boot time, then
 	   we would have been unable to get the sector size.  Check to see if
@@ -291,6 +426,10 @@ static int sr_open(struct inode * inode, struct file * filp)
 
 	if(scsi_CDs[MINOR(inode->i_rdev)].needs_sector_size)
 	  get_sectorsize(MINOR(inode->i_rdev));
+
+#if 1	/* don't use for now - it doesn't seem to work for everybody */
+	sr_photocd(inode);
+#endif
 
 	return 0;
 }
@@ -305,12 +444,14 @@ static void do_sr_request (void)
 {
   Scsi_Cmnd * SCpnt = NULL;
   struct request * req = NULL;
+  unsigned long flags;
   int flag = 0;
 
   while (1==1){
+    save_flags(flags);
     cli();
     if (CURRENT != NULL && CURRENT->dev == -1) {
-      sti();
+      restore_flags(flags);
       return;
     };
     
@@ -320,18 +461,19 @@ static void do_sr_request (void)
       SCpnt = allocate_device(&CURRENT,
 			      scsi_CDs[DEVICE_NR(MINOR(CURRENT->dev))].device, 0); 
     else SCpnt = NULL;
-    sti();
+    restore_flags(flags);
 
 /* This is a performance enhancement.  We dig down into the request list and
    try and find a queueable request (i.e. device not busy, and host able to
    accept another command.  If we find one, then we queue it. This can
    make a big difference on systems with more than one disk drive.  We want
    to have the interrupts off when monkeying with the request list, because
-   otherwise the kernel might try and slip in a request inbetween somewhere. */
+   otherwise the kernel might try and slip in a request in between somewhere. */
 
     if (!SCpnt && sr_template.nr_dev > 1){
       struct request *req1;
       req1 = NULL;
+      save_flags(flags);
       cli();
       req = CURRENT;
       while(req){
@@ -347,7 +489,7 @@ static void do_sr_request (void)
 	else
 	  req1->next = req->next;
       };
-      sti();
+      restore_flags(flags);
     };
     
     if (!SCpnt)
@@ -369,7 +511,7 @@ void requeue_sr_request (Scsi_Cmnd * SCpnt)
 	tries = 2;
 
       repeat:
-	if(SCpnt->request.dev <= 0) {
+	if(!SCpnt || SCpnt->request.dev <= 0) {
 	  do_sr_request();
 	  return;
 	}
@@ -382,7 +524,7 @@ void requeue_sr_request (Scsi_Cmnd * SCpnt)
 	if (dev >= sr_template.nr_dev)
 		{
 		/* printk("CD-ROM request error: invalid device.\n");			*/
-		end_scsi_request(SCpnt, 0, SCpnt->request.nr_sectors);
+		SCpnt = end_scsi_request(SCpnt, 0, SCpnt->request.nr_sectors);
 		tries = 2;
 		goto repeat;
 		}
@@ -390,7 +532,7 @@ void requeue_sr_request (Scsi_Cmnd * SCpnt)
 	if (!scsi_CDs[dev].use)
 		{
 		/* printk("CD-ROM request error: device marked not in use.\n");		*/
-		end_scsi_request(SCpnt, 0, SCpnt->request.nr_sectors);
+		SCpnt = end_scsi_request(SCpnt, 0, SCpnt->request.nr_sectors);
 		tries = 2;
 		goto repeat;
 		}
@@ -401,7 +543,7 @@ void requeue_sr_request (Scsi_Cmnd * SCpnt)
  * quietly refuse to do anything to a changed disc until the changed bit has been reset
  */
 		/* printk("CD-ROM has been changed.  Prohibiting further I/O.\n");	*/
-		end_scsi_request(SCpnt, 0, SCpnt->request.nr_sectors);
+		SCpnt = end_scsi_request(SCpnt, 0, SCpnt->request.nr_sectors);
 		tries = 2;
 		goto repeat;
 		}
@@ -409,7 +551,7 @@ void requeue_sr_request (Scsi_Cmnd * SCpnt)
 	switch (SCpnt->request.cmd)
 		{
 		case WRITE: 		
-			end_scsi_request(SCpnt, 0, SCpnt->request.nr_sectors);
+			SCpnt = end_scsi_request(SCpnt, 0, SCpnt->request.nr_sectors);
 			goto repeat;
 			break;
 		case READ : 
@@ -437,6 +579,15 @@ work around the fact that the buffer cache has a block size of 1024,
 and we have 2048 byte sectors.  This code should work for buffers that
 are any multiple of 512 bytes long.  */
 
+#if 1
+	/* Here we redirect the volume descriptor block of the CD-ROM.
+	 * Necessary for multisession CD's, until the isofs-routines
+	 * handle this via the CDROMMULTISESSION_SYS call
+	 */
+	if (block >= 64 && block < 68) {
+	  block += scsi_CDs[dev].mpcd_sector*4; }
+#endif
+	
 	SCpnt->use_sg = 0;
 
 	if (SCpnt->host->sg_tablesize > 0 &&
@@ -627,7 +778,20 @@ are any multiple of 512 bytes long.  */
 	  printk("\n");
 	};
 #endif
-	
+
+/* Some dumb host adapters can speed transfers by knowing the
+ * minimum transfersize in advance.
+ *
+ * We shouldn't disconnect in the middle of a sector, but the cdrom
+ * sector size can be larger than the size of a buffer and the
+ * transfer may be split to the size of a buffer.  So it's safe to
+ * assume that we can at least transfer the minimum of the buffer
+ * size (1024) and the sector size between each connect / disconnect.
+ */
+
+        SCpnt->transfersize = (scsi_CDs[dev].sector_size > 1024) ?
+                        1024 : scsi_CDs[dev].sector_size;
+
 	SCpnt->this_count = this_count;
 	scsi_do_cmd (SCpnt, (void *) cmd, buffer, 
 		     realcount * scsi_CDs[dev].sector_size, 
@@ -636,28 +800,26 @@ are any multiple of 512 bytes long.  */
 
 static int sr_detect(Scsi_Device * SDp){
   
-  /* We do not support attaching loadable devices yet. */
-  if(scsi_loadable_module_flag) return 0;
   if(SDp->type != TYPE_ROM && SDp->type != TYPE_WORM) return 0;
 
   printk("Detected scsi CD-ROM sr%d at scsi%d, id %d, lun %d\n", 
-	 ++sr_template.dev_noticed,
+	 sr_template.dev_noticed++,
 	 SDp->host->host_no , SDp->id, SDp->lun); 
 
 	 return 1;
 }
 
-static void sr_attach(Scsi_Device * SDp){
+static int sr_attach(Scsi_Device * SDp){
   Scsi_CD * cpnt;
   int i;
   
-  /* We do not support attaching loadable devices yet. */
-  
-  if(scsi_loadable_module_flag) return;
-  if(SDp->type != TYPE_ROM && SDp->type != TYPE_WORM) return;
+  if(SDp->type != TYPE_ROM && SDp->type != TYPE_WORM) return 1;
   
   if (sr_template.nr_dev >= sr_template.dev_max)
-    panic ("scsi_devices corrupt (sr)");
+    {
+	SDp->attached--;
+	return 1;
+    }
   
   for(cpnt = scsi_CDs, i=0; i<sr_template.dev_max; i++, cpnt++) 
     if(!cpnt->device) break;
@@ -669,6 +831,7 @@ static void sr_attach(Scsi_Device * SDp){
   sr_template.nr_dev++;
   if(sr_template.nr_dev > sr_template.dev_max)
     panic ("scsi_devices corrupt (sr)");
+  return 0;
 }
      
 
@@ -686,10 +849,11 @@ static void sr_init_done (Scsi_Cmnd * SCpnt)
 
 static void get_sectorsize(int i){
   unsigned char cmd[10];
-  unsigned char buffer[513];
+  unsigned char *buffer;
   int the_result, retries;
   Scsi_Cmnd * SCpnt;
   
+  buffer = (unsigned char *) scsi_malloc(512);
   SCpnt = allocate_device(NULL, scsi_CDs[i].device, 1);
 
   retries = 3;
@@ -698,6 +862,7 @@ static void get_sectorsize(int i){
     cmd[1] = (scsi_CDs[i].device->lun << 5) & 0xe0;
     memset ((void *) &cmd[2], 0, 8);
     SCpnt->request.dev = 0xffff;  /* Mark as really busy */
+    SCpnt->cmd_len = 0;
     
     memset(buffer, 0, 8);
 
@@ -747,6 +912,7 @@ static void get_sectorsize(int i){
       scsi_CDs[i].capacity *= 4;
     scsi_CDs[i].needs_sector_size = 0;
   };
+  scsi_free(buffer, 512);
 }
 
 static void sr_init()
@@ -761,20 +927,20 @@ static void sr_init()
 	    printk("Unable to get major %d for SCSI-CD\n",MAJOR_NR);
 	    return;
 	  }
+	  sr_registered++;
 	}
 
-	/* We do not support attaching loadable devices yet. */
-	if(scsi_loadable_module_flag) return;
-
-	sr_template.dev_max = sr_template.dev_noticed;
-	scsi_CDs = (Scsi_CD *) scsi_init_malloc(sr_template.dev_max * sizeof(Scsi_CD));
+	
+	if (scsi_CDs) return;
+	sr_template.dev_max = sr_template.dev_noticed + SR_EXTRA_DEVS;
+	scsi_CDs = (Scsi_CD *) scsi_init_malloc(sr_template.dev_max * sizeof(Scsi_CD), GFP_ATOMIC);
 	memset(scsi_CDs, 0, sr_template.dev_max * sizeof(Scsi_CD));
 
-	sr_sizes = (int *) scsi_init_malloc(sr_template.dev_max * sizeof(int));
+	sr_sizes = (int *) scsi_init_malloc(sr_template.dev_max * sizeof(int), GFP_ATOMIC);
 	memset(sr_sizes, 0, sr_template.dev_max * sizeof(int));
 
 	sr_blocksizes = (int *) scsi_init_malloc(sr_template.dev_max * 
-						 sizeof(int));
+						 sizeof(int), GFP_ATOMIC);
 	for(i=0;i<sr_template.dev_max;i++) sr_blocksizes[i] = 2048;
 	blksize_size[MAJOR_NR] = sr_blocksizes;
 
@@ -784,26 +950,61 @@ void sr_finish()
 {
   int i;
 
+	blk_dev[MAJOR_NR].request_fn = DEVICE_REQUEST;
+	blk_size[MAJOR_NR] = sr_sizes;	
+
 	for (i = 0; i < sr_template.nr_dev; ++i)
 		{
+		  /* If we have already seen this, then skip it.  Comes up
+		     with loadable modules. */
+		  if (scsi_CDs[i].capacity) continue;
 		  get_sectorsize(i);
-		  printk("Scd sectorsize = %d bytes\n", scsi_CDs[i].sector_size);
+		  printk("Scd sectorsize = %d bytes.\n", scsi_CDs[i].sector_size);
 		  scsi_CDs[i].use = 1;
 		  scsi_CDs[i].ten = 1;
 		  scsi_CDs[i].remap = 1;
 		  sr_sizes[i] = scsi_CDs[i].capacity;
 		}
 
-	blk_dev[MAJOR_NR].request_fn = DEVICE_REQUEST;
-	blk_size[MAJOR_NR] = sr_sizes;	
 
 	/* If our host adapter is capable of scatter-gather, then we increase
 	   the read-ahead to 16 blocks (32 sectors).  If not, we use
 	   a two block (4 sector) read ahead. */
-	if(scsi_CDs[0].device->host->sg_tablesize)
+	if(scsi_CDs[0].device && scsi_CDs[0].device->host->sg_tablesize)
 	  read_ahead[MAJOR_NR] = 32;  /* 32 sector read-ahead.  Always removable. */
 	else
 	  read_ahead[MAJOR_NR] = 4;  /* 4 sector read-ahead */
 
 	return;
 }	
+
+static void sr_detach(Scsi_Device * SDp)
+{
+  Scsi_CD * cpnt;
+  int i, major;
+  
+  major = MAJOR_NR << 8;
+
+  for(cpnt = scsi_CDs, i=0; i<sr_template.dev_max; i++, cpnt++) 
+    if(cpnt->device == SDp) {
+      /*
+       * Since the cdrom is read-only, no need to sync the device.
+       * We should be kind to our buffer cache, however.
+       */
+      invalidate_inodes(major | i);
+      invalidate_buffers(major | i);
+
+      /*
+       * Reset things back to a sane state so that one can re-load a new
+       * driver (perhaps the same one).
+       */
+      cpnt->device = NULL;
+      cpnt->capacity = 0;
+      SDp->attached--;
+      sr_template.nr_dev--;
+      sr_template.dev_noticed--;
+      sr_sizes[i] = 0;
+      return;
+    }
+  return;
+}

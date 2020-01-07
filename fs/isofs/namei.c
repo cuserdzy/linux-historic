@@ -26,33 +26,28 @@
  */
 static int isofs_match(int len,const char * name, char * compare, int dlen)
 {
-	register int same;
-	
-	if (!compare) return 0;
-	/* "" means "." ---> so paths like "/usr/lib//libc.a" work */
-	if (!len && (compare[0]==0) && (dlen==1))
-		return 1;
-	
-	if (compare[0]==0 && dlen==1 && len == 1)
-		compare = ".";
- 	if (compare[0]==1 && dlen==1 && len == 2) {
-		compare = "..";
-		dlen = 2;
-	};
+	if (!compare)
+		return 0;
+
+	/* check special "." and ".." files */
+	if (dlen == 1) {
+		/* "." */
+		if (compare[0] == 0) {
+			if (!len)
+				return 1;
+			compare = ".";
+		} else if (compare[0] == 1) {
+			compare = "..";
+			dlen = 2;
+		}
+	}
 #if 0
 	if (len <= 2) printk("Match: %d %d %s %d %d \n",len,dlen,compare,de->name[0], dlen);
 #endif
 	
 	if (dlen != len)
 		return 0;
-	__asm__ __volatile__(
-		"cld\n\t"
-		"repe ; cmpsb\n\t"
-		"setz %%al"
-		:"=a" (same)
-		:"0" (0),"S" ((long) name),"D" ((long) compare),"c" (len)
-		:"cx","di","si");
-	return same;
+	return !memcmp(name, compare, len);
 }
 
 /*
@@ -74,6 +69,7 @@ static struct buffer_head * isofs_find_entry(struct inode * dir,
 	unsigned int old_offset;
 	unsigned int backlink;
 	int dlen, rrflag, match;
+	int high_sierra = 0;
 	char * dpnt;
 	struct iso_directory_record * de;
 	char c;
@@ -119,6 +115,7 @@ static struct buffer_head * isofs_find_entry(struct inode * dir,
 		        unsigned int frag1;
 			frag1 = bufsize - old_offset;
 			cpnt = kmalloc(*((unsigned char *) de),GFP_KERNEL);
+			if (!cpnt) return 0;
 			memcpy(cpnt, bh->b_data + old_offset, frag1);
 
 			de = (struct iso_directory_record *) cpnt;
@@ -144,17 +141,26 @@ static struct buffer_head * isofs_find_entry(struct inode * dir,
 		if (de->name[0]==1 && de->name_len[0]==1) {
 #if 0
 			printk("Doing .. (%d %d)",
-			       dir->i_sb->s_firstdatazone << bufbits,
+			       dir->i_sb->s_firstdatazone,
 			       dir->i_ino);
 #endif
-			if((dir->i_sb->u.isofs_sb.s_firstdatazone
-			    << bufbits) != dir->i_ino)
-				inode_number = dir->u.isofs_i.i_backlink;
+			if((dir->i_sb->u.isofs_sb.s_firstdatazone) != dir->i_ino)
+ 				inode_number = dir->u.isofs_i.i_backlink;
 			else
 				inode_number = dir->i_ino;
 			backlink = 0;
 		}
     
+		/* Do not report hidden or associated files */
+		high_sierra = dir->i_sb->u.isofs_sb.s_high_sierra;
+		if (de->flags[-high_sierra] & 5) {
+		  if (cpnt) {
+		    kfree(cpnt);
+		    cpnt = NULL;
+		  };
+		  continue;
+		}
+		
 		dlen = de->name_len[0];
 		dpnt = de->name;
 		/* Now convert the filename in the buffer to lower case */

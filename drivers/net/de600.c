@@ -90,7 +90,6 @@ static char *version =
 #endif
 unsigned int de600_debug = DE600_DEBUG;
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/types.h>
@@ -98,10 +97,10 @@ unsigned int de600_debug = DE600_DEBUG;
 #include <linux/string.h>
 #include <linux/interrupt.h>
 #include <asm/io.h>
-#include <netinet/in.h>
+#include <linux/in.h>
 #include <linux/ptrace.h>
 #include <asm/system.h>
-#include <errno.h>
+#include <linux/errno.h>
 
 #include <linux/inet.h>
 #include <linux/netdevice.h>
@@ -110,7 +109,7 @@ unsigned int de600_debug = DE600_DEBUG;
 
 #ifdef MODULE
 #include <linux/module.h>
-#include "../../tools/version.h"
+#include <linux/version.h>
 #endif
 
 #ifdef FAKE_SMALL_MAX
@@ -250,7 +249,7 @@ static struct netstats *get_stats(struct device *dev);
 static int	de600_start_xmit(struct sk_buff *skb, struct device *dev);
 
 /* Dispatch from interrupts. */
-static void	de600_interrupt(int reg_ptr);
+static void	de600_interrupt(int irq, struct pt_regs *regs);
 static int	de600_tx_intr(struct device *dev, int irq_status);
 static void	de600_rx_intr(struct device *dev);
 
@@ -496,9 +495,8 @@ de600_start_xmit(struct sk_buff *skb, struct device *dev)
  * Handle the network interface interrupts.
  */
 static void
-de600_interrupt(int reg_ptr)
+de600_interrupt(int irq, struct pt_regs * regs)
 {
-	int		irq = -(((struct pt_regs *)reg_ptr)->orig_eax+2);
 	struct device	*dev = irq2dev_map[irq];
 	byte		irq_status;
 	int		retrig = 0;

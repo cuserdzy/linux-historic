@@ -16,15 +16,13 @@
 #include <asm/segment.h>
 #include <asm/system.h>
 
-#define CHG_MASK (PAGE_MASK | PAGE_ACCESSED | PAGE_DIRTY | PAGE_PWT | PAGE_PCD)
-
 static void change_protection(unsigned long start, unsigned long end, int prot)
 {
 	unsigned long *page_table, *dir;
 	unsigned long page, offset;
 	int nr;
 
-	dir = PAGE_DIR_OFFSET(current->tss.cr3, start);
+	dir = PAGE_DIR_OFFSET(current, start);
 	offset = (start >> PAGE_SHIFT) & (PTRS_PER_PAGE-1);
 	nr = (end - start) >> PAGE_SHIFT;
 	while (nr > 0) {
@@ -43,7 +41,7 @@ static void change_protection(unsigned long start, unsigned long end, int prot)
 		do {
 			page = *page_table;
 			if (page & PAGE_PRESENT)
-				*page_table = (page & CHG_MASK) | prot;
+				*page_table = (page & PAGE_CHG_MASK) | prot;
 			++page_table;
 		} while (--offset);
 	}
@@ -55,7 +53,6 @@ static inline int mprotect_fixup_all(struct vm_area_struct * vma,
 {
 	vma->vm_flags = newflags;
 	vma->vm_page_prot = prot;
-	merge_segments(current->mm->mmap);
 	return 0;
 }
 
@@ -76,8 +73,9 @@ static inline int mprotect_fixup_start(struct vm_area_struct * vma,
 	n->vm_page_prot = prot;
 	if (n->vm_inode)
 		n->vm_inode->i_count++;
+	if (n->vm_ops && n->vm_ops->open)
+		n->vm_ops->open(n);
 	insert_vm_struct(current, n);
-	merge_segments(current->mm->mmap);
 	return 0;
 }
 
@@ -98,8 +96,9 @@ static inline int mprotect_fixup_end(struct vm_area_struct * vma,
 	n->vm_page_prot = prot;
 	if (n->vm_inode)
 		n->vm_inode->i_count++;
+	if (n->vm_ops && n->vm_ops->open)
+		n->vm_ops->open(n);
 	insert_vm_struct(current, n);
-	merge_segments(current->mm->mmap);
 	return 0;
 }
 
@@ -107,17 +106,35 @@ static inline int mprotect_fixup_middle(struct vm_area_struct * vma,
 	unsigned long start, unsigned long end,
 	int newflags, int prot)
 {
-	int error;
-	unsigned long tmpflags, tmpprot;
+	struct vm_area_struct * left, * right;
 
-	tmpflags = vma->vm_flags;
-	tmpprot = vma->vm_page_prot;
+	left = (struct vm_area_struct *) kmalloc(sizeof(struct vm_area_struct), GFP_KERNEL);
+	if (!left)
+		return -ENOMEM;
+	right = (struct vm_area_struct *) kmalloc(sizeof(struct vm_area_struct), GFP_KERNEL);
+	if (!right) {
+		kfree(left);
+		return -ENOMEM;
+	}
+	*left = *vma;
+	*right = *vma;
+	left->vm_end = start;
+	vma->vm_start = start;
+	vma->vm_end = end;
+	right->vm_start = end;
+	vma->vm_offset += vma->vm_start - left->vm_start;
+	right->vm_offset += right->vm_start - left->vm_start;
 	vma->vm_flags = newflags;
 	vma->vm_page_prot = prot;
-	error = mprotect_fixup_end(vma, end, tmpflags, tmpprot);
-	if (!error)
-		error = mprotect_fixup_start(vma, start, tmpflags, tmpprot);
-	return error;
+	if (vma->vm_inode)
+		vma->vm_inode->i_count += 2;
+	if (vma->vm_ops && vma->vm_ops->open) {
+		vma->vm_ops->open(left);
+		vma->vm_ops->open(right);
+	}
+	insert_vm_struct(current, left);
+	insert_vm_struct(current, right);
+	return 0;
 }
 
 static int mprotect_fixup(struct vm_area_struct * vma, 
@@ -155,8 +172,9 @@ static int mprotect_fixup(struct vm_area_struct * vma,
 
 asmlinkage int sys_mprotect(unsigned long start, size_t len, unsigned long prot)
 {
-	unsigned long end;
-	struct vm_area_struct * vma;
+	unsigned long end, tmp;
+	struct vm_area_struct * vma, * next;
+	int error;
 
 	if (start & ~PAGE_MASK)
 		return -EINVAL;
@@ -178,22 +196,33 @@ asmlinkage int sys_mprotect(unsigned long start, size_t len, unsigned long prot)
 		return -EFAULT;
 
 	for ( ; ; ) {
-		int error;
 		unsigned int newflags;
 
+		/* Here we know that  vma->vm_start <= start < vma->vm_end. */
+
 		newflags = prot | (vma->vm_flags & ~(PROT_READ | PROT_WRITE | PROT_EXEC));
-		if ((newflags & ~(newflags >> 4)) & 0xf)
-			return -EACCES;
+		if ((newflags & ~(newflags >> 4)) & 0xf) {
+			error = -EACCES;
+			break;
+		}
 
-		if (vma->vm_end >= end)
-			return mprotect_fixup(vma, start, end, newflags);
+		if (vma->vm_end >= end) {
+			error = mprotect_fixup(vma, start, end, newflags);
+			break;
+		}
 
-		error = mprotect_fixup(vma, start, vma->vm_end, newflags);
+		tmp = vma->vm_end;
+		next = vma->vm_next;
+		error = mprotect_fixup(vma, start, tmp, newflags);
 		if (error)
-			return error;
-		start = vma->vm_end;
-		vma = vma->vm_next;
-		if (!vma || vma->vm_start != start)
-			return -EFAULT;
+			break;
+		start = tmp;
+		vma = next;
+		if (!vma || vma->vm_start != start) {
+			error = -EFAULT;
+			break;
+		}
 	}
+	merge_segments(current->mm->mmap);
+	return error;
 }

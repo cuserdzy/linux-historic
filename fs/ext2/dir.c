@@ -22,6 +22,9 @@
 #include <linux/sched.h>
 #include <linux/stat.h>
 
+#define NAME_OFFSET(de) ((int) ((de)->d_name - (char *) (de)))
+#define ROUND_UP(x) (((x)+3) & ~3)
+
 static int ext2_dir_read (struct inode * inode, struct file * filp,
 			    char * buf, int count)
 {
@@ -40,7 +43,10 @@ static struct file_operations ext2_dir_operations = {
 	NULL,			/* mmap */
 	NULL,			/* no special open code */
 	NULL,			/* no special release code */
-	file_fsync		/* fsync */
+	file_fsync,		/* fsync */
+	NULL,			/* fasync */
+	NULL,			/* check_media_change */
+	NULL			/* revalidate */
 };
 
 /*
@@ -61,7 +67,8 @@ struct inode_operations ext2_dir_inode_operations = {
 	NULL,			/* follow_link */
 	NULL,			/* bmap */
 	ext2_truncate,		/* truncate */
-	ext2_permission		/* permission */
+	ext2_permission,	/* permission */
+	NULL			/* smap */
 };
 
 int ext2_check_dir_entry (char * function, struct inode * dir,
@@ -79,6 +86,8 @@ int ext2_check_dir_entry (char * function, struct inode * dir,
 	else if (dir && ((char *) de - bh->b_data) + de->rec_len >
 		 dir->i_sb->s_blocksize)
 		error_msg = "directory entry across blocks";
+	else if (dir && de->inode > dir->i_sb->u.ext2_sb.s_es->s_inodes_count)
+		error_msg = "inode out of bounds";
 
 	if (error_msg != NULL)
 		ext2_error (dir->i_sb, function, "bad directory entry: %s\n"
@@ -92,17 +101,21 @@ static int ext2_readdir (struct inode * inode, struct file * filp,
 			 struct dirent * dirent, int count)
 {
 	unsigned long offset, blk;
-	int i, num;
+	int i, num, stored, dlen;
 	struct buffer_head * bh, * tmp, * bha[16];
 	struct ext2_dir_entry * de;
 	struct super_block * sb;
-	int err;
-	
+	int err, version;
+
 	if (!inode || !S_ISDIR(inode->i_mode))
 		return -EBADF;
 	sb = inode->i_sb;
-	while (filp->f_pos < inode->i_size) {
-		offset = filp->f_pos & (sb->s_blocksize - 1);
+
+	stored = 0;
+	bh = NULL;
+	offset = filp->f_pos & (sb->s_blocksize - 1);
+
+	while (count > 0 && !stored && filp->f_pos < inode->i_size) {
 		blk = (filp->f_pos) >> EXT2_BLOCK_SIZE_BITS(sb);
 		bh = ext2_bread (inode, blk, 0, &err);
 		if (!bh) {
@@ -129,39 +142,86 @@ static int ext2_readdir (struct inode * inode, struct file * filp,
 			}
 		}
 		
-		de = (struct ext2_dir_entry *) (offset + bh->b_data);
-		while (offset < sb->s_blocksize && filp->f_pos < inode->i_size) {
+revalidate:
+		/* If the dir block has changed since the last call to
+		 * readdir(2), then we might be pointing to an invalid
+		 * dirent right now.  Scan from the start of the block
+		 * to make sure. */
+		if (filp->f_version != inode->i_version) {
+			for (i = 0; i < sb->s_blocksize && i < offset; ) {
+				de = (struct ext2_dir_entry *) 
+					(bh->b_data + i);
+				/* It's too expensive to do a full
+				 * dirent test each time round this
+				 * loop, but we do have to test at
+				 * least that it is non-zero.  A
+				 * failure will be detected in the
+				 * dirent test below. */
+				if (de->rec_len < EXT2_DIR_REC_LEN(1))
+					break;
+				i += de->rec_len;
+			}
+			offset = i;
+			filp->f_pos = (filp->f_pos & ~(sb->s_blocksize - 1))
+				| offset;
+			filp->f_version = inode->i_version;
+		}
+		
+		while (count > 0 && filp->f_pos < inode->i_size 
+		       && offset < sb->s_blocksize) {
+			de = (struct ext2_dir_entry *) (bh->b_data + offset);
 			if (!ext2_check_dir_entry ("ext2_readdir", inode, de,
 						   bh, offset)) {
+				/* On error, skip the f_pos to the
+                                   next block. */
+				filp->f_pos = (filp->f_pos & (sb->s_blocksize - 1))
+					      + sb->s_blocksize;
 				brelse (bh);
-				return 0;
+				return stored;
+			}
+			if (de->inode) {
+				dlen = ROUND_UP(NAME_OFFSET(dirent) 
+						+ de->name_len + 1);
+				/* Old libc libraries always use a
+                                   count of 1. */
+				if (count == 1 && !stored)
+					count = dlen;
+				if (count < dlen) {
+					count = 0;
+					break;
+				}
+
+				/* We might block in the next section
+				 * if the data destination is
+				 * currently swapped out.  So, use a
+				 * version stamp to detect whether or
+				 * not the directory has been modified
+				 * during the copy operation. */
+				version = inode->i_version;
+				i = de->name_len;
+				memcpy_tofs (dirent->d_name, de->name, i);
+				put_fs_long (de->inode, &dirent->d_ino);
+				put_fs_byte (0, dirent->d_name + i);
+				put_fs_word (i, &dirent->d_reclen);
+				put_fs_long (dlen, &dirent->d_off);
+				if (version != inode->i_version)
+					goto revalidate;
+				dcache_add(inode, de->name, de->name_len,
+						 de->inode);
+
+				stored += dlen;
+				count -= dlen;
+				((char *) dirent) += dlen;
 			}
 			offset += de->rec_len;
 			filp->f_pos += de->rec_len;
-			if (de->inode) {
-				memcpy_tofs (dirent->d_name, de->name,
-					     de->name_len);
-				put_fs_long (de->inode, &dirent->d_ino);
-				put_fs_byte (0, de->name_len + dirent->d_name);
-				put_fs_word (de->name_len, &dirent->d_reclen);
-				dcache_add(inode, de->name, de->name_len,
-						 de->inode);
-				i = de->name_len;
-				brelse (bh);
-				if (!IS_RDONLY(inode)) {
-					inode->i_atime = CURRENT_TIME;
-					inode->i_dirt = 1;
-				}
-				return i;
-			}
-			de = (struct ext2_dir_entry *) ((char *) de +
-							de->rec_len);
 		}
+		offset = 0;
 		brelse (bh);
 	}
 	if (!IS_RDONLY(inode)) {
 		inode->i_atime = CURRENT_TIME;
 		inode->i_dirt = 1;
 	}
-	return 0;
+	return stored;
 }

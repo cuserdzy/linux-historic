@@ -33,6 +33,7 @@
 #include <linux/timer.h>
 #include <linux/ip.h>		/* struct options */
 #include <linux/tcp.h>		/* struct tcphdr */
+#include <linux/config.h>
 
 #include <linux/skbuff.h>	/* struct sk_buff */
 #include "protocol.h"		/* struct inet_protocol */
@@ -43,7 +44,9 @@
 #include "ipx.h"
 #endif
 
-#define SOCK_ARRAY_SIZE	64
+#include "igmp.h"
+
+#define SOCK_ARRAY_SIZE	256		/* Think big (also on some systems a byte is faster */
 
 
 /*
@@ -88,6 +91,7 @@ struct sock {
   unsigned long		        lingertime;
   int				proc;
   struct sock			*next;
+  struct sock			*prev; /* Doubly linked chain.. */
   struct sock			*pair;
   struct sk_buff		* volatile send_head;
   struct sk_buff		* volatile send_tail;
@@ -150,17 +154,27 @@ struct sock {
   char				ax25_rrtimer;
   char				ax25_timer;
   unsigned char			ax25_n2;
-  unsigned short		ax25_t1,ax25_t3;
+  unsigned short		ax25_t1,ax25_t2,ax25_t3;
   ax25_digi			*ax25_digipeat;
 #endif  
 /* IP 'private area' or will be eventually */
   int				ip_ttl;		/* TTL setting */
   int				ip_tos;		/* TOS */
   struct tcphdr			dummy_th;
+  struct timer_list		keepalive_timer;	/* TCP keepalive hack */
+  struct timer_list		retransmit_timer;	/* TCP retransmit timer */
+  struct timer_list		ack_timer;		/* TCP delayed ack timer */
+  int				ip_xmit_timeout;	/* Why the timeout is running */
+#ifdef CONFIG_IP_MULTICAST  
+  int				ip_mc_ttl;			/* Multicasting TTL */
+  int				ip_mc_loop;			/* Loopback (not implemented yet) */
+  char				ip_mc_name[MAX_ADDR_LEN];	/* Multicast device name */
+  struct ip_mc_socklist		*ip_mc_list;			/* Group array */
+#endif  
 
   /* This part is used for the timeout functions (timer.c). */
   int				timeout;	/* What are we waiting for? */
-  struct timer_list		timer;
+  struct timer_list		timer;		/* This is the TIME_WAIT/receive timer when we are doing IP */
   struct timeval		stamp;
 
   /* identd */
@@ -232,6 +246,7 @@ struct proto {
   unsigned long		retransmits;
   struct sock *		sock_array[SOCK_ARRAY_SIZE];
   char			name[80];
+  int			inuse, highestinuse;
 };
 
 #define TIME_WRITE	1
@@ -256,7 +271,12 @@ extern void			release_sock(struct sock *sk);
 extern struct sock		*get_sock(struct proto *, unsigned short,
 					  unsigned long, unsigned short,
 					  unsigned long);
-extern void			print_sk(struct sock *);
+extern struct sock		*get_sock_mcast(struct sock *, unsigned short,
+					  unsigned long, unsigned short,
+					  unsigned long);
+extern struct sock		*get_sock_raw(struct sock *, unsigned short,
+					  unsigned long, unsigned long);
+
 extern struct sk_buff		*sock_wmalloc(struct sock *sk,
 					      unsigned long size, int force,
 					      int priority);
@@ -271,7 +291,10 @@ extern unsigned long		sock_rspace(struct sock *sk);
 extern unsigned long		sock_wspace(struct sock *sk);
 
 extern int			sock_setsockopt(struct sock *sk,int level,int op,char *optval,int optlen);
+
 extern int			sock_getsockopt(struct sock *sk,int level,int op,char *optval,int *optlen);
+extern struct sk_buff 		*sock_alloc_send_skb(struct sock *skb, unsigned long size, int noblock, int *errcode);
+extern int			sock_queue_rcv_skb(struct sock *sk, struct sk_buff *skb);
 
 /* declarations from timer.c */
 extern struct sock *timer_base;

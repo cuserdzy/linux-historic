@@ -1,5 +1,5 @@
 /*
- *  linux/kernel/chr_drv/mem.c
+ *  linux/drivers/char/mem.c
  *
  *  Copyright (C) 1991, 1992  Linus Torvalds
  */
@@ -87,8 +87,10 @@ static int mmap_mem(struct inode * inode, struct file * file, struct vm_area_str
 {
 	if (vma->vm_offset & ~PAGE_MASK)
 		return -ENXIO;
+#ifdef __i386__
 	if (x86 > 3 && vma->vm_offset >= high_memory)
 		vma->vm_page_prot |= PAGE_PCD;
+#endif
 	if (remap_page_range(vma->vm_start, vma->vm_offset, vma->vm_end - vma->vm_start, vma->vm_page_prot))
 		return -EAGAIN;
 	vma->vm_inode = inode;
@@ -103,7 +105,7 @@ static int read_kmem(struct inode *inode, struct file *file, char *buf, int coun
 	read1 = read_mem(inode, file, buf, count);
 	if (read1 < 0)
 		return read1;
-	read2 = vread(buf + read1, (char *) file->f_pos, count - read1);
+	read2 = vread(buf + read1, (char *) ((unsigned long) file->f_pos), count - read1);
 	if (read2 < 0)
 		return read2;
 	file->f_pos += read2;

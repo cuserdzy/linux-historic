@@ -17,7 +17,6 @@
 #include <linux/malloc.h>
 
 #include <asm/segment.h>
-extern void shm_exit (void);
 extern void sem_exit (void);
 
 int getrusage(struct task_struct *, int, struct rusage *);
@@ -365,21 +364,11 @@ static void exit_mm(void)
 		struct vm_area_struct * next = mpnt->vm_next;
 		if (mpnt->vm_ops && mpnt->vm_ops->close)
 			mpnt->vm_ops->close(mpnt);
+		remove_shared_vm_struct(mpnt);
 		if (mpnt->vm_inode)
 			iput(mpnt->vm_inode);
 		kfree(mpnt);
 		mpnt = next;
-	}
-
-	/* forget local segments */
-	__asm__ __volatile__("mov %w0,%%fs ; mov %w0,%%gs ; lldt %w0"
-		: /* no outputs */
-		: "r" (0));
-	current->tss.ldt = 0;
-	if (current->ldt) {
-		void * ldt = current->ldt;
-		current->ldt = NULL;
-		vfree(ldt);
 	}
 
 	free_page_tables(current);
@@ -411,13 +400,12 @@ NORET_TYPE void do_exit(long code)
 		intr_count = 0;
 	}
 fake_volatile:
-	if (current->semun)
+	if (current->semundo)
 		sem_exit();
-	if (current->shm)
-		shm_exit();
 	exit_mm();
 	exit_files();
 	exit_fs();
+	exit_thread();
 	forget_original_parent(current);
 	/* 
 	 * Check to see if any process groups have become orphaned

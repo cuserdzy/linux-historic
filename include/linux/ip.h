@@ -28,24 +28,27 @@
 #define IPOPT_TIMESTAMP	68
 
 
+#define MAXTTL		255
+
 struct timestamp {
-  unsigned char	len;
-  unsigned char ptr;
-  union {
+	__u8	len;
+	__u8	ptr;
+	union {
 #if defined(__i386__)  
-	unsigned char	flags:4,
+		__u8	flags:4,
+			overflow:4;
+#elif defined(__mc68000__)
+		__u8	overflow:4,
+			flags:4;
+#elif defined(__alpha__)
+		__u8	flags:4,
 			overflow:4;
 #else
-#if defined(__mc680x0__)
-	unsigned char	overflow:4,
-			flags:4;
-#else
 #error	"Adjust this structure to match your CPU"
-#endif
 #endif						
-	unsigned char	full_char;
-  } x;
-  unsigned long	data[9];
+		__u8	full_char;
+	} x;
+	__u32	data[9];
 };
 
 
@@ -73,26 +76,27 @@ struct options {
 
 struct iphdr {
 #if defined(__i386__)
-  unsigned char		ihl:4,
-			version:4;
-#else
-#if defined (__mc680x0__)
-  unsigned char		version:4,
-  			ihl:4;
+	__u8	ihl:4,
+		version:4;
+#elif defined (__mc68000__)
+	__u8	version:4,
+  		ihl:4;
+#elif defined (__alpha__)
+	__u8	ihl:4,
+		version:4;
 #else
 #error "Adjust this structure to match your CPU"
-#endif			
 #endif
-  unsigned char		tos;
-  unsigned short	tot_len;
-  unsigned short	id;
-  unsigned short	frag_off;
-  unsigned char		ttl;
-  unsigned char		protocol;
-  unsigned short	check;
-  unsigned long		saddr;
-  unsigned long		daddr;
-  /*The options start here. */
+	__u8	tos;
+	__u16	tot_len;
+	__u16	id;
+	__u16	frag_off;
+	__u8	ttl;
+	__u8	protocol;
+	__u16	check;
+	__u32	saddr;
+	__u32	daddr;
+	/*The options start here. */
 };
 
 

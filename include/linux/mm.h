@@ -1,10 +1,12 @@
 #ifndef _LINUX_MM_H
 #define _LINUX_MM_H
 
-#include <linux/page.h>
+#include <asm/page.h>
+
 #include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
+#include <linux/string.h>
 
 #define VERIFY_READ 0
 #define VERIFY_WRITE 1
@@ -32,8 +34,14 @@ struct vm_area_struct {
 	unsigned long vm_end;
 	unsigned short vm_page_prot;
 	unsigned short vm_flags;
-	struct vm_area_struct * vm_next;	/* linked list */
-	struct vm_area_struct * vm_share;	/* linked list */
+/* linked list of VM areas per task, sorted by address */
+	struct vm_area_struct * vm_next;
+/* for areas with inode, the circular list inode->i_mmap */
+/* for shm areas, the linked list of attaches */
+/* otherwise unused */
+	struct vm_area_struct * vm_next_share;
+	struct vm_area_struct * vm_prev_share;
+/* more */
 	struct vm_operations_struct * vm_ops;
 	unsigned long vm_offset;
 	struct inode * vm_inode;
@@ -63,31 +71,26 @@ struct vm_area_struct {
 #define VM_STACK_FLAGS	0x0177
 
 /*
- * These are the virtual MM functions - opening of an area, closing it (needed to
- * keep files on disk up-to-date etc), pointer to the functions called when a
- * no-page or a wp-page exception occurs, and the function which decides on sharing
- * of pages between different processes.
+ * These are the virtual MM functions - opening of an area, closing and
+ * unmapping it (needed to keep files on disk up-to-date etc), pointer
+ * to the functions called when a no-page or a wp-page exception occurs. 
  */
 struct vm_operations_struct {
 	void (*open)(struct vm_area_struct * area);
 	void (*close)(struct vm_area_struct * area);
+	void (*unmap)(struct vm_area_struct *area, unsigned long, size_t);
+	void (*protect)(struct vm_area_struct *area, unsigned long, size_t, unsigned int newprot);
+	void (*sync)(struct vm_area_struct *area, unsigned long, size_t, unsigned int flags);
+	void (*advise)(struct vm_area_struct *area, unsigned long, size_t, unsigned int advise);
 	unsigned long (*nopage)(struct vm_area_struct * area, unsigned long address,
-		unsigned long page, int error_code);
+		unsigned long page, int write_access);
 	unsigned long (*wppage)(struct vm_area_struct * area, unsigned long address,
 		unsigned long page);
-	int (*share)(struct vm_area_struct * from, struct vm_area_struct * to, unsigned long address);
-	int (*unmap)(struct vm_area_struct *area, unsigned long, size_t);
-	void (*swapout)(struct vm_area_struct *,  unsigned long *);
-	unsigned long (*swapin)(struct vm_area_struct *,  unsigned long);
+	void (*swapout)(struct vm_area_struct *,  unsigned long, unsigned long *);
+	unsigned long (*swapin)(struct vm_area_struct *, unsigned long, unsigned long);
 };
 
-extern unsigned long __bad_page(void);
-extern unsigned long __bad_pagetable(void);
-extern unsigned long __zero_page(void);
-
-#define BAD_PAGETABLE __bad_pagetable()
-#define BAD_PAGE __bad_page()
-#define ZERO_PAGE __zero_page()
+extern mem_map_t * mem_map;
 
 /* planning stage.. */
 #define P_DIRTY		0x0001
@@ -116,8 +119,8 @@ struct page_info {
 
 extern int nr_swap_pages;
 extern int nr_free_pages;
+extern int min_free_pages;
 
-#define MAX_SECONDARY_PAGES 20
 #define NR_MEM_LISTS 6
 
 struct mem_list {
@@ -135,16 +138,14 @@ extern unsigned char * free_area_map[NR_MEM_LISTS];
  */
 #define __get_free_page(priority) __get_free_pages((priority),0)
 extern unsigned long __get_free_pages(int priority, unsigned long gfporder);
+extern unsigned long __get_dma_pages(int priority, unsigned long gfporder);
 extern inline unsigned long get_free_page(int priority)
 {
 	unsigned long page;
 
 	page = __get_free_page(priority);
 	if (page)
-		__asm__ __volatile__("rep ; stosl"
-			: /* no outputs */ \
-			:"a" (0),"c" (1024),"D" (page)
-			:"di","cx");
+		memset((void *) page, 0, PAGE_SIZE);
 	return page;
 }
 
@@ -165,14 +166,11 @@ extern int unmap_page_range(unsigned long from, unsigned long size);
 extern int remap_page_range(unsigned long from, unsigned long to, unsigned long size, int mask);
 extern int zeromap_page_range(unsigned long from, unsigned long size, int mask);
 
-extern void do_wp_page(struct vm_area_struct * vma, unsigned long address,
-	unsigned long error_code);
-extern void do_no_page(struct vm_area_struct * vma, unsigned long address,
-	unsigned long error_code);
+extern void do_wp_page(struct vm_area_struct * vma, unsigned long address, int write_access);
+extern void do_no_page(struct vm_area_struct * vma, unsigned long address, int write_access);
 
 extern unsigned long paging_init(unsigned long start_mem, unsigned long end_mem);
-extern void mem_init(unsigned long low_start_mem,
-		     unsigned long start_mem, unsigned long end_mem);
+extern void mem_init(unsigned long start_mem, unsigned long end_mem);
 extern void show_mem(void);
 extern void oom(struct task_struct * task);
 extern void si_meminfo(struct sysinfo * val);
@@ -196,44 +194,28 @@ extern int do_mmap(struct file * file, unsigned long addr, unsigned long len,
 	unsigned long prot, unsigned long flags, unsigned long off);
 extern void merge_segments(struct vm_area_struct *);
 extern void insert_vm_struct(struct task_struct *, struct vm_area_struct *);
+extern void remove_shared_vm_struct(struct vm_area_struct *);
 extern int do_munmap(unsigned long, size_t);
+extern unsigned long get_unmapped_area(unsigned long);
 
 #define read_swap_page(nr,buf) \
 	rw_swap_page(READ,(nr),(buf))
 #define write_swap_page(nr,buf) \
 	rw_swap_page(WRITE,(nr),(buf))
 
-#define invalidate() \
-__asm__ __volatile__("movl %%cr3,%%eax\n\tmovl %%eax,%%cr3": : :"ax")
-
 extern unsigned long high_memory;
-
-#define MAP_NR(addr) ((addr) >> PAGE_SHIFT)
-#define MAP_PAGE_RESERVED (1<<15)
-
-extern unsigned short * mem_map;
-
-#define PAGE_PRESENT	0x001
-#define PAGE_RW		0x002
-#define PAGE_USER	0x004
-#define PAGE_PWT	0x008	/* 486 only - not used currently */
-#define PAGE_PCD	0x010	/* 486 only - not used currently */
-#define PAGE_ACCESSED	0x020
-#define PAGE_DIRTY	0x040
-#define PAGE_COW	0x200	/* implemented in software (one of the AVL bits) */
-
-#define PAGE_PRIVATE	(PAGE_PRESENT | PAGE_RW | PAGE_USER | PAGE_ACCESSED | PAGE_COW)
-#define PAGE_SHARED	(PAGE_PRESENT | PAGE_RW | PAGE_USER | PAGE_ACCESSED)
-#define PAGE_COPY	(PAGE_PRESENT | PAGE_USER | PAGE_ACCESSED | PAGE_COW)
-#define PAGE_READONLY	(PAGE_PRESENT | PAGE_USER | PAGE_ACCESSED)
-#define PAGE_TABLE	(PAGE_PRESENT | PAGE_RW | PAGE_USER | PAGE_ACCESSED)
 
 #define GFP_BUFFER	0x00
 #define GFP_ATOMIC	0x01
 #define GFP_USER	0x02
 #define GFP_KERNEL	0x03
 #define GFP_NOBUFFER	0x04
+#define GFP_NFS		0x05
 
+/* Flag - indicates that the buffer will be suitable for DMA.  Ignored on some
+   platforms, used as appropriate on others */
+
+#define GFP_DMA		0x80
 
 /*
  * vm_ops not present page codes for shared memory.
@@ -261,7 +243,7 @@ extern unsigned long swap_cache_find_success;
 
 extern inline unsigned long in_swap_cache(unsigned long addr)
 {
-	return swap_cache[addr >> PAGE_SHIFT]; 
+	return swap_cache[MAP_NR(addr)]; 
 }
 
 extern inline long find_in_swap_cache (unsigned long addr)
@@ -271,11 +253,7 @@ extern inline long find_in_swap_cache (unsigned long addr)
 #ifdef SWAP_CACHE_INFO
 	swap_cache_find_total++;
 #endif
-	__asm__ __volatile__("xchgl %0,%1"
-		:"=m" (swap_cache[addr >> PAGE_SHIFT]),
-		 "=r" (entry)
-		:"0" (swap_cache[addr >> PAGE_SHIFT]),
-		 "1" (0));
+	entry = (unsigned long) xchg_ptr(swap_cache + MAP_NR(addr), NULL);
 #ifdef SWAP_CACHE_INFO
 	if (entry)
 		swap_cache_find_success++;
@@ -290,11 +268,7 @@ extern inline int delete_from_swap_cache(unsigned long addr)
 #ifdef SWAP_CACHE_INFO
 	swap_cache_del_total++;
 #endif	
-	__asm__ __volatile__("xchgl %0,%1"
-		:"=m" (swap_cache[addr >> PAGE_SHIFT]),
-		 "=r" (entry)
-		:"0" (swap_cache[addr >> PAGE_SHIFT]),
-		 "1" (0));
+	entry = (unsigned long) xchg_ptr(swap_cache + MAP_NR(addr), NULL);
 	if (entry)  {
 #ifdef SWAP_CACHE_INFO
 		swap_cache_del_success++;

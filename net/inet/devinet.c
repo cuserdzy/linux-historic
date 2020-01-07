@@ -18,7 +18,6 @@
 #include <asm/segment.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -67,42 +66,6 @@ unsigned long ip_get_mask(unsigned long addr)
   	return(0);
 }
 
-/*
- *	Perform an IP address matching operation
- */
-
-int ip_addr_match(unsigned long me, unsigned long him)
-{
-	int i;
-	unsigned long mask=0xFFFFFFFF;
-
-	/*
-	 *	Simple case
-	 */
-	if (me == him) 
-  		return(1);
-  		
-  	/*
-  	 *	Look for a match ending in all 1's 
-  	 */
-  	 
-	for (i = 0; i < 4; i++, me >>= 8, him >>= 8, mask >>= 8) 
-	{
-		if ((me & 0xFF) != (him & 0xFF)) 
-		{
-		/*
-		 * The only way this could be a match is for
-		 * the rest of addr1 to be 0 or 255.
-		 */
-			if (me != 0 && me != mask) 
-				return(0);
-			return(1);
-		}
-	}
-  	return(1);
-}
-
-
 /* 
  *	Check the address for our address, broadcasts, etc. 
  *
@@ -120,9 +83,11 @@ int ip_chk_addr(unsigned long addr)
 	 *	(Support old BSD in other words). This old BSD 
 	 *	support will go very soon as it messes other things
 	 *	up.
+	 *	Also accept `loopback broadcast' as BROADCAST.
 	 */
 
-	if (addr == INADDR_ANY || addr == INADDR_BROADCAST)
+	if (addr == INADDR_ANY || addr == INADDR_BROADCAST ||
+	    addr == htonl(0x7FFFFFFFL))
 		return IS_BROADCAST;
 
 	mask = ip_get_mask(addr);
@@ -185,6 +150,8 @@ int ip_chk_addr(unsigned long addr)
 				return IS_BROADCAST;
 		}
 	}
+	if(IN_MULTICAST(ntohl(addr)))
+		return IS_MULTICAST;
 	return 0;		/* no match at all */
 }
 

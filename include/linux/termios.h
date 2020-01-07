@@ -43,6 +43,7 @@
 #define TIOCSETD	0x5423
 #define TIOCGETD	0x5424
 #define TCSBRKP		0x5425	/* Needed for POSIX tcsendbreak() */
+#define TIOCTTYGSTRUCT	0x5426  /* For debugging only */
 #define FIONCLEX	0x5450  /* these numbers need to be adjusted. */
 #define FIOCLEX		0x5451
 #define FIOASYNC	0x5452
@@ -52,6 +53,7 @@
 #define TIOCGLCKTRMIOS	0x5456
 #define TIOCSLCKTRMIOS	0x5457
 #define TIOCSERGSTRUCT	0x5458 /* For debugging only */
+#define TIOCSERGETLSR   0x5459 /* Get line status register */
 
 /* Used for packet mode */
 #define TIOCPKT_DATA		 0
@@ -158,7 +160,7 @@ struct termios {
 #define   FF1	0100000
 
 /* c_cflag bit meaning */
-#define CBAUD	0000017
+#define CBAUD	0010017
 #define  B0	0000000		/* hang up */
 #define  B50	0000001
 #define  B75	0000002
@@ -188,7 +190,10 @@ struct termios {
 #define PARODD	0001000
 #define HUPCL	0002000
 #define CLOCAL	0004000
-#define CIBAUD	03600000		/* input baud rate (not used) */
+#define CBAUDEX 0010000
+#define  B57600  0010001
+#define  B115200 0010002
+#define CIBAUD	  002003600000	/* input baud rate (not used) */
 #define CRTSCTS	  020000000000		/* flow control */
 
 /* c_lflag bits */
@@ -220,6 +225,10 @@ struct termios {
 #define TIOCM_DSR	0x100
 #define TIOCM_CD	TIOCM_CAR
 #define TIOCM_RI	TIOCM_RNG
+
+/* ioctl (fd, TIOCSERGETLSR, &result) where result may be as below */
+#define TIOCSER_TEMT    0x01	/* Transmitter physically empty */
+
 
 /* tcflow() and TCXONC use these */
 #define	TCOOFF		0

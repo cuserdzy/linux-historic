@@ -36,7 +36,7 @@
 #ifndef PAS16_H
 #define PAS16_H
 
-#define PAS16_PUBLIC_RELEASE 2
+#define PAS16_PUBLIC_RELEASE 3
 
 #define PDEBUG_INIT	0x1
 #define PDEBUG_TRANSFER 0x2
@@ -56,12 +56,12 @@
  * The Pro Audio Spectrum boards are I/O mapped. They use a Zilog 5380
  * SCSI controller, which is the equivalent of NCR's 5380.  "Pseudo-DMA"
  * architecture is used, where a PAL drives the DMA signals on the 5380
- * allowing fast, blind transfers with propper handshaking. 
+ * allowing fast, blind transfers with proper handshaking. 
  */
 
 
 /* The Time-out Counter register is used to safe-guard against a stuck
- * bus (in the case of RDY driven hadnshake) or a stuck byte (if 16-Bit
+ * bus (in the case of RDY driven handshake) or a stuck byte (if 16-Bit
  * DMA conversion is used).  The counter uses a 28.224MHz clock
  * divided by 14 as its clock source.  In the case of a stuck byte in
  * the holding register, an interrupt is generated (and mixed with the
@@ -117,7 +117,6 @@
 int pas16_abort(Scsi_Cmnd *);
 int pas16_biosparam(Disk *, int, int*);
 int pas16_detect(Scsi_Host_Template *);
-const char *pas16_info(void);
 int pas16_queue_command(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
 int pas16_reset(Scsi_Cmnd *);
 
@@ -141,8 +140,8 @@ int pas16_reset(Scsi_Cmnd *);
 
 #ifdef HOSTS_C
 
-#define MV_PAS16 {NULL, "Pro Audio Spectrum-16 SCSI", 			\
-	pas16_detect, NULL, pas16_info,					\
+#define MV_PAS16 {NULL, NULL, "Pro Audio Spectrum-16 SCSI", 		\
+	pas16_detect, NULL, NULL,					\
 	NULL, pas16_queue_command, pas16_abort, pas16_reset, NULL, 	\
 	pas16_biosparam, 						\
 	/* can queue */ CAN_QUEUE, /* id */ 7, SG_ALL,			\

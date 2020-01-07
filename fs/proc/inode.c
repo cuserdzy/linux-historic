@@ -12,9 +12,12 @@
 #include <linux/stat.h>
 #include <linux/locks.h>
 #include <linux/limits.h>
+#include <linux/config.h>
 
 #include <asm/system.h>
 #include <asm/segment.h>
+
+extern unsigned long prof_len;
 
 void proc_put_inode(struct inode *inode)
 {
@@ -41,6 +44,37 @@ static struct super_operations proc_sops = {
 	NULL
 };
 
+
+static int parse_options(char *options,uid_t *uid,gid_t *gid)
+{
+	char *this_char,*value;
+
+	*uid = current->uid;
+	*gid = current->gid;
+	if (!options) return 1;
+	for (this_char = strtok(options,","); this_char; this_char = strtok(NULL,",")) {
+		if ((value = strchr(this_char,'=')) != NULL)
+			*value++ = 0;
+		if (!strcmp(this_char,"uid")) {
+			if (!value || !*value)
+				return 0;
+			*uid = simple_strtoul(value,&value,0);
+			if (*value)
+				return 0;
+		}
+		else if (!strcmp(this_char,"gid")) {
+			if (!value || !*value)
+				return 0;
+			*gid = simple_strtoul(value,&value,0);
+			if (*value)
+				return 0;
+		}
+		else return 0;
+	}
+	return 1;
+}
+
+
 struct super_block *proc_read_super(struct super_block *s,void *data, 
 				    int silent)
 {
@@ -55,6 +89,7 @@ struct super_block *proc_read_super(struct super_block *s,void *data,
 		printk("get root inode failed\n");
 		return NULL;
 	}
+	parse_options(data, &s->s_mounted->i_uid, &s->s_mounted->i_gid);
 	return s;
 }
 
@@ -114,7 +149,7 @@ void proc_read_inode(struct inode * inode)
 	if (!pid) {
 		switch (ino) {
 			case PROC_KMSG:
-				inode->i_mode = S_IFREG | S_IRUGO;
+				inode->i_mode = S_IFREG | S_IRUSR;
 				inode->i_op = &proc_kmsg_inode_operations;
 				break;
 			case PROC_NET:
@@ -127,6 +162,13 @@ void proc_read_inode(struct inode * inode)
 				inode->i_op = &proc_kcore_inode_operations;
 				inode->i_size = high_memory + PAGE_SIZE;
 				break;
+#ifdef CONFIG_PROFILE
+			case PROC_PROFILE:
+				inode->i_mode = S_IFREG | S_IRUGO | S_IWUSR;
+				inode->i_op = &proc_profile_inode_operations;
+				inode->i_size = (1+prof_len) * sizeof(unsigned long);
+				break;
+#endif
 			default:
 				inode->i_mode = S_IFREG | S_IRUGO;
 				inode->i_op = &proc_array_inode_operations;
@@ -175,7 +217,11 @@ void proc_read_inode(struct inode * inode)
 				return;
 			inode->i_op = &proc_link_inode_operations;
 			inode->i_size = 64;
-			inode->i_mode = S_IFLNK | S_IRWXU;
+			inode->i_mode = S_IFLNK;
+			if (p->files->fd[ino]->f_mode & 1)
+				inode->i_mode |= S_IRUSR | S_IXUSR;
+			if (p->files->fd[ino]->f_mode & 2)
+				inode->i_mode |= S_IWUSR | S_IXUSR;
 			return;
 	}
 	return;

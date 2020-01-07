@@ -4,7 +4,6 @@
  *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -32,27 +31,7 @@ extern void adjust_clock(void);
 
 asmlinkage int sys_ni_syscall(void)
 {
-	return -EINVAL;
-}
-
-asmlinkage int sys_idle(void)
-{
-	int i;
-
-	if (current->pid != 0)
-		return -EPERM;
-
-	/* Map out the low memory: it's no longer needed */
-	for (i = 0 ; i < 768 ; i++)
-		swapper_pg_dir[i] = 0;
-
-	/* endless idle loop with no priority at all */
-	current->counter = -100;
-	for (;;) {
-		if (hlt_works_ok && !need_resched)
-			__asm__("hlt");
-		schedule();
-	}
+	return -ENOSYS;
 }
 
 static int proc_sel(struct task_struct *p, int which, int who)
@@ -152,6 +131,7 @@ asmlinkage int sys_prof(void)
 }
 
 extern void hard_reset_now(void);
+extern asmlinkage sys_kill(int, int);
 
 /*
  * Reboot system call: for obvious reasons only root may call it,
@@ -173,7 +153,11 @@ asmlinkage int sys_reboot(int magic, int magic_too, int flag)
 		C_A_D = 1;
 	else if (!flag)
 		C_A_D = 0;
-	else
+	else if (flag == 0xCDEF0123) {
+		printk(KERN_EMERG "System halted\n");
+		sys_kill(-1, SIGKILL);
+		do_exit(0);
+	} else
 		return -EINVAL;
 	return (0);
 }
@@ -322,7 +306,7 @@ asmlinkage int sys_setreuid(uid_t ruid, uid_t euid)
 	if (ruid != (uid_t) -1 ||
 	    (euid != (uid_t) -1 && euid != old_ruid))
 		current->suid = current->euid;
-	current->fsuid = euid;
+	current->fsuid = current->euid;
 	return 0;
 }
 
@@ -350,7 +334,7 @@ asmlinkage int sys_setuid(uid_t uid)
 
 /*
  * "setfsuid()" sets the fsuid - the uid used for filesystem checks. This
- * is used for "access()" and for the NFS deamon (letting nfsd stay at
+ * is used for "access()" and for the NFS daemon (letting nfsd stay at
  * whatever uid it wants to). It normally shadows "euid", except when
  * explicitly set by setfsuid() or for access..
  */
@@ -396,6 +380,7 @@ asmlinkage int sys_brk(unsigned long brk)
 	int freepages;
 	unsigned long rlim;
 	unsigned long newbrk, oldbrk;
+	struct vm_area_struct * vma;
 
 	if (brk < current->mm->end_code)
 		return current->mm->brk;
@@ -421,6 +406,15 @@ asmlinkage int sys_brk(unsigned long brk)
 	if (brk - current->mm->end_code > rlim ||
 	    brk >= current->mm->start_stack - 16384)
 		return current->mm->brk;
+	/*
+	 * Check against existing mmap mappings.
+	 */
+	for (vma = current->mm->mmap; vma; vma = vma->vm_next) {
+		if (newbrk <= vma->vm_start)
+			break;
+		if (oldbrk < vma->vm_end)
+			return current->mm->brk;
+	}
 	/*
 	 * stupid algorithm to decide if we have enough memory: while
 	 * simple, it hopefully works in most obvious cases.. Easy to
@@ -697,12 +691,15 @@ asmlinkage int sys_getrlimit(unsigned int resource, struct rlimit *rlim)
 asmlinkage int sys_setrlimit(unsigned int resource, struct rlimit *rlim)
 {
 	struct rlimit new_rlim, *old_rlim;
+	int err;
 
 	if (resource >= RLIM_NLIMITS)
 		return -EINVAL;
+	err = verify_area(VERIFY_READ, rlim, sizeof(*rlim));
+	if (err)
+		return err;
+	memcpy_fromfs(&new_rlim, rlim, sizeof(*rlim));
 	old_rlim = current->rlim + resource;
-	new_rlim.rlim_cur = get_fs_long((unsigned long *) rlim);
-	new_rlim.rlim_max = get_fs_long(((unsigned long *) rlim)+1);
 	if (((new_rlim.rlim_cur > old_rlim->rlim_max) ||
 	     (new_rlim.rlim_max > old_rlim->rlim_max)) &&
 	    !suser())
@@ -723,7 +720,6 @@ int getrusage(struct task_struct *p, int who, struct rusage *ru)
 {
 	int error;
 	struct rusage r;
-	unsigned long	*lp, *lpend, *dest;
 
 	error = verify_area(VERIFY_WRITE, ru, sizeof *ru);
 	if (error)
@@ -755,11 +751,7 @@ int getrusage(struct task_struct *p, int who, struct rusage *ru)
 			r.ru_majflt = p->mm->maj_flt + p->mm->cmaj_flt;
 			break;
 	}
-	lp = (unsigned long *) &r;
-	lpend = (unsigned long *) (&r+1);
-	dest = (unsigned long *) ru;
-	for (; lp < lpend; lp++, dest++) 
-		put_fs_long(*lp, dest);
+	memcpy_tofs(ru, &r, sizeof(r));
 	return 0;
 }
 

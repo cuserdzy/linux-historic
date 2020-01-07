@@ -6,7 +6,7 @@
 */
 
 /* 
- An SG device is accessed by writting "packets" to it, the replies
+ An SG device is accessed by writing "packets" to it, the replies
  are then read using the read call. The same header is used for 
  reply, just ignore reply_len field.
 */
@@ -17,7 +17,8 @@ struct sg_header
   int reply_len;   /* maximum length <4096 of expected reply */
   int pack_id;     /* id number of packet */
   int result;      /* 0==ok, otherwise refer to errno codes */
-  int flags;			/* for future use */
+  unsigned int twelve_byte:1; /* Force 12 byte command length for group 6 & 7 commands  */
+  unsigned int other_flags:31;			/* for future use */
   unsigned char sense_buffer[16]; /* used only by reads */
   /* command follows then data for command */
  };

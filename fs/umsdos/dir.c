@@ -32,10 +32,14 @@ int UMSDOS_dir_read(struct inode *inode,struct file *filp,char *buf,
 {
 	return -EISDIR;
 }
+#define NAME_OFFSET(de) ((int) ((de)->d_name - (char *) (de)))
+#define ROUND_UP(x) (((x)+3) & ~3)
+
 /*
 	Read count directory entries from directory filp
 	Return a negative value from linux/errno.h.
-	Return > 0 if success (the length of the file name).
+	Return > 0 if success (The amount of byte written in
+	dirent round_up to a word size (32 bits).
 
 	This function is used by the normal readdir VFS entry point and by
 	some function who try to find out info on a file from a pure MSDOS
@@ -72,7 +76,7 @@ static int umsdos_readdir_x(
 		put_fs_byte(0,dirent->d_name+3);
 		put_fs_word (3,&dirent->d_reclen);
 		if (u_entry != NULL) u_entry->flags = 0;
-		ret = 3;
+		ret = ROUND_UP(NAME_OFFSET(dirent) + 3 + 1);
 		filp->f_pos++;
 	}else if (filp->f_pos < 2
 		|| (dir != dir->i_sb->s_mounted && filp->f_pos == 32)){
@@ -191,7 +195,7 @@ static int umsdos_readdir_x(
 								dirent->d_reclen = entry.name_len;
 								if (u_entry != NULL) *u_entry = entry;
 							}
-							ret = entry.name_len;
+							ret = ROUND_UP(NAME_OFFSET(dirent) + entry.name_len + 1);
 							iput (inode);
 							break;
 						}
@@ -219,7 +223,7 @@ static int umsdos_readdir_x(
 /*
 	Read count directory entries from directory filp
 	Return a negative value from linux/errno.h.
-	Return > 0 if success (the length of the file name).
+	Return > 0 if success (the amount of byte written to dirent)
 */
 static int UMSDOS_readdir(
 	struct inode *dir,		/* Point to a description of the super block */
@@ -350,6 +354,7 @@ int umsdos_inode2entry (
 		if (emddir == NULL){
 			/* This is a DOS directory */
 			struct file filp;
+			filp.f_reada = 1;
 			filp.f_pos = 0;
 			while (1){
 				struct dirent dirent;
@@ -370,6 +375,7 @@ int umsdos_inode2entry (
 		}else{
 			/* skip . and .. see umsdos_readdir_x() */
 			struct file filp;
+			filp.f_reada = 1;
 			filp.f_pos = UMSDOS_SPECIAL_DIRFPOS;
 			while (1){
 				struct dirent dirent;
@@ -623,6 +629,7 @@ int umsdos_hlink2inode (struct inode *hlink, struct inode **result)
 		iput (hlink);
 	}else{
 		struct file filp;
+		filp.f_reada = 1;
 		filp.f_pos = 0;
 		PRINTK (("hlink2inode "));
 		if (umsdos_file_read_kmem (hlink,&filp,path,hlink->i_size)

@@ -17,6 +17,18 @@
  *					top level.
  *		Alan Cox	:	Move address structures to/from user
  *					mode above the protocol layers.
+ *		Rob Janssen	:	Allow 0 length sends.
+ *		Alan Cox	:	Asynchronous I/O support (cribbed from the
+ *					tty drivers).
+ *		Niibe Yutaka	:	Asynchronous I/O for writes (4.4BSD style)
+ *		Jeff Uphoff	:	Made max number of sockets command-line
+ *					configurable.
+ *		Matti Aarnio	:	Made the number of sockets dynamic,
+ *					to be allocated when needed, and mr.
+ *					Uphoff's max is used as max to be
+ *					allowed to allocate.
+ *		Linus		:	Argh. removed all the socket allocation
+ *					altogether: it's in the inode now.
  *
  *
  *		This program is free software; you can redistribute it and/or
@@ -61,6 +73,8 @@ static void sock_close(struct inode *inode, struct file *file);
 static int sock_select(struct inode *inode, struct file *file, int which, select_table *seltable);
 static int sock_ioctl(struct inode *inode, struct file *file,
 		      unsigned int cmd, unsigned long arg);
+static int sock_fasync(struct inode *inode, struct file *filp, int on);
+		   
 
 
 /*
@@ -77,24 +91,19 @@ static struct file_operations socket_file_ops = {
 	sock_ioctl,
 	NULL,			/* mmap */
 	NULL,			/* no special open code... */
-	sock_close
+	sock_close,
+	NULL,			/* no fsync */
+	sock_fasync
 };
 
-/*
- *	The list of sockets - make this atomic.
- */
-static struct socket sockets[NSOCKETS];
-/*
- *	Used to wait for a socket.
- */
-static struct wait_queue *socket_wait_free = NULL;
 /*
  *	The protocol list. Each protocol is registered in here.
  */
 static struct proto_ops *pops[NPROTO];
-
-#define last_socket	(sockets + NSOCKETS - 1)
-
+/*
+ *	Statistics counters of the socket lists
+ */
+static int sockets_in_use  = 0;
 
 /*
  *	Support routines. Move socket addresses back and forth across the kernel/user
@@ -180,37 +189,14 @@ static int get_fd(struct inode *inode)
 
 
 /*
- * Reverses the action of get_fd() by releasing the file. it closes
- * the descriptor, but makes sure it does nothing more. Called when
- * an incomplete socket must be closed, along with sock_release().
- */
- 
-static inline void toss_fd(int fd)
-{
-	sys_close(fd);		/* the count protects us from iput */
-}
-
-/*
  *	Go from an inode to its socket slot.
+ *
+ * The original socket implementation wasn't very clever, which is
+ * why this exists at all..
  */
-
-struct socket *socki_lookup(struct inode *inode)
+inline struct socket *socki_lookup(struct inode *inode)
 {
-	struct socket *sock;
-
-	if ((sock = inode->i_socket) != NULL) 
-	{
-		if (sock->state != SS_FREE && SOCK_INODE(sock) == inode)
-			return sock;
-		printk("socket.c: uhhuh. stale inode->i_socket pointer\n");
-	}
-	for (sock = sockets; sock <= last_socket; ++sock)
-		if (sock->state != SS_FREE && SOCK_INODE(sock) == inode) 
-		{
-			printk("socket.c: uhhuh. Found socket despite no inode->i_socket pointer\n");
-			return(sock);
-		}
-		return(NULL);
+	return &inode->u.socket_i;
 }
 
 /*
@@ -220,81 +206,51 @@ struct socket *socki_lookup(struct inode *inode)
 static inline struct socket *sockfd_lookup(int fd, struct file **pfile)
 {
 	struct file *file;
+	struct inode *inode;
 
 	if (fd < 0 || fd >= NR_OPEN || !(file = current->files->fd[fd])) 
-		return(NULL);
+		return NULL;
+
+	inode = file->f_inode;
+	if (!inode || !inode->i_sock)
+		return NULL;
 
 	if (pfile) 
 		*pfile = file;
 
-	return(socki_lookup(file->f_inode));
+	return socki_lookup(inode);
 }
 
 /*
- *	Allocate a socket. Wait if we are out of sockets.
+ *	Allocate a socket.
  */
-
-static struct socket *sock_alloc(int wait)
+static struct socket *sock_alloc(void)
 {
-	struct socket *sock;
+	struct inode * inode;
+	struct socket * sock;
 
-	while (1) 
-	{
-		cli();
-		for (sock = sockets; sock <= last_socket; ++sock) 
-		{
-			if (sock->state == SS_FREE) 
-			{
-			/*
-			 *	Got one..
-			 */
-				sock->state = SS_UNCONNECTED;
-				sti();
-				sock->flags = 0;
-				sock->ops = NULL;
-				sock->data = NULL;
-				sock->conn = NULL;
-				sock->iconn = NULL;
-			/*
-			 * This really shouldn't be necessary, but everything
-			 * else depends on inodes, so we grab it.
-			 * Sleeps are also done on the i_wait member of this
-			 * inode.  The close system call will iput this inode
-			 * for us.
-			 */
-				if (!(SOCK_INODE(sock) = get_empty_inode())) 
-				{
-					printk("NET: sock_alloc: no more inodes\n");
-					sock->state = SS_FREE;
-					return(NULL);
-				}
-				SOCK_INODE(sock)->i_mode = S_IFSOCK;
-				SOCK_INODE(sock)->i_uid = current->euid;
-				SOCK_INODE(sock)->i_gid = current->egid;
-				SOCK_INODE(sock)->i_socket = sock;
+	inode = get_empty_inode();
+	if (!inode)
+		return NULL;
 
-				sock->wait = &SOCK_INODE(sock)->i_wait;
-				return(sock);
-			}
-		}
-		sti();
-		/*
-		 *	If its a 'now or never request' then return.
-		 */
-		if (!wait) 
-			return(NULL);
-		/*
-		 *	Sleep on the socket free'ing queue.
-		 */
-		interruptible_sleep_on(&socket_wait_free);
-		/*
-		 *	If we have been interrupted then return.
-		 */
-		if (current->signal & ~current->blocked) 
-		{
-			return(NULL);
-		}
-	}
+	inode->i_mode = S_IFSOCK;
+	inode->i_sock = 1;
+	inode->i_uid = current->uid;
+	inode->i_gid = current->gid;
+
+	sock = &inode->u.socket_i;
+	sock->state = SS_UNCONNECTED;
+	sock->flags = 0;
+	sock->ops = NULL;
+	sock->data = NULL;
+	sock->conn = NULL;
+	sock->iconn = NULL;
+	sock->next = NULL;
+	sock->wait = &inode->i_wait;
+	sock->inode = inode;		/* "backlink": we could use pointer arithmetic instead */
+	sock->fasync_list = NULL;
+	sockets_in_use++;
+	return sock;
 }
 
 /*
@@ -305,13 +261,13 @@ static inline void sock_release_peer(struct socket *peer)
 {
 	peer->state = SS_DISCONNECTING;
 	wake_up_interruptible(peer->wait);
+	sock_wake_async(peer, 1);
 }
 
 
 static void sock_release(struct socket *sock)
 {
 	int oldstate;
-	struct inode *inode;
 	struct socket *peersock, *nextsock;
 
 	if ((oldstate = sock->state) != SS_UNCONNECTED)
@@ -337,19 +293,8 @@ static void sock_release(struct socket *sock)
 		sock->ops->release(sock, peersock);
 	if (peersock)
 		sock_release_peer(peersock);
-	inode = SOCK_INODE(sock);
-	sock->state = SS_FREE;		/* this really releases us */
-	
-	/*
-	 *	This will wake anyone waiting for a free socket.
-	 */
-	wake_up_interruptible(&socket_wait_free);
-
-	/*
-	 *	We need to do this. If sock alloc was called we already have an inode. 
-	 */
-	 
-	iput(inode);
+	--sockets_in_use;	/* Bookkeeping.. */
+	iput(SOCK_INODE(sock));
 }
 
 /*
@@ -466,7 +411,7 @@ static int sock_select(struct inode *inode, struct file *file, int sel_type, sel
 }
 
 
-void sock_close(struct inode *inode, struct file *file)
+void sock_close(struct inode *inode, struct file *filp)
 {
 	struct socket *sock;
 
@@ -482,15 +427,93 @@ void sock_close(struct inode *inode, struct file *file)
 		printk("NET: sock_close: can't find socket for inode!\n");
 		return;
 	}
-
+	sock_fasync(inode, filp, 0);
 	sock_release(sock);
 }
 
 /*
+ *	Update the socket async list
+ */
+ 
+static int sock_fasync(struct inode *inode, struct file *filp, int on)
+{
+	struct fasync_struct *fa, *fna=NULL, **prev;
+	struct socket *sock;
+	unsigned long flags;
+	
+	if (on)
+	{
+		fna=(struct fasync_struct *)kmalloc(sizeof(struct fasync_struct), GFP_KERNEL);
+		if(fna==NULL)
+			return -ENOMEM;
+	}
+
+	sock = socki_lookup(inode);
+	
+	prev=&(sock->fasync_list);
+	
+	save_flags(flags);
+	cli();
+	
+	for(fa=*prev; fa!=NULL; prev=&fa->fa_next,fa=*prev)
+		if(fa->fa_file==filp)
+			break;
+	
+	if(on)
+	{
+		if(fa!=NULL)
+		{
+			kfree_s(fna,sizeof(struct fasync_struct));
+			restore_flags(flags);
+			return 0;
+		}
+		fna->fa_file=filp;
+		fna->magic=FASYNC_MAGIC;
+		fna->fa_next=sock->fasync_list;
+		sock->fasync_list=fna;
+	}
+	else
+	{
+		if(fa!=NULL)
+		{
+			*prev=fa->fa_next;
+			kfree_s(fa,sizeof(struct fasync_struct));
+		}
+	}
+	restore_flags(flags);
+	return 0;
+}
+
+int sock_wake_async(struct socket *sock, int how)
+{
+	if (!sock || !sock->fasync_list)
+		return -1;
+	switch (how)
+	{
+		case 0:
+			kill_fasync(sock->fasync_list, SIGIO);
+			break;
+		case 1:
+			if (!(sock->flags & SO_WAITDATA))
+				kill_fasync(sock->fasync_list, SIGIO);
+			break;
+		case 2:
+			if (sock->flags & SO_NOSPACE)
+			{
+				kill_fasync(sock->fasync_list, SIGIO);
+				sock->flags &= ~SO_NOSPACE;
+			}
+			break;
+	}
+	return 0;
+}
+
+	
+/*
  *	Wait for a connection.
  */
 
-int sock_awaitconn(struct socket *mysock, struct socket *servsock)
+int sock_awaitconn(struct socket *mysock, struct socket *servsock, int flags)
 {
 	struct socket *last;
 
@@ -525,8 +548,13 @@ int sock_awaitconn(struct socket *mysock, struct socket *servsock)
 	 * SS_CONNECTED if we're connected.
 	 */
 	wake_up_interruptible(servsock->wait);
+	sock_wake_async(servsock, 0);
+
 	if (mysock->state != SS_CONNECTED) 
 	{
+		if (flags & O_NONBLOCK)
+			return -EINPROGRESS;
+
 		interruptible_sleep_on(mysock->wait);
 		if (mysock->state != SS_CONNECTED &&
 		    mysock->state != SS_DISCONNECTING) 
@@ -601,10 +629,11 @@ static int sock_socket(int family, int type, int protocol)
  *	default.
  */
 
-	if (!(sock = sock_alloc(1))) 
+	if (!(sock = sock_alloc())) 
 	{
-		printk("sock_socket: no more sockets\n");
-		return(-EAGAIN);
+		printk("NET: sock_socket: no more sockets\n");
+		return(-ENOSR);	/* Was: EAGAIN, but we are out of
+				   system resources! */
 	}
 
 	sock->type = type;
@@ -673,7 +702,11 @@ static int sock_socketpair(int family, int type, int protocol, unsigned long uso
 
 	er=verify_area(VERIFY_WRITE, usockvec, 2 * sizeof(int));
 	if(er)
+	{
+		sys_close(fd1);
+		sys_close(fd2);
 	 	return er;
+	}
 	put_fs_long(fd1, &usockvec[0]);
 	put_fs_long(fd2, &usockvec[1]);
 
@@ -769,10 +802,11 @@ static int sock_accept(int fd, struct sockaddr *upeer_sockaddr, int *upeer_addrl
 		return(-EINVAL);
 	}
 
-	if (!(newsock = sock_alloc(0))) 
+	if (!(newsock = sock_alloc())) 
 	{
 		printk("NET: sock_accept: no more sockets\n");
-		return(-EAGAIN);
+		return(-ENOSR);	/* Was: EAGAIN, but we are out of system
+				   resources! */
 	}
 	newsock->type = sock->type;
 	newsock->ops = sock->ops;
@@ -843,8 +877,7 @@ static int sock_connect(int fd, struct sockaddr *uservaddr, int addrlen)
 			 *	an async connect fork and both children connect. Clean
 			 *	this up in the protocols!
 			 */
-			return(sock->ops->connect(sock, uservaddr,
-				  addrlen, file->f_flags));
+			break;
 		default:
 			return(-EINVAL);
 	}
@@ -924,8 +957,6 @@ static int sock_send(int fd, void * buff, int len, unsigned flags)
 
 	if(len<0)
 		return -EINVAL;
-	if(len==0)
-		return 0;
 	err=verify_area(VERIFY_READ, buff, len);
 	if(err)
 		return err;
@@ -953,8 +984,6 @@ static int sock_sendto(int fd, void * buff, int len, unsigned flags,
 
 	if(len<0)
 		return -EINVAL;
-	if(len==0)
-		return 0;
 	err=verify_area(VERIFY_READ,buff,len);
 	if(err)
 	  	return err;
@@ -1268,6 +1297,32 @@ int sock_register(int family, struct proto_ops *ops)
 	return(-ENOMEM);
 }
 
+/*
+ *	This function is called by a protocol handler that wants to
+ *	remove its address family, and have it unlinked from the
+ *	SOCKET module.
+ */
+ 
+int sock_unregister(int family)
+{
+	int i;
+
+	cli();
+	for(i = 0; i < NPROTO; i++) 
+	{
+		if (pops[i] == NULL) 
+			continue;
+		if(pops[i]->family == family)
+		{
+			pops[i]=NULL;
+			sti();
+			return(i);
+		}
+	}
+	sti();
+	return(-ENOENT);
+}
+
 void proto_init(void)
 {
 	extern struct net_proto protocols[];	/* Network protocols */
@@ -1286,16 +1341,9 @@ void proto_init(void)
 
 void sock_init(void)
 {
-	struct socket *sock;
 	int i;
 
-	printk("Swansea University Computer Society NET3.016\n");
-
-	/*
-	 *	Release all sockets. 
-	 */
-	for (sock = sockets; sock <= last_socket; ++sock)
-		sock->state = SS_FREE;
+	printk("Swansea University Computer Society NET3.019\n");
 
 	/*
 	 *	Initialize all address (protocol) families. 
@@ -1322,5 +1370,19 @@ void sock_init(void)
 
 	bh_base[NET_BH].routine= net_bh;
 #endif  
-  
+}
+
+int socket_get_info(char *buffer, char **start, off_t offset, int length)
+{
+	int len = sprintf(buffer, "sockets: used %d\n", sockets_in_use);
+	if (offset >= len)
+	{
+		*start = buffer;
+		return 0;
+	}
+	*start = buffer + offset;
+	len -= offset;
+	if (len > length)
+		len = length;
+	return len;
 }

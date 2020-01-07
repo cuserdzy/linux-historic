@@ -15,10 +15,13 @@
 	$(AS) -o $*.o $<
 
 OBJS=	ialloc.o balloc.o inode.o file.o dir.o symlink.o namei.o \
-	fsync.o truncate.o mmap.o
+	fsync.o truncate.o
 
 sysv.o: $(OBJS)
 	$(LD) -r -o sysv.o $(OBJS)
+
+modules: sysv.o
+	ln -sf ../fs/sysv/sysv.o $(TOPDIR)/modules
 
 dep:
 	$(CPP) -M *.c > .depend

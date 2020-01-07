@@ -1,18 +1,19 @@
 This file contains brief information about the SCSI tape driver.
-Last modified: Wed Jun 22 23:38:47 1994 by root@kai.home
+Last modified: Tue Jan 10 21:32:35 1995 by root@kai.home
 
 BASICS
 
 The driver is generic. The state of a drive is not modified when the
-driver is initalized or a device is opened. The mode parameters of the
+driver is initialized or a device is opened. The mode parameters of the
 drive can be modified with ioctls. The driver supports fixed and
 variable block size (within buffer limits). Both the auto-rewind
 (minor equals device number) and non-rewind devices (minor is 128 +
 device number) are implemented.
 
 By default the driver writes one filemark when the device is closed after
-writing. Two filemarks can be optionally written. In both cases end
-of data is signified by returning zero bytes for two consecutive reads.
+writing and the last operation has been a write. Two filemarks can be
+optionally written. In both cases end of data is signified by
+returning zero bytes for two consecutive reads.
 
 BUFFERING
 
@@ -78,7 +79,10 @@ MTBSF	Space backward over count filemarks. Tape positioned before
 MTBSFM  As above but ape positioned after filemark.
 MTFSR   Space forward over count records.
 MTBSR   Space backward over count records.
+MTFSS   Space forward over count setmarks.
+MTBSS   Space backward over count setmarks.
 MTWEOF  Write count filemarks.
+MTWSM   Write count setmarks.
 MTREW   Rewind tape.
 MTOFFL  Set device off line (often rewind plus eject).
 MTNOP   Do nothing except flush the buffers.
@@ -103,7 +107,8 @@ MTSETDRVBUFFER
            Sets the buffering options. The bits are the new states
            (enabled/disabled) of the write buffering (MT_ST_BUFFER_WRITES),
            asynchronous writes (MT_ST_ASYNC_WRITES), read ahead
-           (MT_ST_READ_AHEAD), writing of two filemark (ST_TWO_FM), and
+           (MT_ST_READ_AHEAD), writing of two filemark (ST_TWO_FM),
+	   using the SCSI spacing to EOD (MT_ST_FAST_EOM), and
 	   debugging (MT_ST_DEBUGGING ; debugging must be compiled into the
 	   driver).
         MT_ST_WRITE_THRESHOLD
@@ -125,9 +130,9 @@ MTIOCGET Returns some status information.
         The current block size and the density code are stored in the field
         mt_dsreg (shifts for the subfields are MT_ST_BLKSIZE_SHIFT and
         MT_ST_DENSITY_SHIFT).
-	The write protect bit in mt_gstat is set if the tape is write
-	protected.
-        The other fields are empty.
+	The GMT_xxx status bits reflect the drive status. GMT_DR_OPEN
+	is set if there is no tape in the drive. GMT_EOD means either
+	end of recorded data or end of tape. GMT_EOT means end of tape.
 
 
 MISCELLANEOUS COMPILE OPTIONS
@@ -137,6 +142,12 @@ is defined.
 
 Immediate return from tape positioning SCSI commands can be enabled by
 defining ST_NOWAIT.
+
+The MTEOM command is by default implemented as spacing over 32767
+filemarks. With this method the file number in the status is
+correct. The user can request using direct spacing to EOD by setting
+ST_FAST_EOM 1 (or using the MT_ST_OPTIONS ioctl). In this case the file
+number will be invalid.
 
 When using read ahead or buffered writes the position within the file
 may not be correct after the file is closed (correct position may

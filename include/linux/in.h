@@ -23,7 +23,7 @@
 enum {
   IPPROTO_IP = 0,		/* Dummy protocol for TCP		*/
   IPPROTO_ICMP = 1,		/* Internet Control Message Protocol	*/
-  IPPROTO_GGP = 2,		/* Gateway Protocol (deprecated)	*/
+  IPPROTO_IGMP = 2,		/* Internet Gateway Management Protocol */
   IPPROTO_TCP = 6,		/* Transmission Control Protocol	*/
   IPPROTO_EGP = 8,		/* Exterior Gateway Protocol		*/
   IPPROTO_PUP = 12,		/* PUP protocol				*/
@@ -38,6 +38,14 @@ enum {
 /* Internet address. */
 struct in_addr {
 	unsigned long int	s_addr;
+};
+
+/* Request struct for multicast socket ops */
+
+struct ip_mreq 
+{
+	struct in_addr imr_multiaddr;	/* IP multicast address of group */
+	struct in_addr imr_interface;	/* local IP address of interface */
 };
 
 
@@ -79,6 +87,7 @@ struct sockaddr_in {
 
 #define	IN_CLASSD(a)		((((long int) (a)) & 0xf0000000) == 0xe0000000)
 #define	IN_MULTICAST(a)		IN_CLASSD(a)
+#define IN_MULTICAST_NET	0xF0000000
 
 #define	IN_EXPERIMENTAL(a)	((((long int) (a)) & 0xe0000000) == 0xe0000000)
 #define	IN_BADCLASS(a)		((((long int) (a)) & 0xf0000000) == 0xf0000000)
@@ -96,89 +105,15 @@ struct sockaddr_in {
 #define	IN_LOOPBACKNET		127
 
 /* Address to loopback in software to local host.  */
-#define	INADDR_LOOPBACK		0x7f000001	/* 127.0.0.1		*/
+#define	INADDR_LOOPBACK		0x7f000001	/* 127.0.0.1   */
 
+/* Defines for Multicast INADDR */
+#define INADDR_UNSPEC_GROUP   	0xe0000000      /* 224.0.0.0   */
+#define INADDR_ALLHOSTS_GROUP 	0xe0000001      /* 224.0.0.1   */
+#define INADDR_MAX_LOCAL_GROUP  0xe00000ff      /* 224.0.0.255 */
 
-/*
- * Options for use with `getsockopt' and `setsockopt' at
- * the IP level.  LINUX does not yet have the IP_OPTIONS
- * option (grin), so we undefine it for now.- HJ && FvK
- */
-#if 0
-# define IP_OPTIONS	1		/* IP per-packet options	*/
-#endif
-#define IP_HDRINCL	2		/* raw packet header option	*/
+/* <asm/byteorder.h> contains the htonl type stuff.. */
 
-
-/* Linux Internet number representation function declarations. */
-#undef ntohl
-#undef ntohs
-#undef htonl
-#undef htons
-
-extern unsigned long int	ntohl(unsigned long int);
-extern unsigned short int	ntohs(unsigned short int);
-extern unsigned long int	htonl(unsigned long int);
-extern unsigned short int	htons(unsigned short int);
-
-static __inline__ unsigned long int
-__ntohl(unsigned long int x)
-{
-	__asm__("xchgb %b0,%h0\n\t"	/* swap lower bytes	*/
-		"rorl $16,%0\n\t"	/* swap words		*/
-		"xchgb %b0,%h0"		/* swap higher bytes	*/
-		:"=q" (x)
-		: "0" (x));
-	return x;
-}
-
-static __inline__ unsigned long int
-__constant_ntohl(unsigned long int x)
-{
-	return (((x & 0x000000ffU) << 24) |
-		((x & 0x0000ff00U) <<  8) |
-		((x & 0x00ff0000U) >>  8) |
-		((x & 0xff000000U) >> 24));
-}
-
-static __inline__ unsigned short int
-__ntohs(unsigned short int x)
-{
-	__asm__("xchgb %b0,%h0"		/* swap bytes		*/
-		: "=q" (x)
-		:  "0" (x));
-	return x;
-}
-
-static __inline__ unsigned short int
-__constant_ntohs(unsigned short int x)
-{
-	return (((x & 0x00ff) << 8) |
-		((x & 0xff00) >> 8));
-}
-
-#define __htonl(x) __ntohl(x)
-#define __htons(x) __ntohs(x)
-#define __constant_htonl(x) __constant_ntohl(x)
-#define __constant_htons(x) __constant_ntohs(x)
-
-#ifdef  __OPTIMIZE__
-#  define ntohl(x) \
-(__builtin_constant_p((long)(x)) ? \
- __constant_ntohl((x)) : \
- __ntohl((x)))
-#  define ntohs(x) \
-(__builtin_constant_p((short)(x)) ? \
- __constant_ntohs((x)) : \
- __ntohs((x)))
-#  define htonl(x) \
-(__builtin_constant_p((long)(x)) ? \
- __constant_htonl((x)) : \
- __htonl((x)))
-#  define htons(x) \
-(__builtin_constant_p((short)(x)) ? \
- __constant_htons((x)) : \
- __htons((x)))
-#endif
+#include <asm/byteorder.h> 
 
 #endif	/* _LINUX_IN_H */

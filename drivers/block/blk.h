@@ -1,10 +1,9 @@
 #ifndef _BLK_H
 #define _BLK_H
 
-#include <linux/major.h>
-#include <linux/sched.h>
+#include <linux/blkdev.h>
 #include <linux/locks.h>
-#include <linux/genhd.h>
+#include <linux/config.h>
 
 /*
  * NR_REQUEST is the number of entries in the request-queue.
@@ -19,26 +18,6 @@
 #define NR_REQUEST	64
 
 /*
- * Ok, this is an expanded form so that we can use the same
- * request for paging requests when that is implemented. In
- * paging, 'bh' is NULL, and the semaphore is used to wait
- * for read/write completion.
- */
-struct request {
-	int dev;		/* -1 if no request */
-	int cmd;		/* READ or WRITE */
-	int errors;
-	unsigned long sector;
-	unsigned long nr_sectors;
-	unsigned long current_nr_sectors;
-	char * buffer;
-	struct semaphore * sem;
-	struct buffer_head * bh;
-	struct buffer_head * bhtail;
-	struct request * next;
-};
-
-/*
  * This is used in the elevator algorithm: Note that
  * reads always go before writes. This is natural: reads
  * are much more time-critical than writes.
@@ -48,45 +27,41 @@ struct request {
 ((s1)->dev < (s2)->dev || (((s1)->dev == (s2)->dev && \
 (s1)->sector < (s2)->sector)))))
 
-struct blk_dev_struct {
-	void (*request_fn)(void);
-	struct request * current_request;
-};
-
-
-struct sec_size {
-	unsigned block_size;
-	unsigned block_size_bits;
-};
-
 /*
  * These will have to be changed to be aware of different buffer
  * sizes etc.. It actually needs a major cleanup.
  */
+#ifdef IDE_DRIVER
+#define SECTOR_MASK ((BLOCK_SIZE >> 9) - 1)
+#else
 #define SECTOR_MASK (blksize_size[MAJOR_NR] &&     \
 	blksize_size[MAJOR_NR][MINOR(CURRENT->dev)] ? \
 	((blksize_size[MAJOR_NR][MINOR(CURRENT->dev)] >> 9) - 1) :  \
 	((BLOCK_SIZE >> 9)  -  1))
+#endif /* IDE_DRIVER */
 
 #define SUBSECTOR(block) (CURRENT->current_nr_sectors > 0)
 
-extern struct sec_size * blk_sec[MAX_BLKDEV];
-extern struct blk_dev_struct blk_dev[MAX_BLKDEV];
-extern struct wait_queue * wait_for_request;
-extern void resetup_one_dev(struct gendisk *dev, int drive);
-
-extern int * blk_size[MAX_BLKDEV];
-
-extern int * blksize_size[MAX_BLKDEV];
-
-extern unsigned long hd_init(unsigned long mem_start, unsigned long mem_end);
 extern unsigned long cdu31a_init(unsigned long mem_start, unsigned long mem_end);
 extern unsigned long mcd_init(unsigned long mem_start, unsigned long mem_end);
+#ifdef CONFIG_BLK_DEV_HD
+extern unsigned long hd_init(unsigned long mem_start, unsigned long mem_end);
+#endif
+#ifdef CONFIG_BLK_DEV_IDE
+extern unsigned long ide_init(unsigned long mem_start, unsigned long mem_end);
+#endif
 #ifdef CONFIG_SBPCD
 extern unsigned long sbpcd_init(unsigned long, unsigned long);
 #endif CONFIG_SBPCD
 extern void set_device_ro(int dev,int flag);
 
+extern void floppy_init(void);
+#ifdef FD_MODULE
+static
+#else
+extern
+#endif
+int new_floppy_init(void);
 extern void rd_load(void);
 extern long rd_init(long mem_start, int length);
 extern int ramdisk_size;
@@ -99,14 +74,19 @@ extern unsigned long xd_init(unsigned long mem_start, unsigned long mem_end);
   case BLKROGET: { int __err = verify_area(VERIFY_WRITE, (void *) (where), sizeof(long)); \
 		   if (!__err) put_fs_long(0!=is_read_only(dev),(long *) (where)); return __err; }
 		 
-#ifdef MAJOR_NR
+#if defined(MAJOR_NR) || defined(IDE_DRIVER)
 
 /*
- * Add entries as needed. Currently the only block devices
- * supported are hard-disks and floppies.
+ * Add entries as needed.
  */
 
-#if (MAJOR_NR == MEM_MAJOR)
+#ifdef IDE_DRIVER
+
+#define DEVICE_NR(device)	(MINOR(device) >> PARTN_BITS)
+#define DEVICE_ON(device)	/* nothing */
+#define DEVICE_OFF(device)	/* nothing */
+
+#elif (MAJOR_NR == MEM_MAJOR)
 
 /* ram disk */
 #define DEVICE_NAME "ramdisk"
@@ -117,14 +97,13 @@ extern unsigned long xd_init(unsigned long mem_start, unsigned long mem_end);
 
 #elif (MAJOR_NR == FLOPPY_MAJOR)
 
-static void floppy_on(unsigned int nr);
 static void floppy_off(unsigned int nr);
 
 #define DEVICE_NAME "floppy"
 #define DEVICE_INTR do_floppy
 #define DEVICE_REQUEST do_fd_request
 #define DEVICE_NR(device) ( ((device) & 3) | (((device) & 0x80 ) >> 5 ))
-#define DEVICE_ON(device) floppy_on(DEVICE_NR(device))
+#define DEVICE_ON(device)
 #define DEVICE_OFF(device) floppy_off(DEVICE_NR(device))
 
 #elif (MAJOR_NR == HD_MAJOR)
@@ -153,7 +132,7 @@ static void floppy_off(unsigned int nr);
 
 #define DEVICE_NAME "scsitape"
 #define DEVICE_INTR do_st  
-#define DEVICE_NR(device) (MINOR(device))
+#define DEVICE_NR(device) (MINOR(device) & 0x7f)
 #define DEVICE_ON(device)
 #define DEVICE_OFF(device)
 
@@ -223,13 +202,9 @@ static void floppy_off(unsigned int nr);
 #define DEVICE_ON(device)
 #define DEVICE_OFF(device)
 
-#else
+#endif /* MAJOR_NR == whatever */
 
-#error "unknown blk device"
-
-#endif
-
-#if (MAJOR_NR != SCSI_TAPE_MAJOR)
+#if (MAJOR_NR != SCSI_TAPE_MAJOR) && !defined(IDE_DRIVER)
 
 #ifndef CURRENT
 #define CURRENT (blk_dev[MAJOR_NR].current_request)
@@ -259,23 +234,46 @@ else \
 
 #define SET_INTR(x) (DEVICE_INTR = (x))
 
-#endif
+#endif /* DEVICE_TIMEOUT */
+
 static void (DEVICE_REQUEST)(void);
+
+#ifdef DEVICE_INTR
+#define CLEAR_INTR SET_INTR(NULL)
+#else
+#define CLEAR_INTR
+#endif
+
+#define INIT_REQUEST \
+	if (!CURRENT) {\
+		CLEAR_INTR; \
+		return; \
+	} \
+	if (MAJOR(CURRENT->dev) != MAJOR_NR) \
+		panic(DEVICE_NAME ": request list destroyed"); \
+	if (CURRENT->bh) { \
+		if (!CURRENT->bh->b_lock) \
+			panic(DEVICE_NAME ": block not locked"); \
+	}
+
+#endif /* (MAJOR_NR != SCSI_TAPE_MAJOR) && !defined(IDE_DRIVER) */
 
 /* end_request() - SCSI devices have their own version */
 
 #if ! SCSI_MAJOR(MAJOR_NR)
 
-static void end_request(int uptodate)
-{
-	struct request * req;
+#ifdef IDE_DRIVER
+static void end_request(byte uptodate, byte hwif) {
+	struct request *req = ide_cur_rq[HWIF];
+#else
+static void end_request(int uptodate) {
+	struct request *req = CURRENT;
+#endif /* IDE_DRIVER */
 	struct buffer_head * bh;
 
-	req = CURRENT;
 	req->errors = 0;
 	if (!uptodate) {
-		printk(DEVICE_NAME " I/O error\n");
-		printk("dev %04lX, sector %lu\n",
+		printk("end_request: I/O error, dev %04lX, sector %lu\n",
 		       (unsigned long)req->dev, req->sector);
 		req->nr_sectors--;
 		req->nr_sectors &= ~SECTOR_MASK;
@@ -299,34 +297,19 @@ static void end_request(int uptodate)
 			return;
 		}
 	}
+#ifdef IDE_DRIVER
+	ide_cur_rq[HWIF] = NULL;
+#else
 	DEVICE_OFF(req->dev);
 	CURRENT = req->next;
+#endif /* IDE_DRIVER */
 	if (req->sem != NULL)
 		up(req->sem);
 	req->dev = -1;
 	wake_up(&wait_for_request);
 }
-#endif
+#endif /* ! SCSI_MAJOR(MAJOR_NR) */
 
-#ifdef DEVICE_INTR
-#define CLEAR_INTR SET_INTR(NULL)
-#else
-#define CLEAR_INTR
-#endif
+#endif /* defined(MAJOR_NR) || defined(IDE_DRIVER) */
 
-#define INIT_REQUEST \
-	if (!CURRENT) {\
-		CLEAR_INTR; \
-		return; \
-	} \
-	if (MAJOR(CURRENT->dev) != MAJOR_NR) \
-		panic(DEVICE_NAME ": request list destroyed"); \
-	if (CURRENT->bh) { \
-		if (!CURRENT->bh->b_lock) \
-			panic(DEVICE_NAME ": block not locked"); \
-	}
-
-#endif
-
-#endif
-#endif
+#endif /* _BLK_H */

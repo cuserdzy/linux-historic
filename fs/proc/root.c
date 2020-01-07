@@ -59,6 +59,10 @@ static struct proc_dir_entry root_dir[] = {
 	{ PROC_MEMINFO,		7, "meminfo" },
 	{ PROC_KMSG,		4, "kmsg" },
 	{ PROC_VERSION,		7, "version" },
+#ifdef CONFIG_PCI
+	{ PROC_PCI,             3, "pci"  },
+#endif
+	{ PROC_CPUINFO,		7, "cpuinfo" },
 	{ PROC_SELF,		4, "self" },	/* will change inode # */
 	{ PROC_NET,		3, "net" },
 #ifdef CONFIG_DEBUG_MALLOC
@@ -71,6 +75,11 @@ static struct proc_dir_entry root_dir[] = {
 	{ PROC_INTERRUPTS,	10,"interrupts" },
    	{ PROC_FILESYSTEMS,	11,"filesystems" },
    	{ PROC_KSYMS,		5, "ksyms" },
+   	{ PROC_DMA,		3, "dma" },
+	{ PROC_IOPORTS,		7, "ioports"},
+#ifdef CONFIG_PROFILE
+	{ PROC_PROFILE,		7, "profile"},
+#endif
 };
 
 #define NR_ROOT_DIRENTRY ((sizeof (root_dir))/(sizeof (root_dir[0])))
@@ -93,11 +102,11 @@ static int proc_lookuproot(struct inode * dir,const char * name, int len,
 		/* nothing */;
 	if (i >= 0) {
 		ino = root_dir[i].low_ino;
-		if (ino == 1) {
+		if (ino == PROC_ROOT_INO) {
 			*result = dir;
 			return 0;
 		}
-		if (ino == 7) /* self modifying inode ... */
+		if (ino == PROC_SELF) /* self modifying inode ... */
 			ino = (current->pid << 16) + 2;
 	} else {
 		pid = 0;

@@ -20,6 +20,9 @@ OBJS=	dir.o emd.o file.o inode.o ioctl.o mangle.o namei.o\
 umsdos.o: $(OBJS)
 	$(LD) -r -o umsdos.o $(OBJS)
 
+modules: umsdos.o
+	ln -sf ../fs/umsdos/umsdos.o $(TOPDIR)/modules
+
 clean:
 	rm -f core *.o *.a *.s
 

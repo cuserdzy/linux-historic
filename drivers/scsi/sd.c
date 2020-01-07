@@ -45,10 +45,12 @@ static const char RCSid[] = "$Header:";
 			    SC->device->type != TYPE_MOD)
 
 struct hd_struct * sd;
+int revalidate_scsidisk(int dev, int maxusage);
 
-Scsi_Disk * rscsi_disks;
+Scsi_Disk * rscsi_disks = NULL;
 static int * sd_sizes;
 static int * sd_blocksizes;
+static int * sd_hardsizes;		/* Hardware sector size */
 
 extern int sd_ioctl(struct inode *, struct file *, unsigned int, unsigned long);
 
@@ -61,13 +63,14 @@ static void requeue_sd_request (Scsi_Cmnd * SCpnt);
 
 static void sd_init(void);
 static void sd_finish(void);
-static void sd_attach(Scsi_Device *);
+static int sd_attach(Scsi_Device *);
 static int sd_detect(Scsi_Device *);
+static void sd_detach(Scsi_Device *);
 
 struct Scsi_Device_Template sd_template = {NULL, "disk", "sd", TYPE_DISK, 
 					     SCSI_DISK_MAJOR, 0, 0, 0, 1,
 					     sd_detect, sd_init,
-					     sd_finish, sd_attach, NULL};
+					     sd_finish, sd_attach, sd_detach};
 
 static int sd_open(struct inode * inode, struct file * filp)
 {
@@ -89,6 +92,8 @@ static int sd_open(struct inode * inode, struct file * filp)
 	    sd_ioctl(inode, NULL, SCSI_IOCTL_DOORLOCK, 0);
 	};
 	rscsi_disks[target].device->access_count++;
+	if (rscsi_disks[target].device->host->hostt->usage_count)
+	  (*rscsi_disks[target].device->host->hostt->usage_count)++;
 	return 0;
 }
 
@@ -100,6 +105,8 @@ static void sd_release(struct inode * inode, struct file * file)
 	target =  DEVICE_NR(MINOR(inode->i_rdev));
 
 	rscsi_disks[target].device->access_count--;
+	if (rscsi_disks[target].device->host->hostt->usage_count)
+	  (*rscsi_disks[target].device->host->hostt->usage_count)--;
 
 	if(rscsi_disks[target].device->removable) {
 	  if(!rscsi_disks[target].device->access_count)
@@ -146,7 +153,10 @@ static void sd_geninit (void)
 	for (i = 0; i < sd_template.dev_max; ++i)
 	  if(rscsi_disks[i].device) 
 	    sd[i << 4].nr_sects = rscsi_disks[i].capacity;
+#if 0
+	/* No longer needed - we keep track of this as we attach/detach */
 	sd_gendisk.nr_real = sd_template.dev_max;
+#endif
 }
 
 /*
@@ -226,7 +236,7 @@ static void rw_intr (Scsi_Cmnd *SCpnt)
 		  SCpnt->request.sector, this_count);
 	  }
       }
-    end_scsi_request(SCpnt, 1, this_count);
+    SCpnt = end_scsi_request(SCpnt, 1, this_count);
     requeue_sd_request(SCpnt);
     return;
   }
@@ -262,7 +272,7 @@ static void rw_intr (Scsi_Cmnd *SCpnt)
 */
 
         if (driver_byte(result) != 0) {
-	  if (sugestion(result) == SUGGEST_REMAP) {
+	  if (suggestion(result) == SUGGEST_REMAP) {
 #ifdef REMAP
 /*
 	Not yet implemented.  A read will fail after being remapped,
@@ -284,7 +294,7 @@ static void rw_intr (Scsi_Cmnd *SCpnt)
 	      /* further access.					*/
 	      
 		rscsi_disks[DEVICE_NR(SCpnt->request.dev)].device->changed = 1;
-		end_scsi_request(SCpnt, 0, this_count);
+		SCpnt = end_scsi_request(SCpnt, 0, this_count);
 		requeue_sd_request(SCpnt);
 		return;
 	      }
@@ -294,8 +304,8 @@ static void rw_intr (Scsi_Cmnd *SCpnt)
 
 /* 	If we had an ILLEGAL REQUEST returned, then we may have
 performed an unsupported command.  The only thing this should be would
-be a ten byte read where only a six byte read was supportted.  Also,
-on a system where READ CAPACITY failed, we mave have read past the end
+be a ten byte read where only a six byte read was supported.  Also,
+on a system where READ CAPACITY failed, we have have read past the end
 of the 	disk. 
 */
 
@@ -316,7 +326,7 @@ of the 	disk.
 
 		if (driver_byte(result) & DRIVER_SENSE)
 			print_sense("sd", SCpnt);
-		end_scsi_request(SCpnt, 0, SCpnt->request.current_nr_sectors);
+		SCpnt = end_scsi_request(SCpnt, 0, SCpnt->request.current_nr_sectors);
 		requeue_sd_request(SCpnt);
 		return;
 	}
@@ -332,11 +342,14 @@ static void do_sd_request (void)
 {
   Scsi_Cmnd * SCpnt = NULL;
   struct request * req = NULL;
+  unsigned long flags;
   int flag = 0;
+
   while (1==1){
+    save_flags(flags);
     cli();
     if (CURRENT != NULL && CURRENT->dev == -1) {
-      sti();
+      restore_flags(flags);
       return;
     };
 
@@ -358,18 +371,19 @@ static void do_sd_request (void)
       SCpnt = allocate_device(&CURRENT,
 			      rscsi_disks[DEVICE_NR(MINOR(CURRENT->dev))].device, 0); 
     else SCpnt = NULL;
-    sti();
+    restore_flags(flags);
 
 /* This is a performance enhancement.  We dig down into the request list and
    try and find a queueable request (i.e. device not busy, and host able to
    accept another command.  If we find one, then we queue it. This can
    make a big difference on systems with more than one disk drive.  We want
    to have the interrupts off when monkeying with the request list, because
-   otherwise the kernel might try and slip in a request inbetween somewhere. */
+   otherwise the kernel might try and slip in a request in between somewhere. */
 
     if (!SCpnt && sd_template.nr_dev > 1){
       struct request *req1;
       req1 = NULL;
+      save_flags(flags);
       cli();
       req = CURRENT;
       while(req){
@@ -385,7 +399,7 @@ static void do_sd_request (void)
 	else
 	  req1->next = req->next;
       };
-      sti();
+      restore_flags(flags);
     };
     
     if (!SCpnt) return; /* Could not find anything to do */
@@ -406,7 +420,7 @@ static void requeue_sd_request (Scsi_Cmnd * SCpnt)
 
 repeat:
 
-	if(SCpnt->request.dev <= 0) {
+	if(!SCpnt || SCpnt->request.dev <= 0) {
 	  do_sd_request();
 	  return;
 	}
@@ -423,7 +437,7 @@ repeat:
 	    !rscsi_disks[DEVICE_NR(dev)].device ||
 	    block + SCpnt->request.nr_sectors > sd[dev].nr_sects)
 		{
-		end_scsi_request(SCpnt, 0, SCpnt->request.nr_sectors);
+		SCpnt = end_scsi_request(SCpnt, 0, SCpnt->request.nr_sectors);
 		goto repeat;
 		}
 
@@ -436,7 +450,7 @@ repeat:
  * quietly refuse to do anything to a changed disc until the changed bit has been reset
  */
 		/* printk("SCSI disk has been changed.  Prohibiting further I/O.\n");	*/
-		end_scsi_request(SCpnt, 0, SCpnt->request.nr_sectors);
+		SCpnt = end_scsi_request(SCpnt, 0, SCpnt->request.nr_sectors);
 		goto repeat;
 		}
 
@@ -444,12 +458,30 @@ repeat:
 	printk("sd%c : real dev = /dev/sd%c, block = %d\n", 'a' + MINOR(SCpnt->request.dev), dev, block);
 #endif
 
+	/*
+	 * If we have a 1K hardware sectorsize, prevent access to single
+	 * 512 byte sectors.  In theory we could handle this - in fact
+	 * the scsi cdrom driver must be able to handle this because
+	 * we typically use 1K blocksizes, and cdroms typically have
+	 * 2K hardware sectorsizes.  Of course, things are simpler
+	 * with the cdrom, since it is read-only.  For performance
+	 * reasons, the filesystems should be able to handle this
+	 * and not force the scsi disk driver to use bounce buffers
+	 * for this.
+	 */
+	if (rscsi_disks[dev].sector_size == 1024)
+	  if((block & 1) || (SCpnt->request.nr_sectors & 1)) {
+	 	printk("sd.c:Bad block number requested");
+		SCpnt = end_scsi_request(SCpnt, 0, SCpnt->request.nr_sectors);
+		goto repeat;
+	}
+	
 	switch (SCpnt->request.cmd)
 		{
 		case WRITE :
 			if (!rscsi_disks[dev].device->writeable)
 				{
-				end_scsi_request(SCpnt, 0, SCpnt->request.nr_sectors);
+				SCpnt = end_scsi_request(SCpnt, 0, SCpnt->request.nr_sectors);
 				goto repeat;
 				}
 			cmd[0] = WRITE_6;
@@ -475,9 +507,9 @@ repeat:
 
 	
 	if (contiguous && SCpnt->request.bh &&
-	    ((int) SCpnt->request.bh->b_data) + (SCpnt->request.nr_sectors << 9) - 1 > 
+	    ((long) SCpnt->request.bh->b_data) + (SCpnt->request.nr_sectors << 9) - 1 > 
 	    ISA_DMA_THRESHOLD && SCpnt->host->unchecked_isa_dma) {
-	  if(((int) SCpnt->request.bh->b_data) > ISA_DMA_THRESHOLD)
+	  if(((long) SCpnt->request.bh->b_data) > ISA_DMA_THRESHOLD)
 	    bounce_buffer = (char *) scsi_malloc(bounce_size);
 	  if(!bounce_buffer) contiguous = 0;
 	};
@@ -535,7 +567,7 @@ repeat:
 	    if(!bhp || !CONTIGUOUS_BUFFERS(bhp,bh) ||
 	       !CLUSTERABLE_DEVICE(SCpnt) ||
 	       (SCpnt->host->unchecked_isa_dma &&
-	       ((unsigned int) bh->b_data-1) == ISA_DMA_THRESHOLD)) {
+	       ((unsigned long) bh->b_data-1) == ISA_DMA_THRESHOLD)) {
 	      if (count < SCpnt->host->sg_tablesize) count++;
 	      else break;
 	    };
@@ -574,7 +606,7 @@ repeat:
 	      sgpnt[count].length += bh->b_size;
 	      counted += bh->b_size >> 9;
 
-	      if (((int) sgpnt[count].address) + sgpnt[count].length - 1 > 
+	      if (((long) sgpnt[count].address) + sgpnt[count].length - 1 > 
 		  ISA_DMA_THRESHOLD && (SCpnt->host->unchecked_isa_dma) &&
 		  !sgpnt[count].alt_address) {
 		sgpnt[count].alt_address = sgpnt[count].address;
@@ -617,7 +649,7 @@ repeat:
 	      if(bhp && CONTIGUOUS_BUFFERS(bh,bhp) && CLUSTERABLE_DEVICE(SCpnt)) {
 		char * tmp;
 
-		if (((int) sgpnt[count].address) + sgpnt[count].length +
+		if (((long) sgpnt[count].address) + sgpnt[count].length +
 		    bhp->b_size - 1 > ISA_DMA_THRESHOLD && 
 		    (SCpnt->host->unchecked_isa_dma) &&
 		    !sgpnt[count].alt_address) continue;
@@ -673,7 +705,7 @@ repeat:
 /* Now handle the possibility of DMA to addresses > 16Mb */
 
 	if(SCpnt->use_sg == 0){
-	  if (((int) buff) + (this_count << 9) - 1 > ISA_DMA_THRESHOLD && 
+	  if (((long) buff) + (this_count << 9) - 1 > ISA_DMA_THRESHOLD && 
 	    (SCpnt->host->unchecked_isa_dma)) {
 	    if(bounce_buffer)
 	      buff = bounce_buffer;
@@ -798,7 +830,6 @@ static void sd_init_done (Scsi_Cmnd * SCpnt)
 
 static int sd_init_onedisk(int i)
 {
-  int j = 0;
   unsigned char cmd[10];
   unsigned char *buffer;
   char spintime;
@@ -821,6 +852,7 @@ static int sd_init_onedisk(int i)
       cmd[1] = (rscsi_disks[i].device->lun << 5) & 0xe0;
       memset ((void *) &cmd[2], 0, 8);
       SCpnt->request.dev = 0xffff;  /* Mark as really busy again */
+      SCpnt->cmd_len = 0;
       SCpnt->sense_buffer[0] = 0;
       SCpnt->sense_buffer[2] = 0;
       
@@ -846,6 +878,7 @@ static int sd_init_onedisk(int i)
 	  memset ((void *) &cmd[2], 0, 8);
 	  cmd[4] = 1; /* Start spin cycle */
 	  SCpnt->request.dev = 0xffff;  /* Mark as really busy again */
+	  SCpnt->cmd_len = 0;
 	  SCpnt->sense_buffer[0] = 0;
 	  SCpnt->sense_buffer[2] = 0;
 	  
@@ -880,6 +913,7 @@ static int sd_init_onedisk(int i)
     memset ((void *) &cmd[2], 0, 8);
     memset ((void *) buffer, 0, 8);
     SCpnt->request.dev = 0xffff;  /* Mark as really busy again */
+    SCpnt->cmd_len = 0;
     SCpnt->sense_buffer[0] = 0;
     SCpnt->sense_buffer[2] = 0;
     
@@ -911,7 +945,7 @@ static int sd_init_onedisk(int i)
   /* Wake up a process waiting for device*/
 
   /*
-   *	The SCSI standard says "READ CAPACITY is necessary for self confuring software"
+   *	The SCSI standard says "READ CAPACITY is necessary for self configuring software"
    *	While not mandatory, support of READ CAPACITY is strongly encouraged.
    *	We used to die if we couldn't successfully do a READ CAPACITY.
    *	But, now we go on about our way.  The side effects of this are
@@ -969,11 +1003,26 @@ static int sd_init_onedisk(int i)
 	    rscsi_disks[i].capacity = 0;
 	  } else {
 	    printk ("scsi : deleting disk entry.\n");
-	    rscsi_disks[j].device = NULL;
+	    rscsi_disks[i].device = NULL;
 	    sd_template.nr_dev--;
 	    return i;
 	  };
 	}
+    {
+       /*
+          The msdos fs need to know the hardware sector size
+          So I have created this table. See ll_rw_blk.c
+          Jacques Gelinas (Jacques@solucorp.qc.ca)
+       */
+       int m;
+       int hard_sector = rscsi_disks[i].sector_size;
+       /* There is 16 minor allocated for each devices */
+       for (m=i<<4; m<((i+1)<<4); m++){
+         sd_hardsizes[m] = hard_sector;
+       }
+       printk ("SCSI Hardware sector size is %d bytes on device sd%c\n"
+         ,hard_sector,i+'a');
+    }
       if(rscsi_disks[i].sector_size == 1024)
 	rscsi_disks[i].capacity <<= 1;  /* Change this into 512 byte sectors */
       if(rscsi_disks[i].sector_size == 256)
@@ -1008,25 +1057,33 @@ static void sd_init()
 	}
 
 	/* We do not support attaching loadable devices yet. */
-	if(scsi_loadable_module_flag) return;
+	if(rscsi_disks) return;
 
-	sd_template.dev_max = sd_template.dev_noticed;
+	sd_template.dev_max = sd_template.dev_noticed + SD_EXTRA_DEVS;
 
 	rscsi_disks = (Scsi_Disk *) 
-	  scsi_init_malloc(sd_template.dev_max * sizeof(Scsi_Disk));
+	  scsi_init_malloc(sd_template.dev_max * sizeof(Scsi_Disk), GFP_ATOMIC);
 	memset(rscsi_disks, 0, sd_template.dev_max * sizeof(Scsi_Disk));
 
 	sd_sizes = (int *) scsi_init_malloc((sd_template.dev_max << 4) * 
-					    sizeof(int));
+					    sizeof(int), GFP_ATOMIC);
 	memset(sd_sizes, 0, (sd_template.dev_max << 4) * sizeof(int));
 
 	sd_blocksizes = (int *) scsi_init_malloc((sd_template.dev_max << 4) * 
-						 sizeof(int));
-	for(i=0;i<(sd_template.dev_max << 4);i++) sd_blocksizes[i] = 1024;
-	blksize_size[MAJOR_NR] = sd_blocksizes;
+						 sizeof(int), GFP_ATOMIC);
 
+	sd_hardsizes = (int *) scsi_init_malloc((sd_template.dev_max << 4) * 
+						   sizeof(struct hd_struct), GFP_ATOMIC);
+
+	for(i=0;i<(sd_template.dev_max << 4);i++){
+		sd_blocksizes[i] = 1024;
+		sd_hardsizes[i] = 512;
+	}
+	blksize_size[MAJOR_NR] = sd_blocksizes;
+	hardsect_size[MAJOR_NR] = sd_hardsizes;
 	sd = (struct hd_struct *) scsi_init_malloc((sd_template.dev_max << 4) *
-						   sizeof(struct hd_struct));
+						   sizeof(struct hd_struct),
+						   GFP_ATOMIC);
 
 
 	sd_gendisk.max_nr = sd_template.dev_max;
@@ -1040,28 +1097,37 @@ static void sd_finish()
 {
         int i;
 
-	for (i = 0; i < sd_template.dev_max; ++i)
-	  if (rscsi_disks[i].device) i = sd_init_onedisk(i);
-
 	blk_dev[MAJOR_NR].request_fn = DEVICE_REQUEST;
+
+	sd_gendisk.next = gendisk_head;
+	gendisk_head = &sd_gendisk;
+
+	for (i = 0; i < sd_template.dev_max; ++i)
+	    if (!rscsi_disks[i].capacity && 
+		  rscsi_disks[i].device)
+	      {
+		i = sd_init_onedisk(i);
+		if (scsi_loadable_module_flag 
+		    && !rscsi_disks[i].has_part_table) {
+		  sd_sizes[i << 4] = rscsi_disks[i].capacity;
+		  revalidate_scsidisk(i << 4, 0);
+		}
+		rscsi_disks[i].has_part_table = 1;
+	      }
 
 	/* If our host adapter is capable of scatter-gather, then we increase
 	   the read-ahead to 16 blocks (32 sectors).  If not, we use
 	   a two block (4 sector) read ahead. */
-	if(rscsi_disks[0].device->host->sg_tablesize)
+	if(rscsi_disks[0].device && rscsi_disks[0].device->host->sg_tablesize)
 	  read_ahead[MAJOR_NR] = 120;
 	/* 64 sector read-ahead */
 	else
 	  read_ahead[MAJOR_NR] = 4;  /* 4 sector read-ahead */
 	
-	sd_gendisk.next = gendisk_head;
-	gendisk_head = &sd_gendisk;
 	return;
 }
 
 static int sd_detect(Scsi_Device * SDp){
-  /* We do not support attaching loadable devices yet. */
-  if(scsi_loadable_module_flag) return 0;
   if(SDp->type != TYPE_DISK && SDp->type != TYPE_MOD) return 0;
 
   printk("Detected scsi disk sd%c at scsi%d, id %d, lun %d\n", 
@@ -1072,17 +1138,17 @@ static int sd_detect(Scsi_Device * SDp){
 
 }
 
-static void sd_attach(Scsi_Device * SDp){
+static int sd_attach(Scsi_Device * SDp){
    Scsi_Disk * dpnt;
    int i;
 
-   /* We do not support attaching loadable devices yet. */
-   if(scsi_loadable_module_flag) return;
-   if(SDp->type != TYPE_DISK && SDp->type != TYPE_MOD) return;
+   if(SDp->type != TYPE_DISK && SDp->type != TYPE_MOD) return 0;
 
-   if(sd_template.nr_dev >= sd_template.dev_max) 
-     panic ("scsi_devices corrupt (sd)");
-
+   if(sd_template.nr_dev >= sd_template.dev_max) {
+	SDp->attached--;
+	return 1;
+   }
+   
    for(dpnt = rscsi_disks, i=0; i<sd_template.dev_max; i++, dpnt++) 
      if(!dpnt->device) break;
 
@@ -1090,8 +1156,11 @@ static void sd_attach(Scsi_Device * SDp){
 
    SDp->scsi_request_fn = do_sd_request;
    rscsi_disks[i].device = SDp;
+   rscsi_disks[i].has_part_table = 0;
    sd_template.nr_dev++;
-};
+   sd_gendisk.nr_real++;
+   return 0;
+}
 
 #define DEVICE_BUSY rscsi_disks[target].device->busy
 #define USAGE rscsi_disks[target].device->access_count
@@ -1109,6 +1178,7 @@ static void sd_attach(Scsi_Device * SDp){
 int revalidate_scsidisk(int dev, int maxusage){
 	  int target, major;
 	  struct gendisk * gdev;
+	  unsigned long flags;
 	  int max_p;
 	  int start;
 	  int i;
@@ -1116,14 +1186,15 @@ int revalidate_scsidisk(int dev, int maxusage){
 	  target =  DEVICE_NR(MINOR(dev));
 	  gdev = &GENDISK_STRUCT;
 
+	  save_flags(flags);
 	  cli();
 	  if (DEVICE_BUSY || USAGE > maxusage) {
-	    sti();
+	    restore_flags(flags);
 	    printk("Device busy for revalidation (usage=%d)\n", USAGE);
 	    return -EBUSY;
 	  };
 	  DEVICE_BUSY = 1;
-	  sti();
+	  restore_flags(flags);
 
 	  max_p = gdev->max_p;
 	  start = target << gdev->minor_shift;
@@ -1152,3 +1223,40 @@ static int fop_revalidate_scsidisk(dev_t dev){
   return revalidate_scsidisk(dev, 0);
 }
 
+
+static void sd_detach(Scsi_Device * SDp)
+{
+  Scsi_Disk * dpnt;
+  int i;
+  int max_p;
+  int major;
+  int start;
+  
+  for(dpnt = rscsi_disks, i=0; i<sd_template.dev_max; i++, dpnt++) 
+    if(dpnt->device == SDp) {
+
+      /* If we are disconnecting a disk driver, sync and invalidate everything */
+      max_p = sd_gendisk.max_p;
+      start = i << sd_gendisk.minor_shift;
+      major = MAJOR_NR << 8;
+
+      for (i=max_p - 1; i >=0 ; i--) {
+	sync_dev(major | start | i);
+	invalidate_inodes(major | start | i);
+	invalidate_buffers(major | start | i);
+	sd_gendisk.part[start+i].start_sect = 0;
+	sd_gendisk.part[start+i].nr_sects = 0;
+	sd_sizes[start+i] = 0;
+      };
+      
+      dpnt->has_part_table = 0;
+      dpnt->device = NULL;
+      dpnt->capacity = 0;
+      SDp->attached--;
+      sd_template.dev_noticed--;
+      sd_template.nr_dev--;
+      sd_gendisk.nr_real--;
+      return;
+    }
+  return;
+}

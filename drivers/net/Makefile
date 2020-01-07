@@ -17,7 +17,7 @@ CPP := $(CPP) -I../../net/inet
 
 
 # The point of the makefile...
-all: net.a modules
+all: net.a
 
 Space.o: Space.c ../../include/linux/autoconf.h
 	$(CC) $(CFLAGS) $(OPTS) -c $<
@@ -142,6 +142,11 @@ NETDRV_OBJS := $(NETDRV_OBJS) depca.o
 depca.o: depca.c CONFIG
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPCA_OPTS) -c $<
 endif
+ifdef CONFIG_EWRK3
+NETDRV_OBJS := $(NETDRV_OBJS) ewrk3.o
+ewrk3.o: ewrk3.c CONFIG
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(EWRK3_OPTS) -c $<
+endif
 ifdef CONFIG_ATP
 NETDRV_OBJS := $(NETDRV_OBJS) atp.o
 endif
@@ -166,6 +171,10 @@ ifdef CONFIG_8390
 NETDRV_OBJS := $(NETDRV_OBJS) 8390.o
 endif
 
+ifdef CONFIG_ARCNET
+NETDRV_OBJS := $(NETDRV_OBJS) arcnet.o
+endif
+
 ifdef CONFIG_PI
 NETDRV_OBJS := $(NETDRV_OBJS) pi2.o
 CONFIG_PI = CONFIG_PI
@@ -175,8 +184,7 @@ endif
 
 net.a: $(NETDRV_OBJS)
 	rm -f net.a
-	ar rc net.a $(NETDRV_OBJS)
-	ranlib net.a
+	ar rcs net.a $(NETDRV_OBJS)
 
 clean:
 	rm -f core *.o *.a *.s
@@ -188,10 +196,10 @@ tar:
 
 ifdef MODULES
 
-modules:
+modules: $(MODULES)
 	echo $(MODULES) > ../../modules/NET_MODULES
-	$(MAKE) CFLAGS="$(CFLAGS) -DMODULE" $(MODULES)
-	(cd ../../modules;for i in $(MODULES); do ln -sf ../drivers/net/$$i .; done)
+	cd ../../modules; \
+		for i in $(MODULES); do ln -sf ../drivers/net/$$i .; done
 
 else
 

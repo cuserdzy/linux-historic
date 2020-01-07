@@ -48,6 +48,7 @@ static unsigned long msdos_file_mmap_nopage(
 		if (gap < PAGE_SIZE){
 			clear = PAGE_SIZE - gap;
 		}
+		filp.f_reada = 0;
 		filp.f_pos = pos;
 		need_read = PAGE_SIZE - clear;
 		{
@@ -71,10 +72,14 @@ static unsigned long msdos_file_mmap_nopage(
 struct vm_operations_struct msdos_file_mmap = {
 	NULL,			/* open */
 	NULL,			/* close */
+	NULL,			/* unmap */
+	NULL,			/* protect */
+	NULL,			/* sync */
+	NULL,			/* advise */
 	msdos_file_mmap_nopage,	/* nopage */
 	NULL,			/* wppage */
-	NULL,			/* share */
-	NULL,			/* unmap */
+	NULL,			/* swapout */
+	NULL,			/* swapin */
 };
 
 /*

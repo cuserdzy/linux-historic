@@ -18,6 +18,8 @@
 #define LP_NOPA  0x0010
 #define LP_ERR   0x0020
 #define LP_ABORT 0x0040
+#define LP_CAREFUL 0x0080
+#define LP_ABORTOPEN 0x0100
 
 /* timeout for each character.  This is relative to bus cycles -- it
  * is the count in a busy loop.  THIS IS THE VALUE TO CHANGE if you
@@ -51,14 +53,21 @@
 #define LP_INIT_TIME 2
 
 /* IOCTL numbers */
-#define LPCHAR   0x0001  /* corresponds to LP_INIT_CHAR */
-#define LPTIME   0x0002  /* corresponds to LP_INIT_TIME */
-#define LPABORT  0x0004  /* call with TRUE arg to abort on error,
+#define LPCHAR   0x0601  /* corresponds to LP_INIT_CHAR */
+#define LPTIME   0x0602  /* corresponds to LP_INIT_TIME */
+#define LPABORT  0x0604  /* call with TRUE arg to abort on error,
 			    FALSE to retry.  Default is retry.  */
-#define LPSETIRQ 0x0005  /* call with new IRQ number,
+#define LPSETIRQ 0x0605  /* call with new IRQ number,
 			    or 0 for polling (no IRQ) */
-#define LPGETIRQ 0x0006  /* get the current IRQ number */
-#define LPWAIT   0x0008  /* corresponds to LP_INIT_WAIT */
+#define LPGETIRQ 0x0606  /* get the current IRQ number */
+#define LPWAIT   0x0608  /* corresponds to LP_INIT_WAIT */
+#define LPCAREFUL   0x0609  /* call with TRUE arg to require out-of-paper, off-
+			    line, and error indicators good on all writes,
+			    FALSE to ignore them.  Default is ignore. */
+#define LPABORTOPEN 0x060a  /* call with TRUE arg to abort open() on error,
+			    FALSE to ignore error.  Default is ignore.  */
+#define LPGETSTATUS 0x060b  /* return LP_S(minor) */
+#define LPRESET     0x060c  /* reset printer */
 
 /* timeout for printk'ing a timeout, in jiffies (100ths of a second).
    This is also used for re-checking error conditions if LP_ABORT is
@@ -90,29 +99,24 @@ struct lp_struct {
 	char *lp_buffer;
 };
 
-/* the BIOS manuals say there can be up to 4 lpt devices
- * but I have not seen a board where the 4th address is listed
- * if you have different hardware change the table below 
- * please let me know if you have different equipment
- * if you have more than 3 printers, remember to increase LP_NO
+/*
+ * The following constants describe the various signals of the printer port
+ * hardware.  Note that the hardware inverts some signals and that some
+ * signals are active low.  An example is LP_STROBE, which must be programmed
+ * with 1 for being active and 0 for being inactive, because the strobe signal
+ * gets inverted, but it is also active low.
  */
-struct lp_struct lp_table[] = {
-	{ 0x3bc, 0, 0, LP_INIT_CHAR, LP_INIT_TIME, LP_INIT_WAIT, NULL, NULL, },
-	{ 0x378, 0, 0, LP_INIT_CHAR, LP_INIT_TIME, LP_INIT_WAIT, NULL, NULL, },
-	{ 0x278, 0, 0, LP_INIT_CHAR, LP_INIT_TIME, LP_INIT_WAIT, NULL, NULL, },
-}; 
-#define LP_NO 3
 
 /* 
  * bit defines for 8255 status port
  * base + 1
  * accessed with LP_S(minor), which gets the byte...
  */
-#define LP_PBUSY	0x80 /* active low */
-#define LP_PACK		0x40 /* active low */
-#define LP_POUTPA	0x20
-#define LP_PSELECD	0x10
-#define LP_PERRORP	0x08 /* active low*/
+#define LP_PBUSY	0x80  /* inverted input, active high */
+#define LP_PACK		0x40  /* unchanged input, active low */
+#define LP_POUTPA	0x20  /* unchanged input, active high */
+#define LP_PSELECD	0x10  /* unchanged input, active high */
+#define LP_PERRORP	0x08  /* unchanged input, active low */
 
 /* 
  * defines for 8255 control port
@@ -120,10 +124,10 @@ struct lp_struct lp_table[] = {
  * accessed with LP_C(minor)
  */
 #define LP_PINTEN	0x10
-#define LP_PSELECP	0x08
-#define LP_PINITP	0x04  /* active low */
-#define LP_PAUTOLF	0x02
-#define LP_PSTROBE	0x01
+#define LP_PSELECP	0x08  /* inverted output, active low */
+#define LP_PINITP	0x04  /* unchanged output, active low */
+#define LP_PAUTOLF	0x02  /* inverted output, active low */
+#define LP_PSTROBE	0x01  /* inverted output, active low */
 
 /* 
  * the value written to ports to test existence. PC-style ports will 

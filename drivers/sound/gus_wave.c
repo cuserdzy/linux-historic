@@ -2538,7 +2538,7 @@ guswave_patchmgr (int dev, struct patmgr_info *rec)
 					 */
 
 	offs += sample_ptrs[sample];	/*
-					 * Begin offsess + offset to DRAM
+					 * Begin offset + offset to DRAM
 					 */
 
 	for (n = 0; n < l; n++)
@@ -2583,7 +2583,7 @@ guswave_patchmgr (int dev, struct patmgr_info *rec)
 					 */
 
 	offs += sample_ptrs[sample];	/*
-					 * Begin offsess + offset to DRAM
+					 * Begin offset + offset to DRAM
 					 */
 
 	for (n = 0; n < l; n++)
@@ -3052,7 +3052,6 @@ do_loop_irq (int voice)
       pcm_active = 0;		/* Signal to the play_next_pcm_block routine */
     case LMODE_PCM:
       {
-	int             orig_qlen = pcm_qlen;
 	int             flag;	/* 0 or 2 */
 
 	pcm_qlen--;
@@ -3068,7 +3067,7 @@ do_loop_irq (int voice)
 	    pcm_active = 0;
 	  }
 
-	/*
+/*
  * If the queue was full before this interrupt, the DMA transfer was
  * suspended. Let it continue now.
  */

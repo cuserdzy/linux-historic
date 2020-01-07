@@ -27,10 +27,15 @@ int ext2_permission (struct inode * inode, int mask)
 	unsigned short mode = inode->i_mode;
 
 	/*
+	 * Nobody gets write access to an immutable file
+	 */
+	if ((mask & S_IWOTH) && IS_IMMUTABLE(inode))
+		return -EACCES;
+	/*
 	 * Special case, access is always granted for root
 	 */
 	if (fsuser())
-		return 1;
+		return 0;
 	/*
 	 * If no ACL, checks using the file mode
 	 */
@@ -39,7 +44,7 @@ int ext2_permission (struct inode * inode, int mask)
 	else if (in_group_p (inode->i_gid))
 		mode >>= 3;
 	if (((mode & mask & S_IRWXO) == mask))
-		return 1;
-	else
 		return 0;
+	else
+		return -EACCES;
 }

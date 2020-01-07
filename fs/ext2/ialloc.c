@@ -33,32 +33,6 @@
 
 #include <asm/bitops.h>
 
-static inline int find_first_zero_bit (unsigned long * addr, unsigned size)
-{
-	int res;
-
-	if (!size)
-		return 0;
-	__asm__("
-		cld
-		movl $-1,%%eax
-		repe; scasl
-		je 1f
-		subl $4,%%edi
-		movl (%%edi),%%eax
-		notl %%eax
-		bsfl %%eax,%%edx
-		jmp 2f
-1:		xorl %%edx,%%edx
-2:		subl %%ebx,%%edi
-		shll $3,%%edi
-		addl %%edi,%%edx"
-		: "=d" (res)
-		: "c" ((size + 31) >> 5), "D" (addr), "b" (addr)
-		: "ax", "bx", "cx", "di");
-	return res;
-}
-
 static struct ext2_group_desc * get_group_desc (struct super_block * sb,
 						unsigned int block_group,
 						struct buffer_head ** bh)
@@ -69,7 +43,7 @@ static struct ext2_group_desc * get_group_desc (struct super_block * sb,
 
 	if (block_group >= sb->u.ext2_sb.s_groups_count)
 		ext2_panic (sb, "get_group_desc",
-			    "block_group >= groups_count\n"
+			    "block_group >= groups_count - "
 			    "block_group = %d, groups_count = %lu",
 			    block_group, sb->u.ext2_sb.s_groups_count);
 
@@ -77,7 +51,7 @@ static struct ext2_group_desc * get_group_desc (struct super_block * sb,
 	desc = block_group % EXT2_DESC_PER_BLOCK(sb);
 	if (!sb->u.ext2_sb.s_group_desc[group_desc])
 		ext2_panic (sb, "get_group_desc",
-			    "Group descriptor not loaded\n"
+			    "Group descriptor not loaded - "
 			    "block_group = %d, group_desc = %lu, desc = %lu",
 			     block_group, group_desc, desc);
 	gdp = (struct ext2_group_desc *) 
@@ -97,7 +71,8 @@ static void read_inode_bitmap (struct super_block * sb,
 	gdp = get_group_desc (sb, block_group, NULL);
 	bh = bread (sb->s_dev, gdp->bg_inode_bitmap, sb->s_blocksize);
 	if (!bh)
-		ext2_panic (sb, "read_inode_bitmap", "Cannot read inode bitmap\n"
+		ext2_panic (sb, "read_inode_bitmap",
+			    "Cannot read inode bitmap - "
 			    "block_group = %lu, inode_bitmap = %lu",
 			    block_group, gdp->bg_inode_bitmap);
 	sb->u.ext2_sb.s_inode_bitmap_number[bitmap_nr] = block_group;
@@ -124,7 +99,7 @@ static int load_inode_bitmap (struct super_block * sb,
 
 	if (block_group >= sb->u.ext2_sb.s_groups_count)
 		ext2_panic (sb, "load_inode_bitmap",
-			    "block_group >= groups_count\n"
+			    "block_group >= groups_count - "
 			    "block_group = %d, groups_count = %lu",
 			     block_group, sb->u.ext2_sb.s_groups_count);
 	if (sb->u.ext2_sb.s_loaded_inode_bitmaps > 0 &&
@@ -193,7 +168,7 @@ static void set_inode_dtime (struct inode * inode,
 	bh = bread (inode->i_sb->s_dev, inode_block, inode->i_sb->s_blocksize);
 	if (!bh)
 		ext2_panic (inode->i_sb, "set_inode_dtime",
-			    "Cannot load inode table block\n"
+			    "Cannot load inode table block - "
 			    "inode=%lu, inode_block=%lu",
 			    inode->i_ino, inode_block);
 	raw_inode = ((struct ext2_inode *) bh->b_data) +
@@ -272,7 +247,7 @@ void ext2_free_inode (struct inode * inode)
 		set_inode_dtime (inode, gdp);
 	}
 	mark_buffer_dirty(bh, 1);
-	if (sb->s_flags & MS_SYNC) {
+	if (sb->s_flags & MS_SYNCHRONOUS) {
 		ll_rw_block (WRITE, 1, &bh);
 		wait_on_buffer (bh);
 	}
@@ -301,7 +276,7 @@ static void inc_inode_version (struct inode * inode,
 	bh = bread (inode->i_sb->s_dev, inode_block, inode->i_sb->s_blocksize);
 	if (!bh) {
 		ext2_error (inode->i_sb, "inc_inode_version",
-			    "Cannot load inode table block"
+			    "Cannot load inode table block - "
 			    "inode=%lu, inode_block=%lu\n",
 			    inode->i_ino, inode_block);
 		inode->u.ext2_i.i_version = 1;
@@ -439,7 +414,7 @@ repeat:
 			goto repeat;
 		}
 		mark_buffer_dirty(bh, 1);
-		if (sb->s_flags & MS_SYNC) {
+		if (sb->s_flags & MS_SYNCHRONOUS) {
 			ll_rw_block (WRITE, 1, &bh);
 			wait_on_buffer (bh);
 		}
@@ -457,7 +432,7 @@ repeat:
 	j += i * EXT2_INODES_PER_GROUP(sb) + 1;
 	if (j < EXT2_FIRST_INO || j > es->s_inodes_count) {
 		ext2_error (sb, "ext2_new_inode",
-			    "reserved inode or inode > inodes count\n"
+			    "reserved inode or inode > inodes count - "
 			    "block_group = %d,inode=%d", i, j);
 		unlock_super (sb);
 		iput (inode);
@@ -490,16 +465,18 @@ repeat:
 	inode->i_blocks = 0;
 	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
 	inode->u.ext2_i.i_flags = dir->u.ext2_i.i_flags;
+	if (S_ISLNK(mode))
+		inode->u.ext2_i.i_flags &= ~(EXT2_IMMUTABLE_FL | EXT2_APPEND_FL);
 	inode->u.ext2_i.i_faddr = 0;
-	inode->u.ext2_i.i_frag = 0;
-	inode->u.ext2_i.i_fsize = 0;
+	inode->u.ext2_i.i_frag_no = 0;
+	inode->u.ext2_i.i_frag_size = 0;
 	inode->u.ext2_i.i_file_acl = 0;
 	inode->u.ext2_i.i_dir_acl = 0;
 	inode->u.ext2_i.i_dtime = 0;
 	inode->u.ext2_i.i_block_group = i;
 	inode->i_op = NULL;
 	if (inode->u.ext2_i.i_flags & EXT2_SYNC_FL)
-		inode->i_flags |= MS_SYNC;
+		inode->i_flags |= MS_SYNCHRONOUS;
 	insert_inode_hash(inode);
 	inc_inode_version (inode, gdp, mode);
 

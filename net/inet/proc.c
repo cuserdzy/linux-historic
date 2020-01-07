@@ -17,7 +17,7 @@
  * Fixes:
  *		Alan Cox	:	UDP sockets show the rxqueue/txqueue
  *					using hint flag for the netinfo.
- *	Pauline Middelink	:	Pidentd support
+ *	Pauline Middelink	:	identd support
  *		Alan Cox	:	Make /proc safer.
  *	Erik Schoenfelder	:	/proc/net/snmp
  *		Alan Cox	:	Handle dead sockets properly.
@@ -90,12 +90,13 @@ get__netinfo(struct proto *pro, char *buffer, int format, char **start, off_t of
 			timer_active = del_timer(&sp->timer);
 			if (!timer_active)
 				sp->timer.expires = 0;
-			len+=sprintf(buffer+len, "%2d: %08lX:%04X %08lX:%04X %02X %08lX:%08lX %02X:%08lX %08X %d\n",
+			len+=sprintf(buffer+len, "%2d: %08lX:%04X %08lX:%04X %02X %08lX:%08lX %02X:%08lX %08X %d %d\n",
 				i, src, srcp, dest, destp, sp->state, 
 				format==0?sp->write_seq-sp->rcv_ack_seq:sp->rmem_alloc, 
 				format==0?sp->acked_seq-sp->copied_seq:sp->wmem_alloc,
 				timer_active, sp->timer.expires, (unsigned) sp->retransmits,
-				sp->dead?0:SOCK_INODE(sp->socket)->i_uid);
+				sp->socket?SOCK_INODE(sp->socket)->i_uid:0,
+				timer_active?sp->timeout:0);
 			if (timer_active)
 				add_timer(&sp->timer);
 			/*
@@ -141,6 +142,34 @@ int udp_get_info(char *buffer, char **start, off_t offset, int length)
 int raw_get_info(char *buffer, char **start, off_t offset, int length)
 {
 	return get__netinfo(&raw_prot, buffer,1, start, offset, length);
+}
+
+
+/*
+ *	Report socket allocation statistics [mea@utu.fi]
+ */
+int afinet_get_info(char *buffer, char **start, off_t offset, int length)
+{
+	/* From  net/socket.c  */
+	extern int socket_get_info(char *, char **, off_t, int);
+	extern struct proto packet_prot;
+
+	int len  = socket_get_info(buffer,start,offset,length);
+
+	len += sprintf(buffer+len,"SOCK_ARRAY_SIZE=%d\n",SOCK_ARRAY_SIZE);
+	len += sprintf(buffer+len,"TCP: inuse %d highest %d\n",
+		       tcp_prot.inuse, tcp_prot.highestinuse);
+	len += sprintf(buffer+len,"UDP: inuse %d highest %d\n",
+		       udp_prot.inuse, udp_prot.highestinuse);
+	len += sprintf(buffer+len,"RAW: inuse %d highest %d\n",
+		       raw_prot.inuse, raw_prot.highestinuse);
+	len += sprintf(buffer+len,"PAC: inuse %d highest %d\n",
+		       packet_prot.inuse, packet_prot.highestinuse);
+	*start = buffer + offset;
+	len -= offset;
+	if (len > length)
+		len = length;
+	return len;
 }
 
 

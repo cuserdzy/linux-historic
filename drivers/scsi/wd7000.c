@@ -6,7 +6,7 @@
  *	( as close as different hardware allows on a lowlevel-driver :-) )
  *
  *  Revised (and renamed) by John Boyd <boyd@cis.ohio-state.edu> to
- *  accomodate Eric Youngdale's modifications to scsi.c.  Nov 1992.
+ *  accommodate Eric Youngdale's modifications to scsi.c.  Nov 1992.
  *
  *  Additional changes to support scatter/gather.  Dec. 1992.  tw/jb
  *
@@ -234,7 +234,7 @@ static const Signature signatures[] = {
  *  Unfortunately, I have no idea how to properly use some of these commands,
  *  as the OEM manual does not make it clear.  I have not been able to use
  *  enable/disable unsolicited interrupts or the reset commands with any
- *  discernable effect whatsoever.  I think they may be related to certain
+ *  discernible effect whatsoever.  I think they may be related to certain
  *  ICB commands, but again, the OEM manual doesn't make that clear.
  */
 #define NO_OP             0     /* NO-OP toggles CMD_RDY bit in ASC_STAT */
@@ -606,7 +606,7 @@ static inline Scb *alloc_scbs(int needed)
     save_flags(flags);
     cli();
     while (busy)  { /* someone else is allocating */
-        sti();
+        sti();	/* Yes this is really needed here */
 	now = jiffies;  while (jiffies == now)  /* wait a jiffy */;
 	cli();
     }
@@ -615,7 +615,7 @@ static inline Scb *alloc_scbs(int needed)
     while (freescbs < needed)  {
         timeout = jiffies + WAITnexttimeout;
 	do {
-	    sti();
+	    sti();	/* Yes this is really needed here */
 	    now = jiffies;   while (jiffies == now) /* wait a jiffy */;
 	    cli();
 	}  while (freescbs < needed && jiffies <= timeout);
@@ -797,15 +797,8 @@ static void wd7000_scsi_done(Scsi_Cmnd * SCpnt)
 
 #define wd7000_intr_ack(host)  outb(0,host->iobase+ASC_INTR_ACK)
 
-void wd7000_intr_handle(int irq)
+void wd7000_intr_handle(int irq, struct pt_regs * regs)
 {
-#ifdef 0
-    /*
-     * Use irqp as the parm, and the following declaration, if
-     * SA_INTERRUPT is not used.
-     */
-    register int irq = *(((int *)irqp)-2);
-#endif
     register int flag, icmb, errstatus, icmb_status;
     register int host_error, scsi_error;
     register Scb *scb;             /* for SCSI commands */
@@ -900,7 +893,7 @@ int wd7000_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
     register short cdblen;
     Adapter *host = (Adapter *) SCpnt->host->hostdata;
 
-    cdblen = COMMAND_SIZE(cdb[0]);
+    cdblen = SCpnt->cmd_len;
     idlun = ((SCpnt->target << 5) & 0xe0) | (SCpnt->lun & 7);
     SCpnt->scsi_done = done;
     SCpnt->SCp.phase = 1;
@@ -1047,7 +1040,7 @@ int wd7000_init( Adapter *host )
         printk("wd7000_init: can't get IRQ %d.\n", host->irq);
 	return 0;
     }
-    if (request_dma(host->dma))  {
+    if (request_dma(host->dma,"wd7000"))  {
         printk("wd7000_init: can't get DMA channel %d.\n", host->dma);
 	free_irq(host->irq);
 	return 0;
@@ -1162,7 +1155,7 @@ int wd7000_detect(Scsi_Host_Template * tpnt)
                 printk("using IO %xh IRQ %d DMA %d.\n",
 		       host->iobase, host->irq, host->dma);
 
-		snarf_region(host->iobase, 4); /* Register our ports */
+		request_region(host->iobase, 4,"wd7000"); /* Register our ports */
 		/*
 		 *  For boards before rev 6.0, scatter/gather isn't supported.
 		 */
@@ -1189,7 +1182,7 @@ int wd7000_abort(Scsi_Cmnd * SCpnt)
 
     if (inb(host->iobase+ASC_STAT) & INT_IM)  {
         printk("wd7000_abort: lost interrupt\n");
-	wd7000_intr_handle(host->irq);
+	wd7000_intr_handle(host->irq, NULL);
 	return SCSI_ABORT_SUCCESS;
     }
 
@@ -1203,18 +1196,6 @@ int wd7000_abort(Scsi_Cmnd * SCpnt)
 int wd7000_reset(Scsi_Cmnd * SCpnt)
 {
     return SCSI_RESET_PUNT;
-}
-
-
-/*
- *  The info routine in the WD7000 structure isn't per-adapter, so it can't
- *  really return any useful information about an adapter.  Because of this,
- *  I'm no longer using it to return rev. level.
- */
-const char *wd7000_info(void)
-{
-    static char info[] = "Western Digital WD-7000";
-    return info;
 }
 
 

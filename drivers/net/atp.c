@@ -74,7 +74,6 @@ static char *version =
 	interpretations of the device registers.
 */
 
-#include <linux/config.h>		/* Used only to override default values. */
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/types.h>
@@ -89,7 +88,7 @@ static char *version =
 #include <asm/bitops.h>
 #include <asm/io.h>
 #include <asm/dma.h>
-#include <errno.h>
+#include <linux/errno.h>
 
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -114,7 +113,7 @@ extern struct device *irq2dev_map[16];
 
 #ifndef HAVE_PORTRESERVE
 #define check_region(ioaddr, size)		0
-#define snarf_region(ioaddr, size);		do ; while (0)
+#define request_region(ioaddr, size,name)	do ; while (0)
 #endif
 
 /* use 0 for production, 1 for verification, >2 for debug */
@@ -138,7 +137,7 @@ static void hardware_init(struct device *dev);
 static void write_packet(short ioaddr, int length, unsigned char *packet, int mode);
 static void trigger_send(short ioaddr, int length);
 static int	net_send_packet(struct sk_buff *skb, struct device *dev);
-static void net_interrupt(int reg_ptr);
+static void net_interrupt(int irq, struct pt_regs *regs);
 static void net_rx(struct device *dev);
 static void read_block(short ioaddr, int length, unsigned char *buffer, int data_mode);
 static int net_close(struct device *dev);
@@ -479,9 +478,8 @@ net_send_packet(struct sk_buff *skb, struct device *dev)
 /* The typical workload of the driver:
    Handle the network interface interrupts. */
 static void
-net_interrupt(int reg_ptr)
+net_interrupt(int irq, struct pt_regs * regs)
 {
-	int irq = -(((struct pt_regs *)reg_ptr)->orig_eax+2);
 	struct device *dev = (struct device *)(irq2dev_map[irq]);
 	struct net_local *lp;
 	int ioaddr, status, boguscount = 20;

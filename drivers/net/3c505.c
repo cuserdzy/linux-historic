@@ -56,7 +56,6 @@
 
 #define ELP_NEED_HARD_RESET 0
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/string.h>
@@ -666,12 +665,11 @@ static void receive_packet(struct device * dev,
  *
  ******************************************************/
 
-static void elp_interrupt(int reg_ptr)
+static void elp_interrupt(int irq, struct pt_regs *regs)
 
 {
   int len;
   int dlen;
-  int irq = -(((struct pt_regs *)reg_ptr)->orig_eax+2);
   struct device *dev;
   elp_device * adapter;
   int timeout;

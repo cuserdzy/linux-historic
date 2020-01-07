@@ -29,7 +29,6 @@
 #define NR_FILE 1024	/* this can well be larger on a larger system */
 #define NR_SUPER 32
 #define NR_IHASH 131
-#define NR_FILE_LOCKS 64
 #define BLOCK_SIZE 1024
 #define BLOCK_SIZE_BITS 10
 
@@ -64,12 +63,15 @@ extern unsigned long name_cache_init(unsigned long start, unsigned long end);
 /*
  * These are the fs-independent mount-flags: up to 16 flags are supported
  */
-#define MS_RDONLY    1 /* mount read-only */
-#define MS_NOSUID    2 /* ignore suid and sgid bits */
-#define MS_NODEV     4 /* disallow access to device special files */
-#define MS_NOEXEC    8 /* disallow program execution */
-#define MS_SYNC     16 /* writes are synced at once */
-#define	MS_REMOUNT  32 /* alter flags of a mounted FS */
+#define MS_RDONLY	 1 /* mount read-only */
+#define MS_NOSUID	 2 /* ignore suid and sgid bits */
+#define MS_NODEV	 4 /* disallow access to device special files */
+#define MS_NOEXEC	 8 /* disallow program execution */
+#define MS_SYNCHRONOUS	16 /* writes are synced at once */
+#define MS_REMOUNT	32 /* alter flags of a mounted FS */
+
+#define S_APPEND    256 /* append-only file */
+#define S_IMMUTABLE 512 /* immutable file */
 
 /*
  * Flags that can be altered by MS_REMOUNT
@@ -94,7 +96,10 @@ extern unsigned long name_cache_init(unsigned long start, unsigned long end);
 #define IS_NOSUID(inode) ((inode)->i_flags & MS_NOSUID)
 #define IS_NODEV(inode) ((inode)->i_flags & MS_NODEV)
 #define IS_NOEXEC(inode) ((inode)->i_flags & MS_NOEXEC)
-#define IS_SYNC(inode) ((inode)->i_flags & MS_SYNC)
+#define IS_SYNC(inode) ((inode)->i_flags & MS_SYNCHRONOUS)
+
+#define IS_APPEND(inode) ((inode)->i_flags & S_APPEND)
+#define IS_IMMUTABLE(inode) ((inode)->i_flags & S_IMMUTABLE)
 
 /* the read-only stuff doesn't really belong here, but any other place is
    probably as bad and I don't want to create yet another include file. */
@@ -120,13 +125,6 @@ extern unsigned long name_cache_init(unsigned long start, unsigned long end);
 #define BMAP_IOCTL 1	/* obsolete - kept for compatibility */
 #define FIBMAP	   1	/* bmap access */
 #define FIGETBSZ   2	/* get the block size used for bmap */
-
-/* these flags tell notify_change what is being changed */
-
-#define NOTIFY_SIZE	1
-#define NOTIFY_MODE	2
-#define NOTIFY_TIME	4
-#define NOTIFY_UIDGID	8
 
 typedef char buffer_block[BLOCK_SIZE];
 
@@ -168,6 +166,40 @@ struct buffer_head {
 
 #ifdef __KERNEL__
 
+/*
+ * Attribute flags.  These should be or-ed together to figure out what
+ * has been changed!
+ */
+#define ATTR_MODE	1
+#define ATTR_UID	2
+#define ATTR_GID	4
+#define ATTR_SIZE	8
+#define ATTR_ATIME	16
+#define ATTR_MTIME	32
+#define ATTR_CTIME	64
+#define ATTR_ATIME_SET	128
+#define ATTR_MTIME_SET	256
+
+/*
+ * This is the Inode Attributes structure, used for notify_change().  It
+ * uses the above definitions as flags, to know which values have changed.
+ * Also, in this manner, a Filesystem can look at only the values it cares
+ * about.  Basically, these are the attributes that the VFS layer can
+ * request to change from the FS layer.
+ *
+ * Derek Atkins <warlord@MIT.EDU> 94-10-20
+ */
+struct iattr {
+	unsigned int	ia_valid;
+	umode_t		ia_mode;
+	uid_t		ia_uid;
+	gid_t		ia_gid;
+	off_t		ia_size;
+	time_t		ia_atime;
+	time_t		ia_mtime;
+	time_t		ia_ctime;
+};
+
 struct inode {
 	dev_t		i_dev;
 	unsigned long	i_ino;
@@ -193,12 +225,13 @@ struct inode {
 	struct inode * i_hash_next, * i_hash_prev;
 	struct inode * i_bound_to, * i_bound_by;
 	struct inode * i_mount;
-	struct socket * i_socket;
 	unsigned short i_count;
+	unsigned short i_wcount;
 	unsigned short i_flags;
 	unsigned char i_lock;
 	unsigned char i_dirt;
 	unsigned char i_pipe;
+	unsigned char i_sock;
 	unsigned char i_seek;
 	unsigned char i_update;
 	union {
@@ -213,13 +246,14 @@ struct inode {
 		struct nfs_inode_info nfs_i;
 		struct xiafs_inode_info xiafs_i;
 		struct sysv_inode_info sysv_i;
+		struct socket socket_i;
 		void * generic_ip;
 	} u;
 };
 
 struct file {
 	mode_t f_mode;
-	off_t f_pos;
+	loff_t f_pos;
 	unsigned short f_flags;
 	unsigned short f_count;
 	off_t f_reada;
@@ -227,11 +261,13 @@ struct file {
 	int f_owner;		/* pid or -pgrp where SIGIO should be sent */
 	struct inode * f_inode;
 	struct file_operations * f_op;
+	unsigned long f_version;
 	void *private_data;	/* needed for tty driver, and maybe others */
 };
 
 struct file_lock {
 	struct file_lock *fl_next;	/* singly linked list */
+	struct file_lock *fl_nextlink;
 	struct task_struct *fl_owner;	/* NULL if on free list, for sanity checks */
         unsigned int fl_fd;             /* File descriptor for this lock */
 	struct wait_queue *fl_wait;
@@ -266,6 +302,7 @@ struct super_block {
 	unsigned char s_lock;
 	unsigned char s_rd_only;
 	unsigned char s_dirt;
+	struct file_system_type *s_type;
 	struct super_operations *s_op;
 	unsigned long s_flags;
 	unsigned long s_magic;
@@ -324,7 +361,7 @@ struct inode_operations {
 
 struct super_operations {
 	void (*read_inode) (struct inode *);
-	int (*notify_change) (int flags, struct inode *);
+	int (*notify_change) (struct inode *, struct iattr *);
 	void (*write_inode) (struct inode *);
 	void (*put_inode) (struct inode *);
 	void (*put_super) (struct super_block *);
@@ -428,10 +465,12 @@ extern void sync_dev(dev_t dev);
 extern int fsync_dev(dev_t dev);
 extern void sync_supers(dev_t dev);
 extern int bmap(struct inode * inode,int block);
-extern int notify_change(int flags, struct inode * inode);
+extern int notify_change(struct inode *, struct iattr *);
 extern int namei(const char * pathname, struct inode ** res_inode);
 extern int lnamei(const char * pathname, struct inode ** res_inode);
 extern int permission(struct inode * inode,int mask);
+extern int get_write_access(struct inode * inode);
+extern void put_write_access(struct inode * inode);
 extern int open_namei(const char * pathname, int flag, int mode,
 	struct inode ** res_inode, struct inode * base);
 extern int do_mknod(const char * filename, int mode, dev_t dev);
@@ -475,6 +514,9 @@ extern int file_fsync(struct inode *, struct file *);
 
 extern void dcache_add(struct inode *, const char *, int, unsigned long);
 extern int dcache_lookup(struct inode *, const char *, int, unsigned long *);
+
+extern int inode_change_ok(struct inode *, struct iattr *);
+extern void inode_setattr(struct inode *, struct iattr *);
 
 extern inline struct inode * iget(struct super_block * sb,int nr)
 {

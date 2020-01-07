@@ -13,7 +13,7 @@
 #include "scsi_ioctl.h"
 
 #define MAX_RETRIES 5	
-#define MAX_TIMEOUT 200
+#define MAX_TIMEOUT 900
 #define MAX_BUF 4096
 
 #define max(a,b) (((a) > (b)) ? (a) : (b))
@@ -33,12 +33,17 @@ static int ioctl_probe(struct Scsi_Host * host, void *buffer)
 	
 	if ((temp = host->hostt->present) && buffer) {
 		len = get_fs_long ((unsigned long *) buffer);
-		string = host->hostt->info();
-		slen = strlen(string);
-		if (len > slen)
-			len = slen + 1;
-		verify_area(VERIFY_WRITE, buffer, len);
-		memcpy_tofs (buffer, string, len);
+		if(host->hostt->info)
+		  string = host->hostt->info(host);
+		else 
+		  string = host->hostt->name;
+		if(string) {
+		  slen = strlen(string);
+		  if (len > slen)
+		    len = slen + 1;
+		  verify_area(VERIFY_WRITE, buffer, len);
+		  memcpy_tofs (buffer, string, len);
+		}
 	}
 	return temp;
 }
@@ -163,6 +168,7 @@ static int ioctl_command(Scsi_Device *dev, void *buffer)
 	  if (buf_needed > MAX_BUF) buf_needed = MAX_BUF;
 	  buf = (char *) scsi_malloc(buf_needed);
 	  if (!buf) return -ENOMEM;
+	  memset(buf, 0, buf_needed);
 	} else
 	  buf = NULL;
 

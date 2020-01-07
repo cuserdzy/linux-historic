@@ -1,13 +1,6 @@
 /*
- *	buslogic.h	(C) 1993 David B. Gentzel
- *	Low-level scsi driver for BusLogic adapters
- *	by David B. Gentzel, Whitfield Software Services, Carnegie, PA
- *	    (gentzel@nova.enet.dec.com)
- *	Thanks to BusLogic for providing the necessary documentation
- *
- *	The original version of this driver was derived from aha1542.[ch] which
- *	is Copyright (C) 1992 Tommy Thorn.  Much has been reworked, but most of
- *	basic structure and substantial chunks of code still remain.
+ *	buslogic.h	Copyright (C) 1993, 1994 David B. Gentzel
+ *	See buslogic.c for more information.
  */
 
 #ifndef _BUSLOGIC_H
@@ -15,16 +8,14 @@
 int buslogic_detect(Scsi_Host_Template *);
 int buslogic_queuecommand(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
 int buslogic_abort(Scsi_Cmnd *);
-const char *buslogic_info(void);
+const char *buslogic_info(struct Scsi_Host *);
 int buslogic_reset(Scsi_Cmnd *);
 int buslogic_biosparam(Disk *, int, int *);
 
-#define BUSLOGIC_CMDLUN 4	/* ??? */
-
-#define BUSLOGIC { NULL, 			\
+#define BUSLOGIC { NULL, NULL,			\
 		   "BusLogic",			\
 		   buslogic_detect,		\
-		   NULL,			\
+		   0,	/* no release func */	\
 		   buslogic_info,		\
 		   0,	/* no command func */	\
 		   buslogic_queuecommand,	\
@@ -35,7 +26,7 @@ int buslogic_biosparam(Disk *, int, int *);
 		   0,	/* set by driver */	\
 		   0,	/* set by driver */	\
 		   0,	/* set by driver */	\
-		   BUSLOGIC_CMDLUN,		\
+		   0,	/* set by driver */	\
 		   0,				\
 		   0,	/* set by driver */	\
 		   ENABLE_CLUSTERING		\
@@ -58,30 +49,42 @@ int buslogic_biosparam(Disk *, int, int *);
 #define BD_ABORT	0x0001
 #define BD_COMMAND	0x0002
 #define BD_DETECT	0x0004
-#define BD_INTERRUPT	0x0008
-#define BD_RESET	0x0010
+#define BD_ERRORS	0x0008
+#define BD_INTERRUPT	0x0010
+#define BD_IO		0x0020
+#define BD_RESET	0x0040
+#define BD_UNDOCUMENTED	0x0080
 
 /* I/O Port interface */
 /* READ */
 #define STATUS(base) (base)
 #define DACT 0x80		/* Diagnostic Active */
-#define DFAIL 0x40		/* Diagonostic Failure */
+#define DFAIL 0x40		/* Diagnostic Failure */
 #define INREQ 0x20		/* Initialization Required */
 #define HARDY 0x10		/* Host Adapter Ready */
 #define CPRBSY 0x08		/* Command/Parameter Register Busy */
 #define DIRRDY 0x04		/* Data In Register Ready */
+				/* 0x02 is reserved */
 #define CMDINV 0x01		/* Command Invalid */
-#define STATMASK 0xFD		/* 0x02 is reserved */
 
 #define DATA_IN(base) (STATUS(base) + 1)
 
 #define INTERRUPT(base) (STATUS(base) + 2)
 #define INTV 0x80		/* Interrupt Valid */
+				/* 0x70 are reserved */
 #define RSTS 0x08		/* SCSI Reset State */
 #define CMDC 0x04		/* Command Complete */
 #define MBOR 0x02		/* Mailbox Out Ready */
 #define IMBL 0x01		/* Incoming Mailbox Loaded */
-#define INTRMASK 0x8F		/* 0x70 are reserved */
+#define INTRMASK 0x8F
+
+/* This undocumented port returns a bitmask indicating geometry translation. */
+#define GEOMETRY(base) (STATUS(base) + 3)
+#define GEO_GT_1GB 0x80		/* > 1GB under DOS geometry mapping */
+				/* 0x70 are unknown */
+#define GEO_XLATION_S_D1 0x0C	/* Disk 1 geometry ("S" models only) */
+#define GEO_XLATION_S_D0 0x03	/* Disk 0 geometry ("S" models only) */
+
 
 /* WRITE */
 #define CONTROL(base) STATUS(base)
@@ -89,6 +92,7 @@ int buslogic_biosparam(Disk *, int, int *);
 #define RSOFT 0x40		/* Soft Reset */
 #define RINT 0x20		/* Interrupt Reset */
 #define RSBUS 0x10		/* SCSI Bus Reset */
+				/* 0x0F are reserved */
 
 #define COMMAND_PARAMETER(base) (STATUS(base) + 1)
 #define CMD_TSTCMDCINT 0x00	/* Test CMDC Interrupt */
@@ -113,10 +117,16 @@ int buslogic_biosparam(Disk *, int, int *);
 #define CMD_HA_DIAG 0x20	/* Host Adapter Diagnostic */
 #define CMD_HA_OPTIONS 0x21	/* Host Adapter Options */
 #define CMD_INITEXTMB 0x81	/* Initialize Extended Mailbox */
+#define CMD_VER_NO_LAST 0x84	/* Version Number Last Byte (undocumented) */
+#define CMD_VER_NO_LETTER 0x85	/* Version Number One Letter (undocumented) */
+#define CMD_RET_MODEL_NO 0x8B	/* Return Model Number (undocumented) */
 #define CMD_INQEXTSETUP 0x8D	/* Inquire Extended Set-up Information */
-#define CMD_WRITE_INQ_BUF 0x9A	/* Write Inquery Data Buffer
+#define CMD_ROUND_ROBIN 0x8F	/* Enable strict vs. half-assed round-robin
+				   mailbox filling (undocumented) */
+#define CMD_READ_FW_LCL_RAM 0x91/* Read Firmware Local RAM (undocumented) */
+#define CMD_WRITE_INQ_BUF 0x9A	/* Write Inquiry Data Buffer
 				   (Target Mode Only) */
-#define CMD_READ_INQ_BUF 0x9B	/* Read Inquery Data Buffer
+#define CMD_READ_INQ_BUF 0x9B	/* Read Inquiry Data Buffer
 				   (Target Mode Only) */
 
 #define MBX_NOT_IN_USE 0x00

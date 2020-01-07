@@ -101,7 +101,6 @@ static char *version =
  */
 #endif
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/types.h>
@@ -109,10 +108,10 @@ static char *version =
 #include <linux/string.h>
 #include <linux/interrupt.h>
 #include <asm/io.h>
-#include <netinet/in.h>
+#include <linux/in.h>
 #include <linux/ptrace.h>
 #include <asm/system.h>
-#include <errno.h>
+#include <linux/errno.h>
 
 #include <linux/inet.h>
 #include <linux/netdevice.h>
@@ -121,7 +120,7 @@ static char *version =
 
 #ifdef MODULE
 #include <linux/module.h>
-#include "../../tools/version.h"
+#include <linux/version.h>
 #endif
 
 /* Constant definitions for the DE-620 registers, commands and bits */
@@ -176,7 +175,7 @@ static void	de620_set_multicast_list(struct device *, int, void *);
 static int	de620_start_xmit(struct sk_buff *, struct device *);
 
 /* Dispatch from interrupts. */
-static void	de620_interrupt(int);
+static void	de620_interrupt(int, struct pt_regs *);
 static int	de620_rx_intr(struct device *);
 
 /* Initialization */
@@ -566,9 +565,8 @@ de620_start_xmit(struct sk_buff *skb, struct device *dev)
  *
  */
 static void
-de620_interrupt(int reg_ptr)
+de620_interrupt(int irq, struct pt_regs *regs)
 {
-	int irq = -(((struct pt_regs *)reg_ptr)->orig_eax+2);
 	struct device *dev = irq2dev_map[irq];
 	byte irq_status;
 	int bogus_count = 0;

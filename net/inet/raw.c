@@ -25,6 +25,8 @@
  *		Alan Cox	:	Use ttl/tos
  *		Alan Cox	:	Cleaned up old debugging
  *		Alan Cox	:	Use new kernel side addresses
+ *	Arnt Gulbrandsen	:	Fixed MSG_DONTROUTE in raw sockets.
+ *		Alan Cox	:	BSD style RAW socket demultiplexing.
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -88,35 +90,15 @@ void raw_err (int err, unsigned char *header, unsigned long daddr,
 
 /*
  *	This should be the easiest of all, all we do is
- *	copy it into a buffer.
+ *	copy it into a buffer. All demultiplexing is done
+ *	in ip.c
  */
 
-int raw_rcv(struct sk_buff *skb, struct device *dev, struct options *opt,
-	unsigned long daddr, unsigned short len, unsigned long saddr,
-	int redo, struct inet_protocol *protocol)
+int raw_rcv(struct sock *sk, struct sk_buff *skb, struct device *dev, long saddr, long daddr)
 {
-	struct sock *sk;
-
-	if (skb == NULL)
-		return(0);
-  	
-	if (protocol == NULL) 
-	{
-		kfree_skb(skb, FREE_READ);
-		return(0);
-	}
-  
-	sk = (struct sock *) protocol->data;
-	if (sk == NULL) 
-	{
-		kfree_skb(skb, FREE_READ);
-		return(0);
-	}
-
 	/* Now we need to copy this into memory. */
-
 	skb->sk = sk;
-	skb->len = len + skb->ip_hdr->ihl*sizeof(long);
+	skb->len = ntohs(skb->ip_hdr->tot_len);
 	skb->h.raw = (unsigned char *) skb->ip_hdr;
 	skb->dev = dev;
 	skb->saddr = daddr;
@@ -124,7 +106,7 @@ int raw_rcv(struct sk_buff *skb, struct device *dev, struct options *opt,
 
 	/* Charge it to the socket. */
 	
-	if (sk->rmem_alloc + skb->mem_len >= sk->rcvbuf) 
+	if(sock_queue_rcv_skb(sk,skb)<0)
 	{
 		ip_statistics.IpInDiscards++;
 		skb->sk=NULL;
@@ -132,10 +114,7 @@ int raw_rcv(struct sk_buff *skb, struct device *dev, struct options *opt,
 		return(0);
 	}
 
-	sk->rmem_alloc += skb->mem_len;
 	ip_statistics.IpInDelivers++;
-	skb_queue_tail(&sk->receive_queue,skb);
-	sk->data_ready(sk,skb->len);
 	release_sock(sk);
 	return(0);
 }
@@ -156,8 +135,11 @@ static int raw_sendto(struct sock *sk, unsigned char *from,
 	/*
 	 *	Check the flags. Only MSG_DONTROUTE is permitted.
 	 */
-	 
-	if (flags&MSG_DONTROUTE)
+
+	if (flags & MSG_OOB)		/* Mirror BSD error message compatibility */
+		return -EOPNOTSUPP;
+			 
+	if (flags & ~MSG_DONTROUTE)
 		return(-EINVAL);
 	/*
 	 *	Get and verify the address. 
@@ -188,41 +170,10 @@ static int raw_sendto(struct sock *sk, unsigned char *from,
 	if (sk->broadcast == 0 && ip_chk_addr(sin.sin_addr.s_addr)==IS_BROADCAST)
 		return -EACCES;
 
-	sk->inuse = 1;
-	skb = NULL;
-	while (skb == NULL) 
-	{
-  		if(sk->err!=0)
-  		{
-  			err= -sk->err;
-  			sk->err=0;
-  			release_sock(sk);
-  			return(err);
-  		}
-  	
-		skb = sk->prot->wmalloc(sk,
-				len + sk->prot->max_header,
-				0, GFP_KERNEL);
-		if (skb == NULL) 
-		{
-			int tmp;
-
-			if (noblock) 
-				return(-EAGAIN);
-			tmp = sk->wmem_alloc;
-			release_sock(sk);
-			cli();
-			if (tmp <= sk->wmem_alloc) {
-				interruptible_sleep_on(sk->sleep);
-				if (current->signal & ~current->blocked) {
-					sti();
-					return(-ERESTARTSYS);
-				}
-			}
-			sk->inuse = 1;
-			sti();
-		}
-	}
+	skb=sock_alloc_send_skb(sk, len+sk->prot->max_header, noblock, &err);
+	if(skb==NULL)
+		return err;
+		
 	skb->sk = sk;
 	skb->free = 1;
 	skb->localroute = sk->localroute | (flags&MSG_DONTROUTE);
@@ -273,35 +224,12 @@ static int raw_write(struct sock *sk, unsigned char *buff, int len, int noblock,
 
 static void raw_close(struct sock *sk, int timeout)
 {
-	sk->inuse = 1;
 	sk->state = TCP_CLOSE;
-
-	inet_del_protocol((struct inet_protocol *)sk->pair);
-	kfree_s((void *)sk->pair, sizeof (struct inet_protocol));
-	sk->pair = NULL;
-	release_sock(sk);
 }
 
 
 static int raw_init(struct sock *sk)
 {
-	struct inet_protocol *p;
-
-	p = (struct inet_protocol *) kmalloc(sizeof (*p), GFP_KERNEL);
-	if (p == NULL)
-		return(-ENOMEM);
-
-	p->handler = raw_rcv;
-	p->protocol = sk->protocol;
-	p->data = (void *)sk;
-	p->err_handler = raw_err;
-	p->name="USER";
-	p->frag_handler = NULL;	/* For now */
-	inet_add_protocol(p);
-   
-	/* We need to remember this somewhere. */
-	sk->pair = (struct sock *)p;
-
 	return(0);
 }
 
@@ -320,6 +248,9 @@ int raw_recvfrom(struct sock *sk, unsigned char *to, int len,
 	int err;
 	int truesize;
 
+	if (flags & MSG_OOB)
+		return -EOPNOTSUPP;
+		
 	if (sk->shutdown & RCV_SHUTDOWN) 
 		return(0);
 
@@ -370,10 +301,10 @@ struct proto raw_prot = {
 	udp_connect,
 	NULL,
 	ip_queue_xmit,
-	ip_retransmit,
 	NULL,
 	NULL,
-	raw_rcv,
+	NULL,
+	NULL,
 	datagram_select,
 	NULL,
 	raw_init,
@@ -383,5 +314,6 @@ struct proto raw_prot = {
 	128,
 	0,
 	{NULL,},
-	"RAW"
+	"RAW",
+	0, 0
 };

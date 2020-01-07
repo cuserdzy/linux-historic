@@ -51,7 +51,7 @@
  * equivalent (my sample board had part second sourced from ZILOG).
  * NCR's recommended "Pseudo-DMA" architecture is used, where 
  * a PAL drives the DMA signals on the 5380 allowing fast, blind
- * transfers with propper handshaking. 
+ * transfers with proper handshaking. 
  */
 
 /*
@@ -78,13 +78,13 @@
 
 #define T_STATUS_REG_OFFSET	0x1c20	/* ro */
 #define T_ST_BOOT		0x80	/* Boot switch */
-#define T_ST_S3			0x40	/* User setable switches, */
+#define T_ST_S3			0x40	/* User settable switches, */
 #define T_ST_S2			0x20	/* read 0 when switch is on, 1 off */
 #define T_ST_S1			0x10
 #define T_ST_PS2		0x08	/* Set for Microchannel 228 */
 #define T_ST_RDY		0x04	/* 5380 DRQ */
 #define T_ST_TIM		0x02	/* indicates 40us watchdog timer fired */
-#define T_ST_ZERO		0x01	/* Allways zero */
+#define T_ST_ZERO		0x01	/* Always zero */
 
 #define T_5380_OFFSET		0x1d00	/* 8 registers here, see NCR5380.h */
 
@@ -94,7 +94,6 @@
 int t128_abort(Scsi_Cmnd *);
 int t128_biosparam(Disk *, int, int*);
 int t128_detect(Scsi_Host_Template *);
-const char *t128_info(void);
 int t128_queue_command(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
 int t128_reset(Scsi_Cmnd *);
 
@@ -118,8 +117,8 @@ int t128_reset(Scsi_Cmnd *);
 
 #ifdef HOSTS_C
 
-#define TRANTOR_T128 {NULL, "Trantor T128/T128F/T228", t128_detect, NULL,  \
-	t128_info,							\
+#define TRANTOR_T128 {NULL, NULL, "Trantor T128/T128F/T228", t128_detect, NULL,  \
+	NULL,							\
 	NULL, t128_queue_command, t128_abort, t128_reset, NULL, 	\
 	t128_biosparam, 						\
 	/* can queue */ CAN_QUEUE, /* id */ 7, SG_ALL,			\

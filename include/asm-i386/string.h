@@ -122,7 +122,7 @@ __asm__ __volatile__(
 return __res;
 }
 
-extern inline char * strchr(const char * s,char c)
+extern inline char * strchr(const char * s, int c)
 {
 register char * __res;
 __asm__ __volatile__(
@@ -140,7 +140,7 @@ __asm__ __volatile__(
 return __res;
 }
 
-extern inline char * strrchr(const char * s,char c)
+extern inline char * strrchr(const char * s, int c)
 {
 register char * __res;
 __asm__ __volatile__(
@@ -337,7 +337,7 @@ __asm__ __volatile__(
 return __res;
 }
 
-extern inline void * memcpy(void * to, const void * from, size_t n)
+extern inline void * __memcpy(void * to, const void * from, size_t n)
 {
 __asm__ __volatile__(
 	"cld\n\t"
@@ -356,6 +356,51 @@ __asm__ __volatile__(
 	: "cx","di","si","memory");
 return (to);
 }
+
+/*
+ * This looks horribly ugly, but the compiler can optimize it totally,
+ * as the count is constant.
+ */
+extern inline void * __constant_memcpy(void * to, const void * from, size_t n)
+{
+	switch (n) {
+		case 0:
+			return to;
+		case 1:
+			*(unsigned char *)to = *(unsigned char *)from;
+			return to;
+		case 2:
+			*(unsigned short *)to = *(unsigned short *)from;
+			return to;
+		case 3:
+			*(unsigned short *)to = *(unsigned short *)from;
+			*(2+(unsigned char *)to) = *(2+(unsigned char *)from);
+			return to;
+		case 4:
+			*(unsigned long *)to = *(unsigned long *)from;
+			return to;
+	}
+#define COMMON(x) \
+__asm__("cld\n\t" \
+	"rep ; movsl" \
+	x \
+	: /* no outputs */ \
+	: "c" (n/4),"D" ((long) to),"S" ((long) from) \
+	: "cx","di","si","memory");
+
+	switch (n % 4) {
+		case 0: COMMON(""); return to;
+		case 1: COMMON("\n\tmovsb"); return to;
+		case 2: COMMON("\n\tmovsw"); return to;
+		case 3: COMMON("\n\tmovsw\n\tmovsb"); return to;
+	}
+#undef COMMON
+}
+
+#define memcpy(t, f, n) \
+(__builtin_constant_p(n) ? \
+ __constant_memcpy((t),(f),(n)) : \
+ __memcpy((t),(f),(n)))
 
 extern inline void * memmove(void * dest,const void * src, size_t n)
 {
@@ -397,7 +442,7 @@ __asm__ __volatile__(
 return __res;
 }
 
-extern inline void * memchr(const void * cs,char c,size_t count)
+extern inline void * memchr(const void * cs,int c,size_t count)
 {
 register void * __res;
 if (!count)
@@ -414,7 +459,7 @@ __asm__ __volatile__(
 return __res;
 }
 
-extern inline void * memset(void * s,char c,size_t count)
+extern inline void * __memset_generic(void * s, char c,size_t count)
 {
 __asm__ __volatile__(
 	"cld\n\t"
@@ -424,6 +469,82 @@ __asm__ __volatile__(
 	:"a" (c),"D" (s),"c" (count)
 	:"cx","di","memory");
 return s;
+}
+
+/* we might want to write optimized versions of these later */
+#define __constant_c_memset(s,c,count) __memset_generic((s),(unsigned char)(c),(count))
+#define __constant_count_memset(s,c,count) __memset_generic((s),(c),(count))
+
+/*
+ * This looks horribly ugly, but the compiler can optimize it totally,
+ * as we by now know that both pattern and count is constant..
+ */
+extern inline void * __constant_c_and_count_memset(void * s, unsigned long pattern, size_t count)
+{
+	switch (count) {
+		case 0:
+			return s;
+		case 1:
+			*(unsigned char *)s = pattern;
+			return s;
+		case 2:
+			*(unsigned short *)s = pattern;
+			return s;
+		case 3:
+			*(unsigned short *)s = pattern;
+			*(2+(unsigned char *)s) = pattern;
+			return s;
+		case 4:
+			*(unsigned long *)s = pattern;
+			return s;
+	}
+#define COMMON(x) \
+__asm__("cld\n\t" \
+	"rep ; stosl" \
+	x \
+	: /* no outputs */ \
+	: "a" (pattern),"c" (count/4),"D" ((long) s) \
+	: "cx","di","memory")
+
+	switch (count % 4) {
+		case 0: COMMON(""); return s;
+		case 1: COMMON("\n\tstosb"); return s;
+		case 2: COMMON("\n\tstosw"); return s;
+		case 3: COMMON("\n\tstosw\n\tstosb"); return s;
+	}
+#undef COMMON
+}
+
+#define __constant_c_x_memset(s, c, count) \
+(__builtin_constant_p(count) ? \
+ __constant_c_and_count_memset((s),(c),(count)) : \
+ __constant_c_memset((s),(c),(count)))
+
+#define __memset(s, c, count) \
+(__builtin_constant_p(count) ? \
+ __constant_count_memset((s),(c),(count)) : \
+ __memset_generic((s),(c),(count)))
+
+#define memset(s, c, count) \
+(__builtin_constant_p(c) ? \
+ __constant_c_x_memset((s),(0x01010101UL*(unsigned char)c),(count)) : \
+ __memset((s),(c),(count)))
+
+/*
+ * find the first occurrence of byte 'c', or 1 past the area if none
+ */
+extern inline void * memscan(void * addr, int c, size_t size)
+{
+	if (!size)
+		return addr;
+	__asm__("cld
+		repnz; scasb
+		jnz 1f
+		dec %%edi
+1:		"
+		: "=D" (addr), "=c" (size)
+		: "0" (addr), "1" (size), "a" (c));
+	return addr;
 }
 
 #endif

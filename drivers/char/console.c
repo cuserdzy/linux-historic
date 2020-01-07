@@ -1,5 +1,5 @@
 /*
- *  linux/kernel/console.c
+ *  linux/drivers/char/console.c
  *
  *  Copyright (C) 1991, 1992  Linus Torvalds
  */
@@ -9,16 +9,35 @@
  *
  * This module exports the console io functions:
  * 
- *	'long con_init(long)'
- *	'int con_open(struct tty_struct *tty, struct file * filp)'
- * 	'void update_screen(int new_console)'
- * 	'void blank_screen(void)'
- * 	'void unblank_screen(void)'
+ *     'void do_keyboard_interrupt(void)'
  *
- *      'int  con_get_font(char *)' 
- *      'int  con_set_font(char *)' 
- *      'int  con_get_trans(char *)'
- *      'int  con_set_trans(char *)'
+ *     'int vc_allocate(unsigned int console)' 
+ *     'int vc_cons_allocated(unsigned int console)'
+ *     'int vc_resize(unsigned long lines, unsigned long cols)'
+ *     'void vc_disallocate(unsigned int currcons)'
+ *
+ *     'long con_init(long)'
+ *     'int con_open(struct tty_struct *tty, struct file * filp)'
+ *     'void con_write(struct tty_struct * tty)'
+ *     'void console_print(const char * b)'
+ *     'void update_screen(int new_console)'
+ *
+ *     'void do_blank_screen(int)'
+ *     'void do_unblank_screen(void)'
+ *     'void poke_blanked_console(void)'
+ *     'void scrollback(int lines)'
+ *     'void scrollfront(int lines)'
+ *     'int do_screendump(int arg, int mode)'
+ *
+ *     'int con_get_font(char *)' 
+ *     'int con_set_font(char *)' 
+ *     'int con_get_trans(char *)'
+ *     'int con_set_trans(char *)'
+ *
+ *     'int set_selection(const int arg)'
+ *     'int paste_selection(struct tty_struct *tty)'
+ *     'int sel_loadlut(const int arg)'
+ *     'int mouse_reporting(void)'
  * 
  * Hopefully this will be a rather complete VT102 implementation.
  *
@@ -27,7 +46,8 @@
  * Virtual Consoles, Screen Blanking, Screen Dumping, Color, Graphics
  *   Chars, and VT100 enhancements by Peter MacDonald.
  *
- * Copy and paste function by Andrew Haylett.
+ * Copy and paste function by Andrew Haylett,
+ *   some enhancements by Alessandro Rubini.
  *
  * User definable mapping table and font loading by Eugene G. Crosser,
  * <crosser@pccross.msk.su>
@@ -35,11 +55,18 @@
  * Code to check for different video-cards mostly by Galen Hunt,
  * <g-hunt@ee.utah.edu>
  *
+ * Rudimentary ISO 10646/Unicode/UTF-8 character set support by
+ * Markus Kuhn, <mskuhn@immd4.informatik.uni-erlangen.de>.
+ *
+ * Dynamic allocation of consoles, aeb@cwi.nl, May 1994
+ * Resizing of consoles, aeb, 940926
+ *
  * Code for xterm like mouse click reporting by Peter Orbaek 20-Jul-94
  * <poe@daimi.aau.dk>
  *
  */
 
+#define BLANK 0x0020
 #define CAN_LOAD_EGA_FONTS    /* undefine if the user must not do this */
 
 /*
@@ -59,6 +86,7 @@
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/kd.h>
+#include <linux/malloc.h>
 #include <linux/major.h>
 
 #include <asm/io.h>
@@ -69,15 +97,49 @@
 #include "kbd_kern.h"
 #include "vt_kern.h"
 
+#ifdef __alpha__
+ 
+static inline void scrwritew(unsigned short val, unsigned short * addr)
+{
+	if ((long) addr < 0)
+		*addr = val;
+	else
+		writew(val, (unsigned long) addr);
+}
+
+static inline unsigned short scrreadw(unsigned short * addr)
+{
+	if ((long) addr < 0)
+		return *addr;
+	return readw((unsigned long) addr);
+}
+
+#else
+
+static inline void scrwritew(unsigned short val, unsigned short * addr)
+{
+	*addr = val;
+}
+
+static inline unsigned short scrreadw(unsigned short * addr)
+{
+	return *addr;
+}
+
+#endif
+
+#define writew(x,y) scrwritew((x),(y))
+#define readw(x) scrreadw(x)
+
 #ifndef MIN
 #define MIN(a,b)	((a) < (b) ? (a) : (b))
 #endif
 
 struct tty_driver console_driver;
 static int console_refcount;
-static struct tty_struct *console_table[NR_CONSOLES];
-static struct termios *console_termios[NR_CONSOLES];
-static struct termios *console_termios_locked[NR_CONSOLES];
+static struct tty_struct *console_table[MAX_NR_CONSOLES];
+static struct termios *console_termios[MAX_NR_CONSOLES];
+static struct termios *console_termios_locked[MAX_NR_CONSOLES];
 
 #ifdef CONFIG_SELECTION
 #include <linux/ctype.h>
@@ -89,33 +151,58 @@ static void clear_selection(void);
 static void highlight_pointer(const int currcons, const int where);
 
 /* Variables for selection control. */
-#define SEL_BUFFER_SIZE 4096
-static int sel_cons;
+/* Use a dynamic buffer, instead of static (Dec 1994) */
+static int sel_cons = 0;
 static int sel_start = -1;
 static int sel_end;
-static char sel_buffer[SEL_BUFFER_SIZE] = { '\0' };
+static char *sel_buffer = NULL;
 #endif /* CONFIG_SELECTION */
 
 #define NPAR 16
 
+static void con_setsize(unsigned long rows, unsigned long cols);
+static void vc_init(unsigned int console, unsigned long rows, unsigned long cols,
+		    int do_clear);
+static void get_scrmem(int currcons);
+static void set_scrmem(int currcons, long offset);
+static void set_origin(int currcons);
+static void blank_screen(void);
+static void unblank_screen(void);
+void poke_blanked_console(void);
+static void gotoxy(int currcons, int new_x, int new_y);
+static void save_cur(int currcons);
+static inline void set_cursor(int currcons);
+static void reset_terminal(int currcons, int do_clear);
+extern void reset_vc(unsigned int new_console);
 extern void vt_init(void);
 extern void register_console(void (*proc)(const char *));
+extern void vesa_blank(void);
+extern void vesa_unblank(void);
 extern void compute_shiftstate(void);
+extern int conv_uni_to_pc(unsigned long ucs);
 
-unsigned long	video_num_columns;		/* Number of text columns	*/
-unsigned long	video_num_lines;		/* Number of text lines		*/
-
+/* Description of the hardware situation */
 static unsigned char	video_type;		/* Type of display being used	*/
 static unsigned long	video_mem_base;		/* Base of video memory		*/
 static unsigned long	video_mem_term;		/* End of video memory		*/
-static unsigned long	video_size_row;		/* Bytes per row		*/
-static unsigned char	video_page;		/* Initial video page		*/
-static unsigned short	video_port_reg;		/* Video register select port	*/
-static unsigned short	video_port_val;		/* Video register value port	*/
+static unsigned char	video_page;		/* Initial video page (unused)  */
+       unsigned short	video_port_reg;		/* Video register select port	*/
+       unsigned short	video_port_val;		/* Video register value port	*/
+static unsigned long	video_num_columns;	/* Number of text columns	*/
+static unsigned long	video_num_lines;	/* Number of text lines		*/
+static unsigned long	video_size_row;
+static unsigned long	video_screen_size;
 static int can_do_color = 0;
-static int printable = 0;
+static int printable = 0;			/* Is console ready for printing? */
 
-static struct {
+static unsigned short *vc_scrbuf[MAX_NR_CONSOLES];
+
+static int console_blanked = 0;
+static int blankinterval = 10*60*HZ;
+static long blank_origin, blank__origin, unblank_origin;
+
+struct vc_data {
+	unsigned long	vc_screenbuf_size;
 	unsigned short	vc_video_erase_char;	/* Background erase character */
 	unsigned char	vc_attr;		/* Current attributes */
 	unsigned char	vc_def_color;		/* Default colors */
@@ -144,6 +231,7 @@ static struct {
 	unsigned long	vc_decawm	: 1;	/* Autowrap Mode */
 	unsigned long	vc_deccm	: 1;	/* Cursor Visible */
 	unsigned long	vc_decim	: 1;	/* Insert Mode */
+	unsigned long	vc_deccolm	: 1;	/* 80/132 Column Mode */
 	/* attribute flags */
 	unsigned long	vc_intensity	: 2;	/* 0=half-bright, 1=normal, 2=bold */
 	unsigned long	vc_underline	: 1;
@@ -156,7 +244,12 @@ static struct {
 	/* misc */
 	unsigned long	vc_ques		: 1;
 	unsigned long	vc_need_wrap	: 1;
+	unsigned long	vc_has_scrolled : 1;	/* Info for unblank_screen */
+	unsigned long	vc_kmalloced	: 1;	/* kfree_s() needed */
 	unsigned long	vc_report_mouse : 2;
+	unsigned char	vc_utf		: 1;	/* Unicode UTF-8 encoding */
+	unsigned char	vc_utf_count;
+	unsigned long	vc_utf_char;
 	unsigned long	vc_tab_stop[5];		/* Tab stops. 160 columns. */
 	unsigned char * vc_translate;
 	unsigned char *	vc_G0_charset;
@@ -164,65 +257,237 @@ static struct {
 	unsigned char *	vc_saved_G0;
 	unsigned char *	vc_saved_G1;
 	/* additional information is in vt_kern.h */
-} vc_cons [NR_CONSOLES];
+};
 
-unsigned short *vc_scrbuf[NR_CONSOLES];
-static unsigned short * vc_scrmembuf;
-static int console_blanked = 0;
+static struct vc {
+	struct vc_data *d;
 
-#define origin		(vc_cons[currcons].vc_origin)
-#define scr_end		(vc_cons[currcons].vc_scr_end)
-#define pos		(vc_cons[currcons].vc_pos)
-#define top		(vc_cons[currcons].vc_top)
-#define bottom		(vc_cons[currcons].vc_bottom)
-#define x		(vc_cons[currcons].vc_x)
-#define y		(vc_cons[currcons].vc_y)
-#define vc_state		(vc_cons[currcons].vc_state)
-#define npar		(vc_cons[currcons].vc_npar)
-#define par		(vc_cons[currcons].vc_par)
-#define ques		(vc_cons[currcons].vc_ques)
-#define attr		(vc_cons[currcons].vc_attr)
-#define saved_x		(vc_cons[currcons].vc_saved_x)
-#define saved_y		(vc_cons[currcons].vc_saved_y)
-#define translate	(vc_cons[currcons].vc_translate)
-#define G0_charset	(vc_cons[currcons].vc_G0_charset)
-#define G1_charset	(vc_cons[currcons].vc_G1_charset)
-#define saved_G0	(vc_cons[currcons].vc_saved_G0)
-#define saved_G1	(vc_cons[currcons].vc_saved_G1)
-#define video_mem_start	(vc_cons[currcons].vc_video_mem_start)
-#define video_mem_end	(vc_cons[currcons].vc_video_mem_end)
-#define video_erase_char (vc_cons[currcons].vc_video_erase_char)	
-#define disp_ctrl	(vc_cons[currcons].vc_disp_ctrl)
-#define toggle_meta	(vc_cons[currcons].vc_toggle_meta)
-#define decscnm		(vc_cons[currcons].vc_decscnm)
-#define decom		(vc_cons[currcons].vc_decom)
-#define decawm		(vc_cons[currcons].vc_decawm)
-#define deccm		(vc_cons[currcons].vc_deccm)
-#define decim		(vc_cons[currcons].vc_decim)
-#define need_wrap	(vc_cons[currcons].vc_need_wrap)
-#define report_mouse	(vc_cons[currcons].vc_report_mouse)
-#define color		(vc_cons[currcons].vc_color)
-#define s_color		(vc_cons[currcons].vc_s_color)
-#define def_color	(vc_cons[currcons].vc_def_color)
+	/* might add  scrmem, vt_struct, kbd  at some time,
+	   to have everything in one place - the disadvantage
+	   would be that vc_cons etc can no longer be static */
+} vc_cons [MAX_NR_CONSOLES];
+
+#define screenbuf_size	(vc_cons[currcons].d->vc_screenbuf_size)
+#define origin		(vc_cons[currcons].d->vc_origin)
+#define scr_end		(vc_cons[currcons].d->vc_scr_end)
+#define pos		(vc_cons[currcons].d->vc_pos)
+#define top		(vc_cons[currcons].d->vc_top)
+#define bottom		(vc_cons[currcons].d->vc_bottom)
+#define x		(vc_cons[currcons].d->vc_x)
+#define y		(vc_cons[currcons].d->vc_y)
+#define vc_state	(vc_cons[currcons].d->vc_state)
+#define npar		(vc_cons[currcons].d->vc_npar)
+#define par		(vc_cons[currcons].d->vc_par)
+#define ques		(vc_cons[currcons].d->vc_ques)
+#define attr		(vc_cons[currcons].d->vc_attr)
+#define saved_x		(vc_cons[currcons].d->vc_saved_x)
+#define saved_y		(vc_cons[currcons].d->vc_saved_y)
+#define translate	(vc_cons[currcons].d->vc_translate)
+#define G0_charset	(vc_cons[currcons].d->vc_G0_charset)
+#define G1_charset	(vc_cons[currcons].d->vc_G1_charset)
+#define saved_G0	(vc_cons[currcons].d->vc_saved_G0)
+#define saved_G1	(vc_cons[currcons].d->vc_saved_G1)
+#define utf		(vc_cons[currcons].d->vc_utf)
+#define utf_count	(vc_cons[currcons].d->vc_utf_count)
+#define utf_char	(vc_cons[currcons].d->vc_utf_char)
+#define video_mem_start	(vc_cons[currcons].d->vc_video_mem_start)
+#define video_mem_end	(vc_cons[currcons].d->vc_video_mem_end)
+#define video_erase_char (vc_cons[currcons].d->vc_video_erase_char)	
+#define disp_ctrl	(vc_cons[currcons].d->vc_disp_ctrl)
+#define toggle_meta	(vc_cons[currcons].d->vc_toggle_meta)
+#define decscnm		(vc_cons[currcons].d->vc_decscnm)
+#define decom		(vc_cons[currcons].d->vc_decom)
+#define decawm		(vc_cons[currcons].d->vc_decawm)
+#define deccm		(vc_cons[currcons].d->vc_deccm)
+#define decim		(vc_cons[currcons].d->vc_decim)
+#define deccolm	 	(vc_cons[currcons].d->vc_deccolm)
+#define need_wrap	(vc_cons[currcons].d->vc_need_wrap)
+#define has_scrolled	(vc_cons[currcons].d->vc_has_scrolled)
+#define kmalloced	(vc_cons[currcons].d->vc_kmalloced)
+#define report_mouse	(vc_cons[currcons].d->vc_report_mouse)
+#define color		(vc_cons[currcons].d->vc_color)
+#define s_color		(vc_cons[currcons].d->vc_s_color)
+#define def_color	(vc_cons[currcons].d->vc_def_color)
 #define	foreground	(color & 0x0f)
 #define background	(color & 0xf0)
-#define charset		(vc_cons[currcons].vc_charset)
-#define s_charset	(vc_cons[currcons].vc_s_charset)
-#define	intensity	(vc_cons[currcons].vc_intensity)
-#define	underline	(vc_cons[currcons].vc_underline)
-#define	blink		(vc_cons[currcons].vc_blink)
-#define	reverse		(vc_cons[currcons].vc_reverse)
-#define	s_intensity	(vc_cons[currcons].vc_s_intensity)
-#define	s_underline	(vc_cons[currcons].vc_s_underline)
-#define	s_blink		(vc_cons[currcons].vc_s_blink)
-#define	s_reverse	(vc_cons[currcons].vc_s_reverse)
-#define	ulcolor		(vc_cons[currcons].vc_ulcolor)
-#define	halfcolor	(vc_cons[currcons].vc_halfcolor)
-#define tab_stop	(vc_cons[currcons].vc_tab_stop)
-#define vcmode		(vt_cons[currcons].vc_mode)
-#define vtmode		(vt_cons[currcons].vt_mode)
-#define vtpid		(vt_cons[currcons].vt_pid)
-#define vtnewvt		(vt_cons[currcons].vt_newvt)
+#define charset		(vc_cons[currcons].d->vc_charset)
+#define s_charset	(vc_cons[currcons].d->vc_s_charset)
+#define	intensity	(vc_cons[currcons].d->vc_intensity)
+#define	underline	(vc_cons[currcons].d->vc_underline)
+#define	blink		(vc_cons[currcons].d->vc_blink)
+#define	reverse		(vc_cons[currcons].d->vc_reverse)
+#define	s_intensity	(vc_cons[currcons].d->vc_s_intensity)
+#define	s_underline	(vc_cons[currcons].d->vc_s_underline)
+#define	s_blink		(vc_cons[currcons].d->vc_s_blink)
+#define	s_reverse	(vc_cons[currcons].d->vc_s_reverse)
+#define	ulcolor		(vc_cons[currcons].d->vc_ulcolor)
+#define	halfcolor	(vc_cons[currcons].d->vc_halfcolor)
+#define tab_stop	(vc_cons[currcons].d->vc_tab_stop)
+
+#define vcmode		(vt_cons[currcons]->vc_mode)
+#define structsize	(sizeof(struct vc_data) + sizeof(struct vt_struct))
+
+static void memsetw(void * s, unsigned short c, unsigned int count)
+{
+	unsigned short * addr = (unsigned short *) s;
+
+	count /= 2;
+	while (count) {
+		count--;
+		writew(c, addr++);
+	}
+}
+
+int vc_cons_allocated(unsigned int i)
+{
+	return (i < MAX_NR_CONSOLES && vc_cons[i].d);
+}
+
+int vc_allocate(unsigned int i)		/* return 0 on success */
+{
+	if (i >= MAX_NR_CONSOLES)
+	  return -ENODEV;
+	if (!vc_cons[i].d) {
+	    long p, q;
+
+	    /* prevent users from taking too much memory */
+	    if (i >= MAX_NR_USER_CONSOLES && !suser())
+	      return -EPERM;
+
+	    /* due to the granularity of kmalloc, we waste some memory here */
+	    /* the alloc is done in two steps, to optimize the common situation
+	       of a 25x80 console (structsize=216, video_screen_size=4000) */
+	    q = (long) kmalloc(video_screen_size, GFP_KERNEL);
+	    if (!q)
+	      return -ENOMEM;
+	    p = (long) kmalloc(structsize, GFP_KERNEL);
+	    if (!p) {
+		kfree_s((char *) q, video_screen_size);
+		return -ENOMEM;
+	    }
+
+	    vc_cons[i].d = (struct vc_data *) p;
+	    p += sizeof(struct vc_data);
+	    vt_cons[i] = (struct vt_struct *) p;
+	    vc_scrbuf[i] = (unsigned short *) q;
+	    vc_cons[i].d->vc_kmalloced = 1;
+	    vc_cons[i].d->vc_screenbuf_size = video_screen_size;
+	    vc_init (i, video_num_lines, video_num_columns, 1);
+	}
+	return 0;
+}
+
+/*
+ * Change # of rows and columns (0 means unchanged)
+ * [this is to be used together with some user program
+ * like resize that changes the hardware videomode]
+ */
+int vc_resize(unsigned long lines, unsigned long cols)
+{
+	unsigned long cc, ll, ss, sr;
+	unsigned long occ, oll, oss, osr;
+	unsigned short *p;
+	unsigned int currcons, i;
+	unsigned short *newscreens[MAX_NR_CONSOLES];
+	long ol, nl, rlth, rrem;
+
+	cc = (cols ? cols : video_num_columns);
+	ll = (lines ? lines : video_num_lines);
+	sr = cc << 1;
+	ss = sr * ll;
+
+	if (ss > video_mem_term - video_mem_base)
+	  return -ENOMEM;
+
+	/*
+	 * Some earlier version had all consoles of potentially
+	 * different sizes, but that was really messy.
+	 * So now we only change if there is room for all consoles
+	 * of the same size.
+	 */
+	for (currcons = 0; currcons < MAX_NR_CONSOLES; currcons++) {
+	    if (!vc_cons_allocated(currcons))
+	      newscreens[currcons] = 0;
+	    else {
+		p = (unsigned short *) kmalloc(ss, GFP_USER);
+		if (!p) {
+		    for (i = 0; i< currcons; i++)
+		      if (newscreens[i])
+			kfree_s(newscreens[i], ss);
+		    return -ENOMEM;
+		}
+		newscreens[currcons] = p;
+	    }
+	}
+
+	get_scrmem(fg_console);
+
+	oll = video_num_lines;
+	occ = video_num_columns;
+	osr = video_size_row;
+	oss = video_screen_size;
+
+	video_num_lines = ll;
+	video_num_columns = cc;
+	video_size_row = sr;
+	video_screen_size = ss;
+
+	for (currcons = 0; currcons < MAX_NR_CONSOLES; currcons++) {
+	    if (!vc_cons_allocated(currcons))
+	      continue;
+
+	    rlth = MIN(osr, sr);
+	    rrem = sr - rlth;
+	    ol = origin;
+	    nl = (long) newscreens[currcons];
+	    if (ll < oll)
+	      ol += (oll - ll) * osr;
+
+	    while (ol < scr_end) {
+		memcpy((void *) nl, (void *) ol, rlth);
+		if (rrem)
+		  memsetw((void *)(nl + rlth), video_erase_char, rrem);
+		ol += osr;
+		nl += sr;
+	    }
+
+	    if (kmalloced)
+	      kfree_s(vc_scrbuf[currcons], screenbuf_size);
+	    vc_scrbuf[currcons] = newscreens[currcons];
+	    kmalloced = 1;
+	    screenbuf_size = ss;
+
+	    origin = video_mem_start = (long) vc_scrbuf[currcons];
+	    scr_end = video_mem_end = video_mem_start + ss;
+
+	    if (scr_end > nl)
+	      memsetw((void *) nl, video_erase_char, scr_end - nl);
+
+	    /* do part of a reset_terminal() */
+	    top = 0;
+	    bottom = video_num_lines;
+	    gotoxy(currcons, x, y);
+	    save_cur(currcons);
+	}
+
+	set_scrmem(fg_console, 0);
+	set_origin(fg_console);
+	set_cursor(fg_console);
+
+	return 0;
+}
+
+void vc_disallocate(unsigned int currcons)
+{
+	if (vc_cons_allocated(currcons)) {
+	    if (kmalloced)
+	      kfree_s(vc_scrbuf[currcons], screenbuf_size);
+	    if (currcons >= MIN_NR_CONSOLES)
+	      kfree_s(vc_cons[currcons].d, structsize);
+	    vc_cons[currcons].d = 0;
+	}
+}
+
 
 #define set_kbd(x) set_vc_kbd_mode(kbd_table+currcons,x)
 #define clr_kbd(x) clr_vc_kbd_mode(kbd_table+currcons,x)
@@ -231,11 +496,7 @@ static int console_blanked = 0;
 #define decarm		VC_REPEAT
 #define decckm		VC_CKMODE
 #define kbdapplic	VC_APPLIC
-#define kbdraw		VC_RAW
 #define lnm		VC_CRLF
-
-int blankinterval = 10*60*HZ;
-static int screen_size = 0;
 
 /*
  * this is what the terminal answers to a ESC-Z or csi0c query.
@@ -357,7 +618,7 @@ static void gotoxy(int currcons, int new_x, int new_y)
  * *Very* limited hardware scrollback support..
  */
 static unsigned short __real_origin;
-static unsigned short __origin;
+static unsigned short __origin;		/* offset of currently displayed screen */
 
 static inline void __set_origin(unsigned short offset)
 {
@@ -427,7 +688,7 @@ static inline void set_cursor(int currcons)
 	if (currcons != fg_console || console_blanked || vcmode == KD_GRAPHICS)
 		return;
 	if (__real_origin != __origin)
-		set_origin(__real_origin);
+		__set_origin(__real_origin);
 	save_flags(flags); cli();
 	if (deccm) {
 		outb_p(14, video_port_reg);
@@ -454,87 +715,100 @@ static void scrup(int currcons, unsigned int t, unsigned int b)
 		pos += video_size_row;
 		scr_end += video_size_row;
 		if (scr_end > video_mem_end) {
-			__asm__("cld\n\t"
-				"rep\n\t"
-				"movsl\n\t"
-				"movl _video_num_columns,%1\n\t"
-				"rep\n\t"
-				"stosw"
-				: /* no output */
-				:"a" (video_erase_char),
-				"c" ((video_num_lines-1)*video_num_columns>>1),
-				"D" (video_mem_start),
-				"S" (origin)
-				:"cx","di","si");
+			unsigned short * d = (unsigned short *) video_mem_start;
+			unsigned short * s = (unsigned short *) origin;
+			unsigned int count;
+
+			count = (video_num_lines-1)*video_num_columns;
+			while (count) {
+				count--;
+				writew(readw(s++),d++);
+			}
+			count = video_num_columns;
+			while (count) {
+				count--;
+				writew(video_erase_char, d++);
+			}
 			scr_end -= origin-video_mem_start;
 			pos -= origin-video_mem_start;
 			origin = video_mem_start;
+			has_scrolled = 1;
 		} else {
-			__asm__("cld\n\t"
-				"rep\n\t"
-				"stosw"
-				: /* no output */
-				:"a" (video_erase_char),
-				"c" (video_num_columns),
-				"D" (scr_end-video_size_row)
-				:"cx","di");
+			unsigned short * d;
+			unsigned int count;
+
+			d = (unsigned short *) (scr_end - video_size_row);
+			count = video_num_columns;
+			while (count) {
+				count--;
+				writew(video_erase_char, d++);
+			}
 		}
 		set_origin(currcons);
 	} else {
-		__asm__("cld\n\t"
-			"rep\n\t"
-			"movsl\n\t"
-			"movl _video_num_columns,%%ecx\n\t"
-			"rep\n\t"
-			"stosw"
-			: /* no output */
-			:"a" (video_erase_char),
-			"c" ((b-t-1)*video_num_columns>>1),
-			"D" (origin+video_size_row*t),
-			"S" (origin+video_size_row*(t+1))
-			:"cx","di","si");
+		unsigned short * d = (unsigned short *) (origin+video_size_row*t);
+		unsigned short * s = (unsigned short *) (origin+video_size_row*(t+1));
+		unsigned int count = (b-t-1) * video_num_columns;
+
+		while (count) {
+			count--;
+			writew(readw(s++), d++);
+		}
+		count = video_num_columns;
+		while (count) {
+			count--;
+			writew(video_erase_char, d++);
+		}
 	}
 }
 
 static void scrdown(int currcons, unsigned int t, unsigned int b)
 {
+	unsigned short *d, *s;
+	unsigned int count;
+
 	if (b > video_num_lines || t >= b)
 		return;
-	__asm__("std\n\t"
-		"rep\n\t"
-		"movsl\n\t"
-		"addl $2,%%edi\n\t"	/* %edi has been decremented by 4 */
-		"movl _video_num_columns,%%ecx\n\t"
-		"rep\n\t"
-		"stosw\n\t"
-		"cld"
-		: /* no output */
-		:"a" (video_erase_char),
-		"c" ((b-t-1)*video_num_columns>>1),
-		"D" (origin+video_size_row*b-4),
-		"S" (origin+video_size_row*(b-1)-4)
-		:"ax","cx","di","si");
+	d = (unsigned short *) (origin+video_size_row*b);
+	s = (unsigned short *) (origin+video_size_row*(b-1));
+	count = (b-t-1)*video_num_columns;
+	while (count) {
+		count--;
+		writew(readw(--s), --d);
+	}
+	count = video_num_columns;
+	while (count) {
+		count--;
+		writew(video_erase_char, --d);
+	}
+	has_scrolled = 1;
 }
 
 static void lf(int currcons)
 {
-	if (y+1<bottom) {
-		y++;
-		pos += video_size_row;
-		return;
-	} else 
+    	/* don't scroll if above bottom of scrolling region, or
+	 * if below scrolling region
+	 */
+    	if (y+1 == bottom)
 		scrup(currcons,top,bottom);
+	else if (y < video_num_lines-1) {
+	    	y++;
+		pos += video_size_row;
+	}
 	need_wrap = 0;
 }
 
 static void ri(int currcons)
 {
-	if (y>top) {
+    	/* don't scroll if below top of scrolling region, or
+	 * if above scrolling region
+	 */
+	if (y == top)
+		scrdown(currcons,top,bottom);
+	else if (y > 0) {
 		y--;
 		pos -= video_size_row;
-		return;
-	} else
-		scrdown(currcons,top,bottom);
+	}
 	need_wrap = 0;
 }
 
@@ -555,104 +829,83 @@ static inline void bs(int currcons)
 
 static inline void del(int currcons)
 {
-#if 0
-	if (x) {
-		if (!need_wrap) {    /* this is not the right condition */
-		        pos -= 2;
-			x--;
-		}
-		*(unsigned short *)pos = video_erase_char;
-		need_wrap = 0;
-	}
-#endif
+	/* ignored */
 }
 
 static void csi_J(int currcons, int vpar)
 {
 	unsigned long count;
-	unsigned long start;
+	unsigned short * start;
 
 	switch (vpar) {
 		case 0:	/* erase from cursor to end of display */
 			count = (scr_end-pos)>>1;
-			start = pos;
+			start = (unsigned short *) pos;
 			break;
 		case 1:	/* erase from start to cursor */
 			count = ((pos-origin)>>1)+1;
-			start = origin;
+			start = (unsigned short *) origin;
 			break;
 		case 2: /* erase whole display */
 			count = video_num_columns * video_num_lines;
-			start = origin;
+			start = (unsigned short *) origin;
 			break;
 		default:
 			return;
 	}
-	__asm__("cld\n\t"
-		"rep\n\t"
-		"stosw\n\t"
-		: /* no output */
-		:"c" (count),
-		"D" (start),"a" (video_erase_char)
-		:"cx","di");
+	while (count) {
+		count--;
+		writew(video_erase_char, start++);
+	}
 	need_wrap = 0;
 }
 
 static void csi_K(int currcons, int vpar)
 {
-	long count;
-	long start;
+	unsigned long count;
+	unsigned short * start;
 
 	switch (vpar) {
 		case 0:	/* erase from cursor to end of line */
 			count = video_num_columns-x;
-			start = pos;
+			start = (unsigned short *) pos;
 			break;
 		case 1:	/* erase from start of line to cursor */
-			start = pos - (x<<1);
+			start = (unsigned short *) (pos - (x<<1));
 			count = x+1;
 			break;
 		case 2: /* erase whole line */
-			start = pos - (x<<1);
+			start = (unsigned short *) (pos - (x<<1));
 			count = video_num_columns;
 			break;
 		default:
 			return;
 	}
-	__asm__("cld\n\t"
-		"rep\n\t"
-		"stosw\n\t"
-		: /* no output */
-		:"c" (count),
-		"D" (start),"a" (video_erase_char)
-		:"cx","di");
+	while (count) {
+		count--;
+		writew(video_erase_char, start++);
+	}
 	need_wrap = 0;
 }
 
-static void csi_X(int currcons, int vpar)
-{
-	long count;
-	long start;
+static void csi_X(int currcons, int vpar) /* erase the following vpar positions */
+{					  /* not vt100? */
+	unsigned long count;
+	unsigned short * start;
 
 	if (!vpar)
-	        vpar++;
+		vpar++;
 
-	start=pos;
-	count=(vpar > video_num_columns-x) ? (video_num_columns-x) : vpar;
+	start = (unsigned short *) pos;
+	count = (vpar > video_num_columns-x) ? (video_num_columns-x) : vpar;
 
-	__asm__("cld\n\t"
-		"rep\n\t"
-		"stosw\n\t"
-		: /* no output */
-		:"c" (count),
-		"D" (start),"a" (video_erase_char)
-		:"cx","di");
+	while (count) {
+		count--;
+		writew(video_erase_char, start++);
+	}
 	need_wrap = 0;
 }
 
-/*
- *  I hope this works. The monochrome part is untested.
- */
 static void update_attr(int currcons)
 {
 	attr = color;
@@ -824,14 +1077,18 @@ static inline void respond_ID(int currcons, struct tty_struct * tty)
 }
 
 static void invert_screen(int currcons) {
-	unsigned char *p;
+	unsigned short *p;
 
 	if (can_do_color)
-		for (p = (unsigned char *)origin+1; p < (unsigned char *)scr_end; p+=2)
-			*p = (*p & 0x88) | (((*p >> 4) | (*p << 4)) & 0x77);
+		for (p = (unsigned short *)origin; p < (unsigned short *)scr_end; p++) {
+			unsigned short old = readw(p);
+			writew((old & 0x88ff) | (((old >> 4) | (old << 4)) & 0x7700), p);
+		}
 	else
-		for (p = (unsigned char *)origin+1; p < (unsigned char *)scr_end; p+=2)
-			*p ^= *p & 0x07 == 1 ? 0x70 : 0x77;
+		for (p = (unsigned short *)origin; p < (unsigned short *)scr_end; p++) {
+			unsigned short old = readw(p);
+			writew(old ^ ((old & 0x0700 == 0x0100) ? 0x7000 : 0x7700), p);
+		}
 }
 
 static void set_mode(int currcons, int on_off)
@@ -847,8 +1104,12 @@ static void set_mode(int currcons, int on_off)
 					clr_kbd(decckm);
 				break;
 			case 3:	/* 80/132 mode switch unimplemented */
-				csi_J(currcons,2);
-				gotoxy(currcons,0,0);
+				deccolm = on_off;
+#if 0
+				(void) vc_resize(video_num_lines, deccolm ? 132 : 80);
+				/* this alone does not suffice; some user mode
+				   utility has to change the hardware regs */
+#endif
 				break;
 			case 5:			/* Inverted screen on/off */
 				if (decscnm != on_off) {
@@ -917,6 +1178,7 @@ static void setterm_command(int currcons)
 			break;
 		case 9:	/* set blanking interval */
 			blankinterval = ((par[1] < 60) ? par[1] : 60) * 60 * HZ;
+			poke_blanked_console();
 			break;
 	}
 }
@@ -928,8 +1190,8 @@ static void insert_char(int currcons)
 	unsigned short * p = (unsigned short *) pos;
 
 	while (i++ < video_num_columns) {
-		tmp = *p;
-		*p = old;
+		tmp = readw(p);
+		writew(old, p);
 		old = tmp;
 		p++;
 	}
@@ -948,10 +1210,10 @@ static void delete_char(int currcons)
 	unsigned short * p = (unsigned short *) pos;
 
 	while (++i < video_num_columns) {
-		*p = *(p+1);
+		writew(readw(p+1), p);
 		p++;
 	}
-	*p = video_erase_char;
+	writew(video_erase_char, p);
 	need_wrap = 0;
 }
 
@@ -1032,13 +1294,13 @@ static void restore_cur(int currcons)
 }
 
 enum { ESnormal, ESesc, ESsquare, ESgetpars, ESgotpars, ESfunckey, 
-	EShash, ESsetG0, ESsetG1, ESignore };
+	EShash, ESsetG0, ESsetG1, ESpercent, ESignore };
 
 static void reset_terminal(int currcons, int do_clear)
 {
 	top		= 0;
 	bottom		= video_num_lines;
-	vc_state		= ESnormal;
+	vc_state	= ESnormal;
 	ques		= 0;
 	translate	= NORM_TRANS;
 	G0_charset	= NORM_TRANS;
@@ -1046,8 +1308,10 @@ static void reset_terminal(int currcons, int do_clear)
 	charset		= 0;
 	need_wrap	= 0;
 	report_mouse	= 0;
+	utf             = 0;
+	utf_count       = 0;
 
-	disp_ctrl	= 0;
+	disp_ctrl	= 1;
 	toggle_meta	= 0;
 
 	decscnm		= 0;
@@ -1061,7 +1325,8 @@ static void reset_terminal(int currcons, int do_clear)
 	clr_kbd(kbdapplic);
 	clr_kbd(lnm);
 	kbd_table[currcons].lockstate = 0;
-	kbd_table[currcons].ledstate = kbd_table[currcons].default_ledstate;
+	kbd_table[currcons].ledmode = LED_SHOW_FLAGS;
+	kbd_table[currcons].ledflagstate = kbd_table[currcons].default_ledflagstate;
 	set_leds();
 
 	default_attr(currcons);
@@ -1073,42 +1338,58 @@ static void reset_terminal(int currcons, int do_clear)
 	tab_stop[3]	=
 	tab_stop[4]	= 0x01010101;
 
-	if (do_clear) {
-		gotoxy(currcons,0,0);
-		csi_J(currcons,2);
-		save_cur(currcons);
-	}
+	gotoxy(currcons,0,0);
+	save_cur(currcons);
+	if (do_clear)
+	    csi_J(currcons,2);
 }
 
 /*
- * Turn the Scroll-Lock LED on when the tty is stopped (with a ^S)
+ * Turn the Scroll-Lock LED on when the tty is stopped
  */
 static void con_stop(struct tty_struct *tty)
 {
-	set_vc_kbd_led(kbd_table + fg_console, VC_SCROLLOCK);
+	int console_num;
+	if (!tty)
+		return;
+	console_num = MINOR(tty->device) - (tty->driver.minor_start);
+	if (!vc_cons_allocated(console_num))
+		return;
+	set_vc_kbd_led(kbd_table + console_num, VC_SCROLLOCK);
 	set_leds();
 }
 
 /*
- * Turn the Scroll-Lock LED off when the console is started (with a ^Q)
+ * Turn the Scroll-Lock LED off when the console is started
  */
 static void con_start(struct tty_struct *tty)
 {
-	clr_vc_kbd_led(kbd_table + fg_console, VC_SCROLLOCK);
+	int console_num;
+	if (!tty)
+		return;
+	console_num = MINOR(tty->device) - (tty->driver.minor_start);
+	if (!vc_cons_allocated(console_num))
+		return;
+	clr_vc_kbd_led(kbd_table + console_num, VC_SCROLLOCK);
 	set_leds();
 }
 
 static int con_write(struct tty_struct * tty, int from_user,
 		     unsigned char *buf, int count)
 {
-	int c, n = 0;
+	int c, tc, ok, n = 0;
 	unsigned int currcons;
 	struct vt_struct *vt = (struct vt_struct *)tty->driver_data;
 
 	currcons = vt->vc_num;
-	if (currcons >= NR_CONSOLES) {
-		printk("con_write: illegal vc index (%d)\n", currcons);
-		return 0;
+	if (!vc_cons_allocated(currcons)) {
+	    /* could this happen? */
+	    static int error = 0;
+	    if (!error) {
+		error = 1;
+		printk("con_write: tty %d not allocated\n", currcons+1);
+	    }
+	    return 0;
 	}
 #ifdef CONFIG_SELECTION
 	/* clear the selection */
@@ -1119,19 +1400,63 @@ static int con_write(struct tty_struct * tty, int from_user,
 	while (!tty->stopped &&	count) {
 		c = from_user ? get_fs_byte(buf) : *buf;
 		buf++; n++; count--;
-		if (vc_state == ESnormal
-		&& (c >= 32 || (disp_ctrl && (c&0x7f) != 27))
-		&& (toggle_meta ? translate[c|0x80] : translate[c])) {
-			if (toggle_meta)
-				c |= 0x80;
+
+		if (utf) {
+		    /* Combine UTF-8 into Unicode */
+		    /* Incomplete characters silently ignored */
+		    if(c > 0x7f) {   
+			/* UTF-8 to Latin-1 decoding */
+			if (utf_count > 0 && (c & 0xc0) == 0x80) {
+				utf_char = (utf_char << 6) | (c & 0x3f);
+				utf_count--;
+				if (utf_count == 0)
+				    c = utf_char;
+				else continue;
+			} else {
+				if ((c & 0xe0) == 0xc0) {
+				    utf_count = 1;
+				    utf_char = (c & 0x1f);
+				} else if ((c & 0xf0) == 0xe0) {
+				    utf_count = 2;
+				    utf_char = (c & 0x0f);
+				} else
+				    utf_count = 0;
+				continue;
+			}
+		    } else
+			utf_count = 0;
+
+		    /* Now try to find out how to display it */
+		    if (c > 0xff) {
+			tc = conv_uni_to_pc(c);
+			if (tc == -2)
+			  continue;
+			vc_state = ESnormal;
+			if (tc == -1)
+			  tc = 0376; 	/* small square: symbol not found */
+			ok = 1;
+		    } else {
+			tc = NORM_TRANS[c];
+			ok = 0;
+		    }
+		} else {	/* no utf */
+		    tc = translate[toggle_meta ? (c|0x80) : c];
+		    ok = 0;
+		}
+
+		/* Can print ibm (even if 0), and latin1 provided
+		   it is a printing char or control chars are printed ^@ */
+		if (!ok && tc && (c >= 32 || (disp_ctrl && (c&0x7f) != 27)))
+		    ok = 1;
+
+		if (vc_state == ESnormal && ok) {
 			if (need_wrap) {
 				cr(currcons);
 				lf(currcons);
 			}
 			if (decim)
 				insert_char(currcons);
-			c = translate[c];
-			*(unsigned short *) pos = (attr << 8) + c;
+			writew((attr << 8) + tc, (unsigned short *) pos);
 			if (x == video_num_columns - 1)
 				need_wrap = decawm;
 			else {
@@ -1195,6 +1520,9 @@ static int con_write(struct tty_struct * tty, int from_user,
 				switch (c) {
 				  case '[':
 					vc_state = ESsquare;
+					continue;
+				  case '%':
+					vc_state = ESpercent;
 					continue;
 				  case 'E':
 					cr(currcons);
@@ -1351,6 +1679,12 @@ static int con_write(struct tty_struct * tty, int from_user,
 					case 'm':
 						csi_m(currcons);
 						continue;
+					case 'q': /* DECLL - but only 3 leds */
+						/* map 0,1,2,3 to 0,1,2,4 */
+						if (par[0] < 4)
+						  setledstate(kbd_table + currcons,
+							      (par[0] < 3) ? par[0] : 4);
+						continue;
 					case 'r':
 						if (!par[0])
 							par[0]++;
@@ -1379,6 +1713,21 @@ static int con_write(struct tty_struct * tty, int from_user,
 					case ']': /* setterm functions */
 						setterm_command(currcons);
 						continue;
+				}
+				continue;
+			case ESpercent:
+				vc_state = ESnormal;
+				switch (c) {
+				  case '@':  /* defined in ISO 2022 */
+					utf = 0;
+					continue;
+				  case '8':
+					/* ISO/ECMA hasn't yet registered an
+					   official ESC sequence for UTF-8,
+					   so this one (ESC %8) will likely
+					   change in the future. */
+					utf = 1;
+					continue;
 				}
 				continue;
 			case ESfunckey:
@@ -1446,7 +1795,7 @@ static int con_chars_in_buffer(struct tty_struct *tty)
 void poke_blanked_console(void)
 {
 	timer_active &= ~(1<<BLANK_TIMER);
-	if (vt_cons[fg_console].vc_mode == KD_GRAPHICS)
+	if (vt_cons[fg_console]->vc_mode == KD_GRAPHICS)
 		return;
 	if (console_blanked) {
 		timer_table[BLANK_TIMER].expires = 0;
@@ -1457,24 +1806,22 @@ void poke_blanked_console(void)
 	}
 }
 
-void * memsetw(void * s,unsigned short c,int count)
-{
-__asm__("cld\n\t"
-	"rep\n\t"
-	"stosw"
-	: /* no output */
-	:"a" (c),"D" (s),"c" (count)
-	:"cx","di");
-return s;
-}
-
 void console_print(const char * b)
 {
 	int currcons = fg_console;
 	unsigned char c;
+	static int printing = 0;
 
-	if (!printable || currcons<0 || currcons>=NR_CONSOLES)
+	if (!printable || printing)
+		return;	 /* console not yet initialized */
+	printing = 1;
+
+	if (!vc_cons_allocated(currcons)) {
+		/* impossible */
+		printk("console_print: tty %d not allocated ??\n", currcons+1);
 		return;
+	}
+
 	while ((c = *(b++)) != 0) {
 		if (c == 10 || c == 13 || need_wrap) {
 			if (c != 13)
@@ -1483,7 +1830,7 @@ void console_print(const char * b)
 			if (c == 10 || c == 13)
 				continue;
 		}
-		*(unsigned short *) pos = (attr << 8) + c;
+		writew((attr << 8) + c, (unsigned short *) pos);
 		if (x == video_num_columns - 1) {
 			need_wrap = 1;
 			continue;
@@ -1492,16 +1839,8 @@ void console_print(const char * b)
 		pos+=2;
 	}
 	set_cursor(currcons);
-	if (vt_cons[fg_console].vc_mode == KD_GRAPHICS)
-		return;
-	timer_active &= ~(1<<BLANK_TIMER);
-	if (console_blanked) {
-		timer_table[BLANK_TIMER].expires = 0;
-		timer_active |= 1<<BLANK_TIMER;
-	} else if (blankinterval) {
-		timer_table[BLANK_TIMER].expires = jiffies + blankinterval;
-		timer_active |= 1<<BLANK_TIMER;
-	}
+	poke_blanked_console();
+	printing = 0;
 }
 
 /*
@@ -1520,6 +1859,34 @@ static void con_unthrottle(struct tty_struct *tty)
 	wake_up_interruptible(&vt->paste_wait);
 }
 
+static void vc_init(unsigned int currcons, unsigned long rows, unsigned long cols, int do_clear)
+{
+	long base = (long) vc_scrbuf[currcons];
+
+	video_num_columns = cols;
+	video_num_lines = rows;
+	video_size_row = cols<<1;
+	video_screen_size = video_num_lines * video_size_row;
+
+	pos = origin = video_mem_start = base;
+	scr_end = base + video_screen_size;
+	video_mem_end = base + video_screen_size;
+	reset_vc(currcons);
+	def_color       = 0x07;   /* white */
+	ulcolor		= 0x0f;   /* bold white */
+	halfcolor       = 0x08;   /* grey */
+	vt_cons[currcons]->paste_wait = 0;
+	reset_terminal(currcons, do_clear);
+}
+
+static void con_setsize(unsigned long rows, unsigned long cols)
+{
+	video_num_lines = rows;
+	video_num_columns = cols;
+	video_size_row = 2 * cols;
+	video_screen_size = video_num_lines * video_size_row;
+}
+
 /*
  *  long con_init(long);
  *
@@ -1534,7 +1901,6 @@ long con_init(long kmem_start)
 {
 	char *display_desc = "????";
 	int currcons = 0;
-	long base;
 	int orig_x = ORIG_X;
 	int orig_y = ORIG_Y;
 
@@ -1544,7 +1910,7 @@ long con_init(long kmem_start)
 	console_driver.name_base = 1;
 	console_driver.major = TTY_MAJOR;
 	console_driver.minor_start = 1;
-	console_driver.num = NR_CONSOLES;
+	console_driver.num = MAX_NR_CONSOLES;
 	console_driver.type = TTY_DRIVER_TYPE_CONSOLE;
 	console_driver.init_termios = tty_std_termios;
 	console_driver.flags = TTY_DRIVER_REAL_RAW;
@@ -1566,13 +1932,9 @@ long con_init(long kmem_start)
 	if (tty_register_driver(&console_driver))
 		panic("Couldn't register console driver\n");
 	
-	vc_scrmembuf = (unsigned short *) kmem_start;
-	video_num_columns = ORIG_VIDEO_COLS;
-	video_size_row = video_num_columns * 2;
-	video_num_lines = ORIG_VIDEO_LINES;
-	video_page = ORIG_VIDEO_PAGE;
-	screen_size = (video_num_lines * video_size_row);
-	kmem_start += NR_CONSOLES * screen_size;
+	con_setsize(ORIG_VIDEO_LINES, ORIG_VIDEO_COLS);
+	video_page = ORIG_VIDEO_PAGE; 			/* never used */
+
 	timer_table[BLANK_TIMER].fn = blank_screen;
 	timer_table[BLANK_TIMER].expires = 0;
 	if (blankinterval) {
@@ -1620,64 +1982,47 @@ long con_init(long kmem_start)
 	
 	/* Initialize the variables used for scrolling (mostly EGA/VGA)	*/
 
-	base = (long)vc_scrmembuf;
-	for (currcons = 0; currcons<NR_CONSOLES; currcons++) {
-		pos = origin = video_mem_start = base;
-		scr_end = video_mem_end = (base += screen_size);
-		vc_scrbuf[currcons] = (unsigned short *) origin;
-		vcmode		= KD_TEXT;
-		vtmode.mode	= VT_AUTO;
-		vtmode.waitv	= 0;
-		vtmode.relsig	= 0;
-		vtmode.acqsig	= 0;
-		vtmode.frsig	= 0;
-		vtpid		= -1;
-		vtnewvt		= -1;
-		clr_kbd(kbdraw);
-		def_color	= 0x07;   /* white */
-		ulcolor		= 0x0f;   /* bold white */
-		halfcolor	= 0x08;   /* grey */
-		vt_cons[currcons].paste_wait = 0;
-		reset_terminal(currcons, currcons);
+	/* Due to kmalloc roundup allocating statically is more efficient -
+	   so provide MIN_NR_CONSOLES for people with very little memory */
+	for (currcons = 0; currcons < MIN_NR_CONSOLES; currcons++) {
+		vc_cons[currcons].d = (struct vc_data *) kmem_start;
+		kmem_start += sizeof(struct vc_data);
+		vt_cons[currcons] = (struct vt_struct *) kmem_start;
+		kmem_start += sizeof(struct vt_struct);
+		vc_scrbuf[currcons] = (unsigned short *) kmem_start;
+		kmem_start += video_screen_size;
+		kmalloced = 0;
+		screenbuf_size = video_screen_size;
+		vc_init(currcons, video_num_lines, video_num_columns, currcons);
 	}
+
 	currcons = fg_console = 0;
 
 	video_mem_start = video_mem_base;
 	video_mem_end = video_mem_term;
 	origin = video_mem_start;
 	scr_end	= video_mem_start + video_num_lines * video_size_row;
-	gotoxy(currcons,0,0);
-	save_cur(currcons);
 	gotoxy(currcons,orig_x,orig_y);
-	update_screen(fg_console);
+	set_origin(currcons);
 	printable = 1;
-	printk("Console: %s %s %ldx%ld, %d virtual consoles\n",
-		can_do_color?"colour":"mono",
+	printk("Console: %s %s %ldx%ld, %d virtual console%s (max %d)\n",
+		can_do_color ? "colour" : "mono",
 		display_desc,
 		video_num_columns,video_num_lines,
-		NR_CONSOLES);
+		MIN_NR_CONSOLES, (MIN_NR_CONSOLES == 1) ? "" : "s", MAX_NR_CONSOLES);
 	register_console(console_print);
 	return kmem_start;
 }
 
-/*
- * kbdsave doesn't need to do anything: it's all handled automatically
- * with the new data structures..
- */
-void kbdsave(int new_console)
-{
-}
-
 static void get_scrmem(int currcons)
 {
-	memcpy((void *)vc_scrbuf[currcons],(void *)origin, screen_size);
-	video_mem_start = (unsigned long)vc_scrbuf[currcons];
-	origin 	= video_mem_start;
-	scr_end = video_mem_end = video_mem_start+screen_size;
+	memcpy((void *)vc_scrbuf[currcons], (void *)origin, video_screen_size);
+	origin = video_mem_start = (unsigned long)vc_scrbuf[currcons];
+	scr_end = video_mem_end = video_mem_start + video_screen_size;
 	pos = origin + y*video_size_row + (x<<1);
 }
 
-static void set_scrmem(int currcons)
+static void set_scrmem(int currcons, long offset)
 {
 #ifdef CONFIG_HGA
   /* This works with XFree86 1.2, 1.3 and 2.0
@@ -1710,38 +2055,94 @@ static void set_scrmem(int currcons)
 	  }
 #endif CONFIG_HGA
 
+	if (video_mem_term - video_mem_base < offset + video_screen_size)
+	  offset = 0;	/* strange ... */
+	memcpy((void *)(video_mem_base + offset), (void *) origin, video_screen_size);
 	video_mem_start = video_mem_base;
 	video_mem_end = video_mem_term;
-	origin	= video_mem_start;
-	scr_end	= video_mem_start + screen_size;
+	origin = video_mem_base + offset;
+	scr_end = origin + video_screen_size;
 	pos = origin + y*video_size_row + (x<<1);
-	memcpy((void *)video_mem_base, (void *)vc_scrbuf[fg_console], screen_size);
 }
 
-void blank_screen(void)
+void do_blank_screen(int nopowersave)
 {
+	int currcons;
+
 	if (console_blanked)
 		return;
+
+	timer_active &= ~(1<<BLANK_TIMER);
 	timer_table[BLANK_TIMER].fn = unblank_screen;
+
+	/* try not to lose information by blanking, and not to waste memory */
+	currcons = fg_console;
+	has_scrolled = 0;
+	blank__origin = __origin;
+	blank_origin = origin;
+	set_origin(fg_console);
 	get_scrmem(fg_console);
+	unblank_origin = origin;
+	memsetw((void *)blank_origin, BLANK, video_mem_term-blank_origin);
 	hide_cursor();
-	console_blanked = 1;
-	memsetw((void *)video_mem_base, 0x0020, video_mem_term-video_mem_base );
+	console_blanked = fg_console + 1;
+
+	if(!nopowersave)
+	    vesa_blank();
 }
 
-void unblank_screen(void)
+void do_unblank_screen(void)
 {
+	int currcons;
+	int resetorg;
+	long offset;
+
 	if (!console_blanked)
 		return;
+	if (!vc_cons_allocated(fg_console)) {
+		/* impossible */
+		printk("unblank_screen: tty %d not allocated ??\n", fg_console+1);
+		return;
+	}
 	timer_table[BLANK_TIMER].fn = blank_screen;
 	if (blankinterval) {
 		timer_table[BLANK_TIMER].expires = jiffies + blankinterval;
 		timer_active |= 1<<BLANK_TIMER;
 	}
+
+	currcons = fg_console;
+	offset = 0;
+	resetorg = 0;
+	if (console_blanked == fg_console + 1 && origin == unblank_origin
+	    && !has_scrolled) {
+		/* try to restore the exact situation before blanking */
+		resetorg = 1;
+		offset = (blank_origin - video_mem_base)
+			- (unblank_origin - video_mem_start);
+	}
+
 	console_blanked = 0;
-	set_scrmem(fg_console);
+	set_scrmem(fg_console, offset);
 	set_origin(fg_console);
 	set_cursor(fg_console);
+	if (resetorg)
+		__set_origin(blank__origin);
+
+	vesa_unblank();
+}
+
+/*
+ * If a blank_screen is due to a timer, then a power save is allowed.
+ * If it is related to console_switching, then avoid vesa_blank().
+ */
+static void blank_screen(void)
+{
+	do_blank_screen(0);
+}
+
+static void unblank_screen(void)
+{
+	do_unblank_screen();
 }
 
 void update_screen(int new_console)
@@ -1750,57 +2151,98 @@ void update_screen(int new_console)
 
 	if (new_console == fg_console || lock)
 		return;
+	if (!vc_cons_allocated(new_console)) {
+		/* strange ... */
+		printk("update_screen: tty %d not allocated ??\n", new_console+1);
+		return;
+	}
 	lock = 1;
-	kbdsave(new_console);
 #ifdef CONFIG_SELECTION
-	highlight_pointer(fg_console,-1);
+	clear_selection();
 #endif /* CONFIG_SELECTION */
-	get_scrmem(fg_console); 
-	fg_console = new_console;
-	set_scrmem(fg_console); 
+	if (!console_blanked)
+		get_scrmem(fg_console);
+	else
+		console_blanked = -1;	   /* no longer of the form console+1 */
+	fg_console = new_console; /* this is the only (nonzero) assignment to fg_console */
+				  /* consequently, fg_console will always be allocated */
+	set_scrmem(fg_console, 0); 
 	set_origin(fg_console);
-	set_cursor(new_console);
+	set_cursor(fg_console);
 	set_leds();
 	compute_shiftstate();
 	lock = 0;
 }
 
-int do_screendump(int arg)
+/*
+ * do_screendump is used for three tasks:
+ *   if (mode==0) is the old ioctl(TIOCLINUX,0)
+ *   if (mode==1) dumps wd,hg, cursor position, and all the char-attr pairs
+ *   if (mode==2) restores what mode1 got.
+ * the new modes are needed for a fast and complete dump-restore cycle,
+ * needed to implement root-window menus in text mode (A Rubini Nov 1994)
+ */
+int do_screendump(unsigned long arg, int mode)
 {
 	char *sptr, *buf = (char *)arg;
-	int currcons, l;
+	int currcons, l, chcount;
 
-	if (!suser())
-		return -EPERM;
-	l = verify_area(VERIFY_WRITE, buf,2+video_num_columns*video_num_lines);
+	l = verify_area(VERIFY_READ, buf, 2);
 	if (l)
 		return l;
 	currcons = get_fs_byte(buf+1);
-	if ((currcons<0) || (currcons>NR_CONSOLES))
-		return -EIO;
-	put_fs_byte((char)(video_num_lines),buf++);	
-	put_fs_byte((char)(video_num_columns),buf++);
 	currcons = (currcons ? currcons-1 : fg_console);
-	sptr = (char *) origin;
-	for (l=video_num_lines*video_num_columns; l>0 ; l--, sptr++)
-		put_fs_byte(*sptr++,buf++);	
+	if (!vc_cons_allocated(currcons))
+		return -EIO;
+	
+	/* mode 0 needs 2+wd*ht, modes 1 and 2 need 4+2*wd*ht */
+	chcount=video_num_columns*video_num_lines;
+	l = verify_area(mode==2 ? VERIFY_READ :VERIFY_WRITE,
+		buf, (2+chcount)*(mode ? 2 : 1));
+	if (l)
+		return l;
+	if (mode<2) {
+	put_fs_byte((char)(video_num_lines),buf++);   
+	put_fs_byte((char)(video_num_columns),buf++);
+	    }
+#ifdef CONFIG_SELECTION
+	clear_selection();
+#endif
+	switch(mode) {
+	    case 0:
+			sptr = (char *) origin;
+			for (l=chcount; l>0 ; l--, sptr++)
+				put_fs_byte(*sptr++,buf++);	
+			break;
+	    case 1:
+			put_fs_byte((char)x,buf++); put_fs_byte((char)y,buf++); 
+			memcpy_tofs(buf,(char *)origin,2*chcount);
+			break;
+	    case 2:
+			gotoxy(currcons, get_fs_byte(buf+2), get_fs_byte(buf+3));
+			buf+=4; /* ioctl#, console#, x,y */
+			memcpy_fromfs((char *)origin,buf,2*chcount);
+			break;
+	    }
 	return(0);
 }
 
 /*
- * Later on maybe we'll dynamically allocate the console screen
- * memory.
+ * Allocate the console screen memory.
  */
 int con_open(struct tty_struct *tty, struct file * filp)
 {
-	int	idx;
+	unsigned int	idx;
+	int i;
 
 	idx = MINOR(tty->device) - tty->driver.minor_start;
 	
-	if (idx > NR_CONSOLES)
-		return -ENODEV;
-	vt_cons[idx].vc_num = idx;
-	tty->driver_data = &vt_cons[idx];
+	i = vc_allocate(idx);
+	if (i)
+		return i;
+
+	vt_cons[idx]->vc_num = idx;
+	tty->driver_data = vt_cons[idx];
 	
 	if (!tty->winsize.ws_row && !tty->winsize.ws_col) {
 		tty->winsize.ws_row = video_num_lines;
@@ -1820,12 +2262,7 @@ static void highlight(const int currcons, const int s, const int e)
 
 	p1 = (unsigned char *)origin - hwscroll_offset + s + 1;
 	p2 = (unsigned char *)origin - hwscroll_offset + e + 1;
-	if (p1 > p2)
-	{
-		p = p1;
-		p1 = p2;
-		p2 = p;
-	}
+
 	for (p = p1; p <= p2; p += 2)
 		*p = (*p & 0x88) | ((*p << 4) & 0x70) | ((*p >> 4) & 0x07);
 }
@@ -1833,20 +2270,20 @@ static void highlight(const int currcons, const int s, const int e)
 /* use complementary color to show the pointer */
 static void highlight_pointer(const int currcons, const int where)
 {
-        unsigned char *p;
+	unsigned char *p;
 	static unsigned char *prev=NULL;
 
 	if (where==-1) /* remove the pointer */
 	{
-                if (prev)
+		if (prev)
 		{
 			*prev ^= 0x77;
 			prev=NULL;
 		}
-        }
+	}
 	else
 	{
-	        p = (unsigned char *)origin - hwscroll_offset + where + 1;
+		p = (unsigned char *)origin - hwscroll_offset + where + 1;
 		*p ^= 0x77;
 		if (prev) *prev ^= 0x77; /* remove the previous one */
 		prev=p;
@@ -1856,6 +2293,7 @@ static void highlight_pointer(const int currcons, const int where)
 
 /*
  * This function uses a 128-bit look up table
+ * WARNING: This depends on both endianness and the ascii code
  */
 static unsigned long inwordLut[4]={
   0x00000000, /* control chars     */
@@ -1880,10 +2318,13 @@ static inline int atedge(const int p)
 	return (!(p % video_size_row) || !((p + 2) % video_size_row));
 }
 
-/* constrain v such that l <= v <= u */
-static inline short limit(const int v, const int l, const int u)
+/* constrain v such that v <= u */
+static inline unsigned short limit(const unsigned short v, const unsigned short u)
 {
-	return (v < l) ? l : ((v > u) ? u : v);
+/* gcc miscompiles the ?: operator, so don't use it.. */
+	if (v > u)
+		return u;
+	return v;
 }
 
 /* invoked via ioctl(TIOCLINUX) */
@@ -1912,10 +2353,10 @@ int set_selection(const int arg, struct tty_struct *tty)
 	ye = get_fs_word(args++) - 1;
 	sel_mode = get_fs_word(args);
 
-	xs = limit(xs, 0, video_num_columns - 1);
-	ys = limit(ys, 0, video_num_lines - 1);
-	xe = limit(xe, 0, video_num_columns - 1);
-	ye = limit(ye, 0, video_num_lines - 1);
+	xs = limit(xs, video_num_columns - 1);
+	ys = limit(ys, video_num_lines - 1);
+	xe = limit(xe, video_num_columns - 1);
+	ye = limit(ye, video_num_lines - 1);
 	ps = ys * video_size_row + (xs << 1);
 	pe = ye * video_size_row + (xe << 1);
 
@@ -1964,18 +2405,19 @@ int set_selection(const int arg, struct tty_struct *tty)
 			new_sel_end = pe + video_size_row
 				    - pe % video_size_row - 2;
 			break;
-                case 3: /* pointer highlight */
-		        if (sel_cons != currcons)
-        		{
-				highlight_pointer(sel_cons,-1);
-        	        	clear_selection();
-                		sel_cons = currcons;
-        		}
+		case 3: /* pointer highlight */
+			if (sel_cons != currcons)
+			{
+				clear_selection();
+				sel_cons = currcons;
+			}
 			highlight_pointer(sel_cons,pe);
 			return 0; /* nothing more */
-	        default:
+		default:
 			return -EINVAL;
 	}
+	/* remove the pointer */
+	highlight_pointer(sel_cons,-1);
 	/* select to end of line if on trailing space */
 	if (new_sel_end > new_sel_start &&
 		!atedge(new_sel_end) && isspace(*(off + new_sel_end)))
@@ -2018,6 +2460,16 @@ int set_selection(const int arg, struct tty_struct *tty)
 	}
 	sel_start = new_sel_start;
 	sel_end = new_sel_end;
+
+	/* realloc the buffer (it seems to be efficient, anyway) */
+	if (sel_buffer) kfree(sel_buffer);
+	sel_buffer = kmalloc((sel_end-sel_start)/2+2, GFP_KERNEL);
+	if (!sel_buffer)
+	{
+		printk("selection: kmalloc() failed\n");
+		clear_selection();
+		return (0); /* is it right? */
+	}
 	obp = bp = sel_buffer;
 	for (i = sel_start; i <= sel_end; i += 2)
 	{
@@ -2036,10 +2488,6 @@ int set_selection(const int arg, struct tty_struct *tty)
 			}
 			obp = bp;
 		}
-		/* check for space, leaving room for next character, possible
-		   newline, and null at end. */
-		if (bp - sel_buffer > SEL_BUFFER_SIZE - 3)
-			break;
 	}
 	*bp = '\0';
 	return 0;
@@ -2054,7 +2502,7 @@ int paste_selection(struct tty_struct *tty)
 	int	c, l;
 	struct vt_struct *vt = (struct vt_struct *) tty->driver_data;
 	
-	if (!sel_buffer[0])
+	if (!bp || !bp[0])
 		return 0;
 	unblank_screen();
 	c = strlen(sel_buffer);
@@ -2078,7 +2526,7 @@ int paste_selection(struct tty_struct *tty)
    the selection. */
 static void clear_selection()
 {
-        highlight_pointer(sel_cons, -1); /* hide the pointer */
+	highlight_pointer(sel_cons, -1); /* hide the pointer */
 	if (sel_start != -1)
 	{
 		highlight(sel_cons, sel_start, sel_end);
@@ -2100,7 +2548,9 @@ static void clear_selection()
  */
 
 #define colourmap ((char *)0xa0000)
-#define blackwmap ((char *)0xb0000)
+/* Pauline Middelink <middelin@polyware.iaf.nl> reports that we
+   should use 0xA0000 for the bwmap as well.. */
+#define blackwmap ((char *)0xa0000)
 #define cmapsz 8192
 #define seq_port_reg (0x3c4)
 #define seq_port_val (0x3c5)
@@ -2127,7 +2577,7 @@ static int set_get_font(char * arg, int set)
 
 	i = verify_area(set ? VERIFY_READ : VERIFY_WRITE, (void *)arg, cmapsz);
 	if (i)
-	        return i;
+		return i;
 
 	cli();
 	outb_p( 0x00, seq_port_reg );   /* First, the sequencer */
@@ -2205,7 +2655,7 @@ int con_set_trans(char * arg)
 
 	i = verify_area(VERIFY_READ, (void *)arg, E_TABSZ);
 	if (i)
-	        return i;
+		return i;
 
 	for (i=0; i<E_TABSZ ; i++) USER_TRANS[i] = get_fs_byte(arg+i);
 	USER_TRANS[012]=0;
@@ -2221,7 +2671,7 @@ int con_get_trans(char * arg)
 
 	i = verify_area(VERIFY_WRITE, (void *)arg, E_TABSZ);
 	if (i)
-	        return i;
+		return i;
 
 	for (i=0; i<E_TABSZ ; i++) put_fs_byte(USER_TRANS[i],arg+i);
 	return 0;

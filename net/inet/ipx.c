@@ -28,11 +28,13 @@
  *	Revision 0.26:  Device drop kills IPX routes via it. (needed for modules)
  *	Revision 0.27:  Autobind <Mark Evans>
  *	Revision 0.28:  Small fix for multiple local networks <Thomas Winder>
- *
- *			
- *
+ *	Revision 0.29:  Assorted major errors removed <Mark Evans>
+ *			Small correction to promisc mode error fix <Alan Cox>
+ *			Asynchronous I/O support.
+ *			Changed to use notifiers and the newer packet_type stuff.
+ *			Assorted major fixes <Alejandro Liu>
  */
- 
+  
 #include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/types.h>
@@ -155,11 +157,11 @@ int ipx_get_info(char *buffer, char **start, off_t offset, int length)
 	for (s = ipx_socket_list; s != NULL; s = s->next)
 	{
 		len += sprintf (buffer+len,"%02X   ", s->ipx_type);
-		len += sprintf (buffer+len,"%08lX:%02X%02X%02X%02X%02X%02X:%02X ", htonl(s->ipx_source_addr.net),
+		len += sprintf (buffer+len,"%08lX:%02X%02X%02X%02X%02X%02X:%04X ", htonl(s->ipx_source_addr.net),
 			s->ipx_source_addr.node[0], s->ipx_source_addr.node[1], s->ipx_source_addr.node[2],
 			s->ipx_source_addr.node[3], s->ipx_source_addr.node[4], s->ipx_source_addr.node[5],
 			htons(s->ipx_source_addr.sock));
-		len += sprintf (buffer+len,"%08lX:%02X%02X%02X%02X%02X%02X:%02X ", htonl(s->ipx_dest_addr.net),
+		len += sprintf (buffer+len,"%08lX:%02X%02X%02X%02X%02X%02X:%04X ", htonl(s->ipx_dest_addr.net),
 			s->ipx_dest_addr.node[0], s->ipx_dest_addr.node[1], s->ipx_dest_addr.node[2],
 			s->ipx_dest_addr.node[3], s->ipx_dest_addr.node[4], s->ipx_dest_addr.node[5],
 			htons(s->ipx_dest_addr.sock));
@@ -387,11 +389,14 @@ static int ipxrtr_delete(long net)
 	return -ENOENT;
 }
 
-void ipxrtr_device_down(struct device *dev)
+int ipxrtr_device_event(unsigned long event, void *ptr)
 {
+	struct device *dev=ptr;
 	ipx_route **r = &ipx_router_list;
 	ipx_route *tmp;
 
+	if(event!=NETDEV_DOWN)
+		return NOTIFY_DONE;
 	while ((tmp = *r) != NULL) {
 		if (tmp->dev == dev) {
 			*r = tmp->next;
@@ -401,6 +406,7 @@ void ipxrtr_device_down(struct device *dev)
 		}
 		r = &tmp->next;
 	}
+	return NOTIFY_DONE;
 }
 
 static int ipxrtr_ioctl(unsigned int cmd, void *arg)
@@ -427,7 +433,6 @@ static int ipxrtr_ioctl(unsigned int cmd, void *arg)
 	}
 }
 
-/* Called from proc fs */
 int ipx_rt_get_info(char *buffer, char **start, off_t offset, int length)
 {
 	ipx_route *rt;
@@ -435,12 +440,13 @@ int ipx_rt_get_info(char *buffer, char **start, off_t offset, int length)
 	off_t pos=0;
 	off_t begin=0;
 
-	len += sprintf (buffer,"Net      Router                Flags Dev\n");
+	len += sprintf (buffer,"Net      Router                Flags Dev   Frame\n");
 	for (rt = ipx_router_list; rt != NULL; rt = rt->next)
 	{
-		len += sprintf (buffer+len,"%08lX %08lX:%02X%02X%02X%02X%02X%02X %02X    %s\n", ntohl(rt->net),
+		len += sprintf (buffer+len,"%08lX %08lX:%02X%02X%02X%02X%02X%02X %02X    %s  %d\n", ntohl(rt->net),
 			ntohl(rt->router_net), rt->router_node[0], rt->router_node[1], rt->router_node[2],
-			rt->router_node[3], rt->router_node[4], rt->router_node[5], rt->flags, rt->dev->name);
+			rt->router_node[3], rt->router_node[4], rt->router_node[5], rt->flags, rt->dev->name,
+			ntohs(rt->dlink_type));
 		pos=begin+len;
 		if(pos<offset)
 		{
@@ -465,7 +471,7 @@ int ipx_rt_get_info(char *buffer, char **start, off_t offset, int length)
  
 static int ipx_fcntl(struct socket *sock, unsigned int cmd, unsigned long arg)
 {
-	/* ipx_socket *sk=(ipx_socket *)sock->data; */
+	ipx_socket *sk=(ipx_socket *)sock->data;
 	switch(cmd)
 	{
 		default:
@@ -563,7 +569,10 @@ static void def_callback1(struct sock *sk)
 static void def_callback2(struct sock *sk, int len)
 {
 	if(!sk->dead)
+	{
 		wake_up_interruptible(sk->sleep);
+		sock_wake_async(sk->socket, 1);
+	}
 }
 
 static int ipx_create(struct socket *sock, int protocol)
@@ -643,10 +652,13 @@ static unsigned short first_free_socketnum(void)
 {
 	static unsigned short	socketNum = 0x4000;
 
-	while (ipx_find_socket(htons(socketNum)) != NULL)
-		if (socketNum > 0x7ffc) socketNum = 0x4000;
+	while (ipx_find_socket(ntohs(socketNum)) != NULL)
+		if (socketNum > 0x7ffc)
+			socketNum = 0x4000;
+		else
+			socketNum++;
 
-	return	htons(socketNum++);
+	return	ntohs(socketNum);
 }
 	
 static int ipx_bind(struct socket *sock, struct sockaddr *uaddr,int addr_len)
@@ -726,8 +738,8 @@ static int ipx_connect(struct socket *sock, struct sockaddr *uaddr,
 	
 	sk->state = TCP_CLOSE;	
 	sock->state = SS_UNCONNECTED;
-	
-	if(addr_len!=sizeof(addr))
+
+	if(addr_len!=sizeof(*addr))
 		return(-EINVAL);
 	addr=(struct sockaddr_ipx *)uaddr;
 	
@@ -748,6 +760,7 @@ static int ipx_connect(struct socket *sock, struct sockaddr *uaddr,
 	memcpy(sk->ipx_dest_addr.node,addr->sipx_node,sizeof(sk->ipx_source_addr.node));
 	if(ipxrtr_get_dev(sk->ipx_dest_addr.net)==NULL)
 		return -ENETUNREACH;
+	sk->ipx_type=addr->sipx_type;
 	sock->state = SS_CONNECTED;
 	sk->state=TCP_ESTABLISHED;
 	return(0);
@@ -786,12 +799,57 @@ static int ipx_getname(struct socket *sock, struct sockaddr *uaddr,
 		addr=&sk->ipx_source_addr;
 		
 	sipx.sipx_family = AF_IPX;
+	sipx.sipx_type = sk->ipx_type;
 	sipx.sipx_port = addr->sock;
 	sipx.sipx_network = addr->net;
 	memcpy(sipx.sipx_node,addr->node,sizeof(sipx.sipx_node));
 	memcpy(uaddr,&sipx,sizeof(sipx));
 	return(0);
 }
+
+#if 0
+/*
+ * User to dump IPX packets (debugging)
+ */
+void dump_data(char *str,unsigned char *d) {
+  static char h2c[] = "0123456789ABCDEF";
+  int l,i;
+  char *p, b[64];
+  for (l=0;l<16;l++) {
+    p = b;
+    for (i=0; i < 8 ; i++) {
+      *(p++) = h2c[d[i] & 0x0f];
+      *(p++) = h2c[(d[i] >> 4) & 0x0f];
+      *(p++) = ' ';
+    }
+    *(p++) = '-';
+    *(p++) = ' ';
+    for (i=0; i < 8 ; i++)  *(p++) = ' '<= d[i] && d[i]<'\177' ? d[i] : '.';
+    *p = '\000';
+    d += i;
+    printk("%s-%04X: %s\n",str,l*8,b);
+  }
+}
+
+void dump_addr(char *str,ipx_address *p) {
+  printk("%s: %08X:%02X%02X%02X%02X%02X%02X:%04X\n",
+   str,ntohl(p->net),p->node[0],p->node[1],p->node[2],
+   p->node[3],p->node[4],p->node[5],ntohs(p->sock));
+}
+
+void dump_hdr(char *str,ipx_packet *p) {
+  printk("%s: CHKSUM=%04X SIZE=%d (%04X) HOPS=%d (%02X) TYPE=%02X\n",
+   str,p->ipx_checksum,ntohs(p->ipx_pktsize),ntohs(p->ipx_pktsize),
+   p->ipx_tctrl,p->ipx_tctrl,p->ipx_type);
+  dump_addr("  IPX-DST",&p->ipx_dest);
+  dump_addr("  IPX-SRC",&p->ipx_source);
+}
+
+void dump_pkt(char *str,ipx_packet *p) {
+  dump_hdr(str,p);
+  dump_data(str,(unsigned char *)p);
+}
+#endif
 
 int ipx_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 {
@@ -856,7 +914,7 @@ int ipx_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 		int free_it=0;
 		
 		/* Rule: Don't forward packets that have exceeded the hop limit. This is fixed at 16 in IPX */
-		if(ipx->ipx_tctrl==16)
+		if((ipx->ipx_tctrl==16) || (skb->pkt_type!=PACKET_HOST))
 		{
 			kfree_skb(skb,FREE_READ);
 			return(0);
@@ -872,6 +930,18 @@ int ipx_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 			return(0);
 		}
 
+		/*
+		 *	Ok, before we forward, make sure this is not a local packet on the 
+		 *	other network 
+		 */
+		if (rt->router_net == 0) 
+		{
+			memset(IPXaddr,'\0',6);
+			memcpy(IPXaddr+(6-rt->dev->addr_len),rt->dev->dev_addr,rt->dev->addr_len);
+			if (memcmp(IPXaddr,ipx->ipx_dest.node,6) == 0) 
+				goto DELIVER;
+		}
+	
 		/* Check for differences in outgoing and incoming packet size */
 		incoming_size = skb->len - ntohs(ipx->ipx_pktsize);
 		outgoing_size = rt->datalink->header_length + rt->dev->hard_header_len;
@@ -887,15 +957,20 @@ int ipx_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 				return 0;
 			}
 			free_it=1;
-			skb2->free=1;
 			skb2->len=ntohs(ipx->ipx_pktsize) + outgoing_size;
 			skb2->mem_addr = skb2;
-			skb2->arp = 1;
 			skb2->sk = NULL;
+			skb2->free = 1;
+			skb2->arp = 1;
+			skb2->len = ntohs(ipx->ipx_pktsize) + outgoing_size;
 
-			/* Need to copy with appropriate offsets */
-			memcpy((char *)(skb2+1)+outgoing_size,
-				(char *)(skb+1)+incoming_size,
+			/*
+        		 *	NOTE: src arg for memcpy used to be (skb+1)+insize
+			 *	however, that doesn't work... (dunno why)
+			 *	it should though...
+ 			 */
+ 			
+ 			memcpy((char *)(skb2+1)+outgoing_size,ipx,
 				ntohs(ipx->ipx_pktsize));
 		}
 		else
@@ -918,7 +993,7 @@ int ipx_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 		return(0);
 	}
 	/************ End of router: Now sanity check stuff for us ***************/
-	
+DELIVER:	
 	/* Ok its for us ! */
 	if (ln->net == 0L) {
 /*		printk("IPX: Registering local net %lx\n", ipx->ipx_dest.net);*/
@@ -937,18 +1012,12 @@ int ipx_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 	if (sock->ipx_source_addr.net == 0L)
 		sock->ipx_source_addr.net = ln->net;
 	
-	if(sock->rmem_alloc>=sock->rcvbuf)
+	if(sock_queue_rcv_skb(sock, skb)<0)
 	{
 		kfree_skb(skb,FREE_READ);	/* Socket is full */
 		return(0);
 	}
 	
-	sock->rmem_alloc+=skb->mem_len;
-	skb->sk = sock;
-
-	skb_queue_tail(&sock->receive_queue,skb);
-	if(!sock->dead)
-		sock->data_ready(sock,skb->len);
 	return(0);
 }
 
@@ -998,6 +1067,7 @@ static int ipx_sendto(struct socket *sock, void *ubuf, int len, int noblock,
 			return -ENOTCONN;
 		usipx=&local_sipx;
 		usipx->sipx_family=AF_IPX;
+		usipx->sipx_type=sk->ipx_type;
 		usipx->sipx_port=sk->ipx_dest_addr.sock;
 		usipx->sipx_network=sk->ipx_dest_addr.net;
 		memcpy(usipx->sipx_node,sk->ipx_dest_addr.node,sizeof(usipx->sipx_node));
@@ -1311,6 +1381,7 @@ static struct proto_ops ipx_proto_ops = {
 /* Called by ddi.c on kernel start up */
 
 static struct packet_type ipx_8023_packet_type = 
+
 {
 	0,	/* MUTTER ntohs(ETH_P_8023),*/
 	0,		/* copy */
@@ -1322,12 +1393,18 @@ static struct packet_type ipx_8023_packet_type =
 static struct packet_type ipx_dix_packet_type = 
 {
 	0,	/* MUTTER ntohs(ETH_P_IPX),*/
-	0,		/* copy */
+	NULL,		/* Al devices */
 	ipx_rcv,
 	NULL,
 	NULL,
 };
  
+static struct notifier_block ipx_dev_notifier={
+	ipxrtr_device_event,
+	NULL,
+	0
+};
+
 
 extern struct datalink_proto	*make_EII_client(void);
 extern struct datalink_proto	*make_8023_client(void);
@@ -1347,8 +1424,10 @@ void ipx_proto_init(struct net_proto *pro)
 	
 	if ((p8022_datalink = register_8022_client(val, ipx_rcv)) == NULL)
 		printk("IPX: Unable to register with 802.2\n");
-	
-	printk("Swansea University Computer Society IPX 0.28 BETA for NET3.016\n");
+
+	register_netdevice_notifier(&ipx_dev_notifier);
+		
+	printk("Swansea University Computer Society IPX 0.29 BETA for NET3.019\n");
 	
 }
 #endif

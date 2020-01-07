@@ -14,6 +14,13 @@
 #include <linux/stat.h>
 #include <linux/string.h>
 
+#include "msbuffer.h"
+
+#define NAME_OFFSET(de) ((int) ((de)->d_name - (char *) (de)))
+#define ROUND_UP(x) (((x)+3) & ~3)
+
+
+#define PRINTK(X)
 
 static int msdos_dir_read(struct inode * inode,struct file * filp, char * buf,int count)
 {
@@ -57,6 +64,7 @@ int msdos_readdir(
 	struct dirent *dirent,	/* dirent in user space */
 	int count)
 {
+	struct super_block *sb = inode->i_sb;
 	int ino,i,i2,last;
 	char c,*walk;
 	struct buffer_head *bh;
@@ -73,7 +81,7 @@ int msdos_readdir(
 			put_fs_long(MSDOS_ROOT_INO,&dirent->d_ino);
 			put_fs_byte(0,dirent->d_name+i);
 			put_fs_word(i,&dirent->d_reclen);
-			return i;
+			return ROUND_UP(NAME_OFFSET(dirent) + i + 1);
 		}
 	}
 	if (filp->f_pos & (sizeof(struct msdos_dir_entry)-1)) return -ENOENT;
@@ -85,22 +93,20 @@ int msdos_readdir(
 			for (i = last = 0; i < 8; i++) {
 				if (!(c = de->name[i])) break;
 				if (c >= 'A' && c <= 'Z') c += 32;
-				if (c != ' '){
+				if (c != ' ')
 					last = i+1;
-					*ptname++ = c;
-				}
+				ptname[i] = c;
 			}
 			i = last;
-			*ptname++ = '.';
+			ptname[i] = '.';
 			i++;
 			for (i2 = 0; i2 < 3; i2++) {
 				if (!(c = de->ext[i2])) break;
 				if (c >= 'A' && c <= 'Z') c += 32;
-				if (c != ' '){
+				if (c != ' ')
 					last = i+1;
-					*ptname++ = c;
-				}
-				i++;
+				ptname[i] = c;
+                               i++;
 			}
 			if ((i = last) != 0) {
 				if (!strcmp(de->name,MSDOS_DOT))
@@ -111,8 +117,10 @@ int msdos_readdir(
 				put_fs_long(ino,&dirent->d_ino);
 				memcpy_tofs(dirent->d_name,bufname,i+1);
 				put_fs_word(i,&dirent->d_reclen);
+				PRINTK (("readdir avant brelse\n"));
 				brelse(bh);
-				return i;
+				PRINTK (("readdir retourne %d\n",i));
+				return ROUND_UP(NAME_OFFSET(dirent) + i + 1);
 			}
 		}
 	}

@@ -43,8 +43,14 @@ static struct fileinfo files[SND_NDEVS];
 int
 snd_ioctl_return (int *addr, int value)
 {
+  int error;
+
   if (value < 0)
     return value;
+
+  error = verify_area(VERIFY_WRITE, addr, sizeof(int));
+  if (error)
+    return error;
 
   PUT_WORD_TO_USER (addr, 0, value);
   return 0;
@@ -215,7 +221,7 @@ tenmicrosec (void)
 }
 
 int
-snd_set_irq_handler (int interrupt_level, void (*hndlr) (int))
+snd_set_irq_handler (int interrupt_level, void (*hndlr) (int, struct pt_regs *))
 {
   int             retcode;
 

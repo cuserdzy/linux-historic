@@ -17,6 +17,9 @@
 	Move the theory of operation and memory map documentation.
 	Rework the board error reset
 	The statistics need to be updated correctly.
+
+        Modularized by Pauline Middelink <middelin@polyware.iaf.nl>
+        Changed to support io= irq= by Alan Cox <Alan.Cox@linux.org>
 */
 
 static char *version =
@@ -53,6 +56,10 @@ static char *version =
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
+#ifdef MODULE
+#include <linux/module.h>
+#include <linux/version.h>
+#endif
 
 #include <linux/malloc.h>
 
@@ -283,7 +290,7 @@ extern int express_probe(struct device *dev);	/* Called from Space.c */
 static int	eexp_probe1(struct device *dev, short ioaddr);
 static int	eexp_open(struct device *dev);
 static int	eexp_send_packet(struct sk_buff *skb, struct device *dev);
-static void	eexp_interrupt(int reg_ptr);
+static void	eexp_interrupt(int irq, struct pt_regs *regs);
 static void eexp_rx(struct device *dev);
 static int	eexp_close(struct device *dev);
 static struct enet_statistics *eexp_get_stats(struct device *dev);
@@ -356,7 +363,7 @@ int eexp_probe1(struct device *dev, short ioaddr)
 	}
 
 	/* We've committed to using the board, and can start filling in *dev. */
-	snarf_region(ioaddr, 16);
+	request_region(ioaddr, 16,"eexpress");
 	dev->base_addr = ioaddr;
 
 	for (i = 0; i < 6; i++) {
@@ -435,6 +442,9 @@ eexp_open(struct device *dev)
 	dev->tbusy = 0;
 	dev->interrupt = 0;
 	dev->start = 1;
+#ifdef MODULE
+	MOD_INC_USE_COUNT;
+#endif
 	return 0;
 }
 
@@ -505,9 +515,8 @@ eexp_send_packet(struct sk_buff *skb, struct device *dev)
 /*	The typical workload of the driver:
 	Handle the network interface interrupts. */
 static void
-eexp_interrupt(int reg_ptr)
+eexp_interrupt(int irq, struct pt_regs *regs)
 {
-	int irq = -(((struct pt_regs *)reg_ptr)->orig_eax+2);
 	struct device *dev = (struct device *)(irq2dev_map[irq]);
 	struct net_local *lp;
 	int ioaddr, status, boguscount = 0;
@@ -645,8 +654,14 @@ eexp_close(struct device *dev)
 
 	irq2dev_map[dev->irq] = 0;
 
+	/* release the ioport-region */
+	release_region(ioaddr, 16);
+
 	/* Update the statistics here. */
 
+#ifdef MODULE
+	MOD_DEC_USE_COUNT;
+#endif
 	return 0;
 }
 
@@ -671,6 +686,8 @@ eexp_get_stats(struct device *dev)
 static void
 set_multicast_list(struct device *dev, int num_addrs, void *addrs)
 {
+/* This doesn't work yet */
+#if 0
 	short ioaddr = dev->base_addr;
 	if (num_addrs < 0) {
 		/* Not written yet, this requires expanding the init_words config
@@ -687,6 +704,7 @@ set_multicast_list(struct device *dev, int num_addrs, void *addrs)
 		   cmd. */
 		outw(99, ioaddr);		/* Disable promiscuous mode, use normal mode */
 	}
+#endif
 }
 
 /* The horrible routine to read a word from the serial EEPROM. */
@@ -981,6 +999,38 @@ eexp_rx(struct device *dev)
 	outw(saved_write_ptr, ioaddr + WRITE_PTR);
 }
 
+#ifdef MODULE
+char kernel_version[] = UTS_RELEASE;
+static struct device dev_eexpress = {
+	"        " /*"eexpress"*/, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, express_probe };
+	
+
+int irq=0;
+int io=0;	
+
+int
+init_module(void)
+{
+	dev_eexpress.base_addr=io;
+	dev_eexpress.irq=irq;
+	if (register_netdev(&dev_eexpress) != 0)
+		return -EIO;
+	return 0;
+}
+
+void
+cleanup_module(void)
+{
+	if (MOD_IN_USE)
+		printk("express: device busy, remove delayed\n");
+	else
+	{
+		unregister_netdev(&dev_eexpress);
+		kfree_s(dev_eexpress.priv,sizeof(struct net_local));
+		dev_eexpress.priv=NULL;
+	}
+}
+#endif /* MODULE */
 /*
  * Local variables:
  *  compile-command: "gcc -D__KERNEL__ -I/usr/src/linux/net/inet -I/usr/src/linux/drivers/net -Wall -Wstrict-prototypes -O6 -m486 -c eexpress.c"

@@ -23,15 +23,11 @@
 static inline int namecompare(int len, int maxlen,
 	const char * name, const char * buffer)
 {
-	if (len >= maxlen || !buffer[len]) {
-		unsigned char same;
-		__asm__("repe ; cmpsb ; setz %0"
-			:"=q" (same)
-			:"S" ((long) name),"D" ((long) buffer),"c" (len)
-			:"cx","di","si");
-		return same;
-	}
-	return 0;
+	if (len > maxlen)
+		return 0;
+	if (len < maxlen && buffer[len])
+		return 0;
+	return !memcmp(name, buffer, len);
 }
 
 /*
@@ -193,8 +189,10 @@ static int minix_add_entry(struct inode * dir,
 			}
 		} else {
 			dir->i_mtime = dir->i_ctime = CURRENT_TIME;
+			dir->i_dirt = 1;
 			for (i = 0; i < info->s_namelen ; i++)
 				de->name[i] = (i < namelen) ? name[i] : 0;
+			dir->i_version = ++event;
 			mark_buffer_dirty(bh, 1);
 			*res_dir = de;
 			break;
@@ -470,11 +468,12 @@ int minix_rmdir(struct inode * dir, const char * name, int len)
 	if (inode->i_nlink != 2)
 		printk("empty directory has nlink!=2 (%d)\n",inode->i_nlink);
 	de->inode = 0;
+	dir->i_version = ++event;
 	mark_buffer_dirty(bh, 1);
 	inode->i_nlink=0;
 	inode->i_dirt=1;
-	dir->i_nlink--;
 	inode->i_ctime = dir->i_ctime = dir->i_mtime = CURRENT_TIME;
+	dir->i_nlink--;
 	dir->i_dirt=1;
 	retval = 0;
 end_rmdir:
@@ -523,6 +522,7 @@ repeat:
 		inode->i_nlink=1;
 	}
 	de->inode = 0;
+	dir->i_version = ++event;
 	mark_buffer_dirty(bh, 1);
 	dir->i_ctime = dir->i_mtime = CURRENT_TIME;
 	dir->i_dirt = 1;
@@ -768,8 +768,10 @@ start_up:
 	new_de->inode = old_inode->i_ino;
 	old_dir->i_ctime = old_dir->i_mtime = CURRENT_TIME;
 	old_dir->i_dirt = 1;
+	old_dir->i_version = ++event;
 	new_dir->i_ctime = new_dir->i_mtime = CURRENT_TIME;
 	new_dir->i_dirt = 1;
+	new_dir->i_version = ++event;
 	if (new_inode) {
 		new_inode->i_nlink--;
 		new_inode->i_ctime = CURRENT_TIME;

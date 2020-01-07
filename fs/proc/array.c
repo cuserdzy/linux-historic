@@ -12,7 +12,16 @@
  *                      make sure SET_PROCTITLE works. Also removed
  *                      bad '!' which forced address recalculation for
  *                      EVERY character on the current page.
- *                      <middelin@calvin.iaf.nl>
+ *                      <middelin@polyware.iaf.nl>
+ *
+ * Danny ter Haar    :	Some minor additions for cpuinfo
+ *			<danny@ow.nl>
+ *
+ * Alessandro Rubini :  profile extension.
+ *                      <rubini@ipvvis.unipv.it>
+ *
+ * Jeff Tranter      :  added BogoMips field to cpuinfo
+ *                      <Jeff_Tranter@Mitel.COM>
  */
 
 #include <linux/types.h>
@@ -26,6 +35,9 @@
 #include <linux/string.h>
 #include <linux/mman.h>
 #include <linux/proc_fs.h>
+#include <linux/ioport.h>
+#include <linux/config.h>
+#include <linux/delay.h>
 
 #include <asm/segment.h>
 #include <asm/io.h>
@@ -91,6 +103,64 @@ struct inode_operations proc_kcore_inode_operations = {
 	&proc_kcore_operations, 
 };
 
+#ifdef CONFIG_PROFILE
+
+extern unsigned long prof_len;
+extern unsigned long * prof_buffer;
+/*
+ * This function accesses profiling information. The returned data is
+ * binary: the sampling step and the actual contents of the profile
+ * buffer. Use of the program readprofile is recommended in order to
+ * get meaningful info out of these data.
+ */
+static int read_profile(struct inode *inode, struct file *file, char *buf, int count)
+{
+    unsigned long p = file->f_pos;
+	int read;
+	char * pnt;
+	unsigned long sample_step = 1 << CONFIG_PROFILE_SHIFT;
+
+	if (count < 0)
+	    return -EINVAL;
+	if (p >= (prof_len+1)*sizeof(unsigned long))
+	    return 0;
+	if (count > (prof_len+1)*sizeof(unsigned long) - p)
+	    count = (prof_len+1)*sizeof(unsigned long) - p;
+    read = 0;
+
+    while (p < sizeof(unsigned long) && count > 0) {
+        put_fs_byte(*((char *)(&sample_step)+p),buf);
+		buf++; p++; count--; read++;
+    }
+    pnt = (char *)prof_buffer + p - sizeof(unsigned long);
+	memcpy_tofs(buf,(void *)pnt,count);
+	read += count;
+	file->f_pos += read;
+	return read;
+}
+
+/* Writing to /proc/profile resets the counters */
+static int write_profile(struct inode * inode, struct file * file, char * buf, int count)
+{
+    int i=prof_len;
+
+    while (i--)
+	    prof_buffer[i]=0UL;
+    return count;
+}
+
+static struct file_operations proc_profile_operations = {
+	NULL,           /* lseek */
+	read_profile,
+	write_profile,
+};
+
+struct inode_operations proc_profile_inode_operations = {
+	&proc_profile_operations, 
+};
+
+#endif /* CONFIG_PROFILE */
+
 static int get_loadavg(char * buffer)
 {
 	int a, b, c;
@@ -148,11 +218,29 @@ static int get_uptime(char * buffer)
 
 	uptime = jiffies;
 	idle = task[0]->utime + task[0]->stime;
+
+	/* The formula for the fraction parts really is ((t * 100) / HZ) % 100, but
+	   that would overflow about every five days at HZ == 100.
+	   Therefore the identity a = (a / b) * b + a % b is used so that it is
+	   calculated as (((t / HZ) * 100) + ((t % HZ) * 100) / HZ) % 100.
+	   The part in front of the '+' always evaluates as 0 (mod 100). All divisions
+	   in the above formulas are truncating. For HZ being a power of 10, the
+	   calculations simplify to the version in the #else part (if the printf
+	   format is adapted to the same number of digits as zeroes in HZ.
+	 */
+#if HZ!=100
+	return sprintf(buffer,"%lu.%02lu %lu.%02lu\n",
+		uptime / HZ,
+		(((uptime % HZ) * 100) / HZ) % 100,
+		idle / HZ,
+		(((idle % HZ) * 100) / HZ) % 100);
+#else
 	return sprintf(buffer,"%lu.%02lu %lu.%02lu\n",
 		uptime / HZ,
 		uptime % HZ,
 		idle / HZ,
 		idle % HZ);
+#endif
 }
 
 static int get_meminfo(char * buffer)
@@ -176,6 +264,56 @@ static int get_version(char * buffer)
 	return strlen(buffer);
 }
 
+static int get_cpuinfo(char * buffer)
+{
+#ifdef __i386__
+	char *model[2][9]={{"DX","SX","DX/2","4","SX/2","6",
+				"7","DX/4"},
+			{"Pentium 60/66","Pentium 90/100","3",
+				"4","5","6","7","8"}};
+	char mask[2];
+	mask[0] = x86_mask+'@';
+	mask[1] = '\0';
+	return sprintf(buffer,"cpu\t\t: %c86\n"
+			      "model\t\t: %s\n"
+			      "mask\t\t: %s\n"
+			      "vid\t\t: %s\n"
+			      "fdiv_bug\t: %s\n"
+			      "math\t\t: %s\n"
+			      "hlt\t\t: %s\n"
+			      "wp\t\t: %s\n"
+			      "Integrated NPU\t: %s\n"
+			      "Enhanced VM86\t: %s\n"
+			      "IO Breakpoints\t: %s\n"
+			      "4MB Pages\t: %s\n"
+			      "TS Counters\t: %s\n"
+			      "Pentium MSR\t: %s\n"
+			      "Mach. Ch. Exep.\t: %s\n"
+			      "CMPXCHGB8B\t: %s\n"
+		              "BogoMips\t: %lu.%02lu\n",
+			      x86+'0', 
+			      x86_model ? model[x86-4][x86_model-1] : "Unknown",
+			      x86_mask ? mask : "Unknown",
+			      x86_vendor_id,
+			      fdiv_bug ? "yes" : "no",
+			      hard_math ? "yes" : "no",
+			      hlt_works_ok ? "yes" : "no",
+			      wp_works_ok ? "yes" : "no",
+			      x86_capability & 1 ? "yes" : "no",
+			      x86_capability & 2 ? "yes" : "no",
+			      x86_capability & 4 ? "yes" : "no",
+			      x86_capability & 8 ? "yes" : "no",
+			      x86_capability & 16 ? "yes" : "no",
+			      x86_capability & 32 ? "yes" : "no",
+			      x86_capability & 128 ? "yes" : "no",
+			      x86_capability & 256 ? "yes" : "no",
+		              loops_per_sec/500000, (loops_per_sec/5000) % 100
+			      );
+#else
+	return 0;
+#endif
+}
+
 static struct task_struct ** get_task(pid_t pid)
 {
 	struct task_struct ** p;
@@ -194,7 +332,7 @@ static unsigned long get_phys_addr(struct task_struct ** p, unsigned long ptr)
 
 	if (!p || !*p || ptr >= TASK_SIZE)
 		return 0;
-	page = *PAGE_DIR_OFFSET((*p)->tss.cr3,ptr);
+	page = *PAGE_DIR_OFFSET(*p,ptr);
 	if (!(page & PAGE_PRESENT))
 		return 0;
 	page &= PAGE_MASK;
@@ -260,6 +398,7 @@ static int get_arg(int pid, char * buffer)
 
 static unsigned long get_wchan(struct task_struct *p)
 {
+#ifdef __i386__
 	unsigned long ebp, eip;
 	unsigned long stack_page;
 	int count = 0;
@@ -279,6 +418,7 @@ static unsigned long get_wchan(struct task_struct *p)
 			return eip;
 		ebp = *(unsigned long *) ebp;
 	} while (count++ < 16);
+#endif
 	return 0;
 }
 
@@ -310,7 +450,7 @@ static int get_stat(int pid, char * buffer)
 	}
 	wchan = get_wchan(*p);
 	for(i=0; i<32; ++i) {
-		switch((int) (*p)->sigaction[i].sa_handler) {
+		switch((unsigned long) (*p)->sigaction[i].sa_handler) {
 		case 1: sigignore |= bit; break;
 		case 0: break;
 		default: sigcatch |= bit;
@@ -321,7 +461,7 @@ static int get_stat(int pid, char * buffer)
 	else
 		tty_pgrp = -1;
 	return sprintf(buffer,"%d (%s) %c %d %d %d %d %d %lu %lu \
-%lu %lu %lu %ld %ld %ld %ld %ld %ld %lu %lu %ld %lu %lu %u %lu %lu %lu %lu %lu %lu \
+%lu %lu %lu %ld %ld %ld %ld %ld %ld %lu %lu %ld %lu %lu %lu %lu %lu %lu %lu %lu %lu \
 %lu %lu %lu %lu\n",
 		pid,
 		(*p)->comm,
@@ -373,7 +513,7 @@ static int get_statm(int pid, char * buffer)
 		return 0;
 	tpag = (*p)->mm->end_code / PAGE_SIZE;
 	if ((*p)->state != TASK_ZOMBIE) {
-	  pagedir = (unsigned long *) (*p)->tss.cr3;
+	  pagedir = PAGE_DIR_OFFSET(*p, 0);
 	  for (i = 0; i < 0x300; ++i) {
 	    if ((ptbl = pagedir[i]) == 0) {
 	      tpag -= PTRS_PER_PAGE;
@@ -463,6 +603,9 @@ extern int get_device_list(char *);
 extern int get_filesystem_list(char *);
 extern int get_ksyms_list(char *);
 extern int get_irq_list(char *);
+extern int get_dma_list(char *);
+extern int get_cpuinfo(char *);
+extern int get_pci_list(char*);
 
 static int get_root_array(char * page, int type)
 {
@@ -475,6 +618,14 @@ static int get_root_array(char * page, int type)
 
 		case PROC_MEMINFO:
 			return get_meminfo(page);
+
+#ifdef CONFIG_PCI
+  	        case PROC_PCI:
+			return get_pci_list(page);
+#endif
+			
+		case PROC_CPUINFO:
+			return get_cpuinfo(page);
 
 		case PROC_VERSION:
 			return get_version(page);
@@ -501,6 +652,12 @@ static int get_root_array(char * page, int type)
 
 		case PROC_KSYMS:
 			return get_ksyms_list(page);
+
+		case PROC_DMA:
+			return get_dma_list(page);
+
+		case PROC_IOPORTS:
+			return get_ioport_list(page);
 	}
 	return -EBADF;
 }

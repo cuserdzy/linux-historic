@@ -71,6 +71,8 @@ int do_mmap(struct file * file, unsigned long addr, unsigned long len,
 		default:
 			return -EINVAL;
 		}
+		if ((flags & MAP_DENYWRITE) && (file->f_inode->i_wcount > 0))
+			return -ETXTBSY;
 	} else if ((flags & MAP_TYPE) == MAP_SHARED)
 		return -EINVAL;
 
@@ -85,23 +87,8 @@ int do_mmap(struct file * file, unsigned long addr, unsigned long len,
 		if (len > TASK_SIZE || addr > TASK_SIZE - len)
 			return -EINVAL;
 	} else {
-		struct vm_area_struct * vmm;
-
-		/* Maybe this works.. Ugly it is. */
-		addr = SHM_RANGE_START;
-		while (addr+len < SHM_RANGE_END) {
-			for (vmm = current->mm->mmap ; vmm ; vmm = vmm->vm_next) {
-				if (addr >= vmm->vm_end)
-					continue;
-				if (addr + len <= vmm->vm_start)
-					continue;
-				addr = PAGE_ALIGN(vmm->vm_end);
-				break;
-			}
-			if (!vmm)
-				break;
-		}
-		if (addr+len >= SHM_RANGE_END)
+		addr = get_unmapped_area(len);
+		if (!addr)
 			return -ENOMEM;
 	}
 
@@ -157,13 +144,36 @@ int do_mmap(struct file * file, unsigned long addr, unsigned long len,
 	
 	if (error) {
 		kfree(vma);
-		if (!current->errno)
-			current->errno = -error;
-		return -1;
+		return error;
 	}
 	insert_vm_struct(current, vma);
 	merge_segments(current->mm->mmap);
 	return addr;
+}
+
+/*
+ * Get an address range which is currently unmapped.
+ * For mmap() without MAP_FIXED and shmat() with addr=0.
+ * Return value 0 means ENOMEM.
+ */
+unsigned long get_unmapped_area(unsigned long len)
+{
+	struct vm_area_struct * vmm;
+	unsigned long gap_start = 0, gap_end;
+
+	for (vmm = current->mm->mmap; ; vmm = vmm->vm_next) {
+		if (gap_start < SHM_RANGE_START)
+			gap_start = SHM_RANGE_START;
+		if (!vmm || ((gap_end = vmm->vm_start) > SHM_RANGE_END))
+			gap_end = SHM_RANGE_END;
+		gap_start = PAGE_ALIGN(gap_start);
+		gap_end &= PAGE_MASK;
+		if ((gap_start <= gap_end) && (gap_end - gap_start >= len))
+			return gap_start;
+		if (!vmm)
+			return 0;
+		gap_start = vmm->vm_end;
+	}
 }
 
 asmlinkage int sys_mmap(unsigned long *buffer)
@@ -172,7 +182,7 @@ asmlinkage int sys_mmap(unsigned long *buffer)
 	unsigned long flags;
 	struct file * file = NULL;
 
-	error = verify_area(VERIFY_READ, buffer, 6*4);
+	error = verify_area(VERIFY_READ, buffer, 6*sizeof(long));
 	if (error)
 		return error;
 	flags = get_fs_long(buffer+3);
@@ -245,18 +255,30 @@ void unmap_fixup(struct vm_area_struct *area,
 		/* Add end mapping -- leave beginning for below */
 		mpnt = (struct vm_area_struct *)kmalloc(sizeof(*mpnt), GFP_KERNEL);
 
+		if (!mpnt)
+			return;
 		*mpnt = *area;
 		mpnt->vm_offset += (end - area->vm_start);
 		mpnt->vm_start = end;
 		if (mpnt->vm_inode)
 			mpnt->vm_inode->i_count++;
+		if (mpnt->vm_ops && mpnt->vm_ops->open)
+			mpnt->vm_ops->open(mpnt);
 		area->vm_end = addr;	/* Truncate area */
 		insert_vm_struct(current, mpnt);
 	}
 
 	/* construct whatever mapping is needed */
 	mpnt = (struct vm_area_struct *)kmalloc(sizeof(*mpnt), GFP_KERNEL);
+	if (!mpnt)
+		return;
 	*mpnt = *area;
+	if (mpnt->vm_ops && mpnt->vm_ops->open)
+		mpnt->vm_ops->open(mpnt);
+	if (area->vm_ops && area->vm_ops->close) {
+		area->vm_end = area->vm_start;
+		area->vm_ops->close(area);
+	}
 	insert_vm_struct(current, mpnt);
 }
 
@@ -319,15 +341,16 @@ int do_munmap(unsigned long addr, size_t len)
 		mpnt = free;
 		free = free->vm_next;
 
+		remove_shared_vm_struct(mpnt);
+
 		st = addr < mpnt->vm_start ? mpnt->vm_start : addr;
 		end = addr+len;
 		end = end > mpnt->vm_end ? mpnt->vm_end : end;
 
 		if (mpnt->vm_ops && mpnt->vm_ops->unmap)
 			mpnt->vm_ops->unmap(mpnt, st, end-st);
-		else
-			unmap_fixup(mpnt, st, end-st);
 
+		unmap_fixup(mpnt, st, end-st);
 		kfree(mpnt);
 	}
 
@@ -335,35 +358,14 @@ int do_munmap(unsigned long addr, size_t len)
 	return 0;
 }
 
-/* This is used for a general mmap of a disk file */
-int generic_mmap(struct inode * inode, struct file * file, struct vm_area_struct * vma)
-{
-	extern struct vm_operations_struct file_mmap;
-
-	if (vma->vm_page_prot & PAGE_RW)	/* only PAGE_COW or read-only supported right now */
-		return -EINVAL;
-	if (vma->vm_offset & (inode->i_sb->s_blocksize - 1))
-		return -EINVAL;
-	if (!inode->i_sb || !S_ISREG(inode->i_mode))
-		return -EACCES;
-	if (!inode->i_op || !inode->i_op->bmap)
-		return -ENOEXEC;
-	if (!IS_RDONLY(inode)) {
-		inode->i_atime = CURRENT_TIME;
-		inode->i_dirt = 1;
-	}
-	vma->vm_inode = inode;
-	inode->i_count++;
-	vma->vm_ops = &file_mmap;
-	return 0;
-}
-
 /*
- * Insert vm structure into process list sorted by address.
+ * Insert vm structure into process list sorted by address
+ * and into the inode's i_mmap ring.
  */
 void insert_vm_struct(struct task_struct *t, struct vm_area_struct *vmp)
 {
-	struct vm_area_struct **p, *mpnt;
+	struct vm_area_struct **p, *mpnt, *share;
+	struct inode * inode;
 
 	p = &t->mm->mmap;
 	while ((mpnt = *p) != NULL) {
@@ -375,6 +377,43 @@ void insert_vm_struct(struct task_struct *t, struct vm_area_struct *vmp)
 	}
 	vmp->vm_next = mpnt;
 	*p = vmp;
+
+	inode = vmp->vm_inode;
+	if (!inode)
+		return;
+
+	/* insert vmp into inode's circular share list */
+	if ((share = inode->i_mmap)) {
+		vmp->vm_next_share = share->vm_next_share;
+		vmp->vm_next_share->vm_prev_share = vmp;
+		share->vm_next_share = vmp;
+		vmp->vm_prev_share = share;
+	} else
+		inode->i_mmap = vmp->vm_next_share = vmp->vm_prev_share = vmp;
+}
+
+/*
+ * Remove one vm structure from the inode's i_mmap ring.
+ */
+void remove_shared_vm_struct(struct vm_area_struct *mpnt)
+{
+	struct inode * inode = mpnt->vm_inode;
+
+	if (!inode)
+		return;
+
+	if (mpnt->vm_next_share == mpnt) {
+		if (inode->i_mmap != mpnt)
+			printk("Inode i_mmap ring corrupted\n");
+		inode->i_mmap = NULL;
+		return;
+	}
+
+	if (inode->i_mmap == mpnt)
+		inode->i_mmap = mpnt->vm_next_share;
+
+	mpnt->vm_prev_share->vm_next_share = mpnt->vm_next_share;
+	mpnt->vm_next_share->vm_prev_share = mpnt->vm_prev_share;
 }
 
 /*
@@ -412,7 +451,7 @@ void merge_segments(struct vm_area_struct *mpnt)
 		/*
 		 * and if we have an inode, the offsets must be contiguous..
 		 */
-		if (mpnt->vm_inode != NULL) {
+		if ((mpnt->vm_inode != NULL) || (mpnt->vm_flags & VM_SHM)) {
 			if (prev->vm_offset + prev->vm_end - prev->vm_start != mpnt->vm_offset)
 				continue;
 		}
@@ -424,6 +463,14 @@ void merge_segments(struct vm_area_struct *mpnt)
 		 */
 		prev->vm_end = mpnt->vm_end;
 		prev->vm_next = mpnt->vm_next;
+		if (mpnt->vm_ops && mpnt->vm_ops->close) {
+			mpnt->vm_offset += mpnt->vm_end - mpnt->vm_start;
+			mpnt->vm_start = mpnt->vm_end;
+			mpnt->vm_ops->close(mpnt);
+		}
+		remove_shared_vm_struct(mpnt);
+		if (mpnt->vm_inode)
+			mpnt->vm_inode->i_count--;
 		kfree_s(mpnt, sizeof(*mpnt));
 		mpnt = prev;
 	}

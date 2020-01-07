@@ -175,7 +175,7 @@
 static void abnormal_finished (struct NCR53c7x0_cmd *cmd, int result);
 static int NCR53c8xx_run_tests (struct Scsi_Host *host);
 static int NCR53c8xx_script_len;
-static void NCR53c7x0_intr (int irq);
+static void NCR53c7x0_intr(int irq, struct pt_regs * regs);
 static void intr_phase_mismatch (struct Scsi_Host *host, struct NCR53c7x0_cmd 
     *cmd);
 static void intr_dma (struct Scsi_Host *host, struct NCR53c7x0_cmd *cmd);
@@ -206,6 +206,23 @@ static char NCR53c7xx_msg_nop = NOP;
  */
 static int scan_scsis_buf_busy = 0;
 static char scan_scsis_buf[512];
+
+
+/*
+ * Spl-levels are evil. We shouldn't emulate braindamage.
+ *		Linus
+ */
+static int splx (int new_level)
+{
+    register int old_level, tmp;
+    save_flags(tmp);
+    old_level = (tmp & 0x200) ? 7 : 0;
+    if (new_level)
+	sti();
+    else 
+	cli();
+    return old_level;
+}
 
 /*
  * TODO : 
@@ -276,16 +293,17 @@ static char scan_scsis_buf[512];
  */
 
 struct pci_chip {
-    short pci_device_id;
+    unsigned short pci_device_id;
     int chip;
     int max_revision;
     int min_revision;
 };
 
-static struct pci_chip pci_chip_ids[2] = { 
+static struct pci_chip pci_chip_ids[] = { 
     {PCI_DEVICE_ID_NCR_53C810, 810, 1, 1}, 
+    {PCI_DEVICE_ID_NCR_53C815, 815, 2, 3},
     {PCI_DEVICE_ID_NCR_53C820, 820, -1, -1},
-    {PCI_DEVICE_ID_NCR_53C825, 825, -1, -1},
+    {PCI_DEVICE_ID_NCR_53C825, 825, -1, -1}
 };
 
 #define NPCI_CHIP_IDS (sizeof (pci_chip_ids) / sizeof(pci_chip_ids[0]))
@@ -413,6 +431,8 @@ static int NCR53c7x0_init (struct Scsi_Host *host) {
     switch (hostdata->chip) {
     case 810:
     case 815:
+    case 820:
+    case 825:
     	hostdata->dstat_sir_intr = NCR53c8x0_dstat_sir_intr;
     	hostdata->init_save_regs = NULL;
     	hostdata->dsa_fixup = NCR53c8xx_dsa_fixup;
@@ -2423,7 +2443,7 @@ static struct NCR53c7x0_cmd *create_cmd (Scsi_Cmnd *cmd) {
     tmp->select[0] = IDENTIFY (0, cmd->lun);
 #endif
     patch_dsa_32(tmp->dsa, dsa_msgout, 1, tmp->select);
-    patch_dsa_32(tmp->dsa, dsa_cmdout, 0, COMMAND_SIZE(cmd->cmnd[0]));
+    patch_dsa_32(tmp->dsa, dsa_cmdout, 0, cmd->cmd_len);
     patch_dsa_32(tmp->dsa, dsa_cmdout, 1, cmd->cmnd);
     patch_dsa_32(tmp->dsa, dsa_dataout, 0, cmd_dataout ? 
     	cmd_dataout : hostdata->script + hostdata->E_other_transfer / 
@@ -2907,7 +2927,7 @@ static void intr_scsi (struct Scsi_Host *host, struct NCR53c7x0_cmd *cmd) {
 }
 
 /*
- * Function : static void NCR53c7x0_intr (int irq)
+ * Function : static void NCR53c7x0_intr (int irq, struct pt_regs * regs)
  *
  * Purpose : handle NCR53c7x0 interrupts for all NCR devices sharing
  *	the same IRQ line.  
@@ -2917,7 +2937,7 @@ static void intr_scsi (struct Scsi_Host *host, struct NCR53c7x0_cmd *cmd) {
  *	this handler.  
  */
 
-static void NCR53c7x0_intr (int irq) {
+static void NCR53c7x0_intr (int irq, struct pt_regs * regs) {
     NCR53c7x0_local_declare();
     struct Scsi_Host *host;			/* Host we are looking at */
     unsigned char istat; 			/* Values of interrupt regs */
@@ -3465,7 +3485,7 @@ static void intr_dma (struct Scsi_Host *host, struct NCR53c7x0_cmd *cmd) {
 
     if (dstat & DSTAT_OPC) {
     /* 
-     * Ascertain if this IID interrupts occured before or after a STO 
+     * Ascertain if this IID interrupts occurred before or after a STO 
      * interrupt.  Since the interrupt handling code now leaves 
      * DSP unmodified until _after_ all stacked interrupts have been
      * processed, reading the DSP returns the original DSP register.
@@ -3739,10 +3759,6 @@ int NCR53c7xx_reset (Scsi_Cmnd *cmd) {
     printk ("scsi%d : DANGER : NCR53c7xx_reset is NOP\n",
 	cmd->host->host_no);
     return SCSI_RESET_SNOOZE;
-}
-
-const char *NCR53c7xx_info (void) {
-    return("More info here\n");
 }
 
 /*

@@ -24,7 +24,7 @@ extern int ethif_init(struct device *dev);
 extern int ethdev_init(struct device *dev);
 extern void NS8390_init(struct device *dev, int startp);
 extern int ei_open(struct device *dev);
-extern void ei_interrupt(int reg_ptr);
+extern void ei_interrupt(int irq, struct pt_regs *regs);
 
 #ifndef HAVE_AUTOIRQ
 /* From auto_irq.c */
@@ -41,12 +41,12 @@ struct ei_device {
   void (*reset_8390)(struct device *);
   void (*block_output)(struct device *, int, const unsigned char *, int);
   int  (*block_input)(struct device *, int, char *, int);
-  int open:1;
-  int word16:1;	/* We have the 16-bit (vs 8-bit) version of the card. */
-  int txing:1;			/* Transmit Active */
-  int dmaing:2;			/* Remote DMA Active */
-  int irqlock:1;		/* 8390's intrs disabled when '1'. */
-  int pingpong:1;		/* Using the ping-pong driver */
+  unsigned open:1;
+  unsigned word16:1;  /* We have the 16-bit (vs 8-bit) version of the card. */
+  unsigned txing:1;		/* Transmit Active */
+  unsigned dmaing:2;		/* Remote DMA Active */
+  unsigned irqlock:1;		/* 8390's intrs disabled when '1'. */
+  unsigned pingpong:1;		/* Using the ping-pong driver */
   unsigned char tx_start_page, rx_start_page, stop_page;
   unsigned char current_page;	/* Read pointer in buffer  */
   unsigned char interface_num;	/* Net port (AUI, 10bT.) to use. */
@@ -146,7 +146,7 @@ struct ei_device {
 #define ENTSR_COL 0x04	/* The transmit collided at least once. */
 #define ENTSR_ABT 0x08  /* The transmit collided 16 times, and was deferred. */
 #define ENTSR_CRS 0x10	/* The carrier sense was lost. */
-#define ENTSR_FU  0x20  /* A "FIFO underrun" occured during transmit. */
+#define ENTSR_FU  0x20  /* A "FIFO underrun" occurred during transmit. */
 #define ENTSR_CDH 0x40	/* The collision detect "heartbeat" signal was lost. */
 #define ENTSR_OWC 0x80  /* There was an out-of-window collision. */
 

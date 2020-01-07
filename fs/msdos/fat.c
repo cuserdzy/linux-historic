@@ -10,6 +10,7 @@
 #include <linux/string.h>
 #include <linux/stat.h>
 
+#include "msbuffer.h"
 
 static struct fat_cache *fat_cache,cache[FAT_CACHE];
 
@@ -20,7 +21,6 @@ int fat_access(struct super_block *sb,int nr,int new_value)
 {
 	struct buffer_head *bh,*bh2,*c_bh,*c_bh2;
 	unsigned char *p_first,*p_last;
-	void *data,*data2,*c_data,*c_data2;
 	int first,last,next,copy;
 
 	if ((unsigned) (nr-2) >= MSDOS_SB(sb)->clusters) return 0;
@@ -29,18 +29,16 @@ int fat_access(struct super_block *sb,int nr,int new_value)
 		first = nr*3/2;
 		last = first+1;
 	}
-	if (!(bh = msdos_sread(sb->s_dev,MSDOS_SB(sb)->fat_start+(first >>
-	    SECTOR_BITS),&data))) {
+	if (!(bh = bread(sb->s_dev,MSDOS_SB(sb)->fat_start+(first >>
+	    SECTOR_BITS),SECTOR_SIZE))) {
 		printk("bread in fat_access failed\n");
 		return 0;
 	}
-	if ((first >> SECTOR_BITS) == (last >> SECTOR_BITS)) {
+	if ((first >> SECTOR_BITS) == (last >> SECTOR_BITS))
 		bh2 = bh;
-		data2 = data;
-	}
 	else {
-		if (!(bh2 = msdos_sread(sb->s_dev,MSDOS_SB(sb)->fat_start+(last
-		    >> SECTOR_BITS),&data2))) {
+		if (!(bh2 = bread(sb->s_dev,MSDOS_SB(sb)->fat_start+(last
+		    >> SECTOR_BITS),SECTOR_SIZE))) {
 			brelse(bh);
 			printk("bread in fat_access failed\n");
 			return 0;
@@ -48,13 +46,13 @@ int fat_access(struct super_block *sb,int nr,int new_value)
 	}
 	if (MSDOS_SB(sb)->fat_bits == 16) {
 		p_first = p_last = NULL; /* GCC needs that stuff */
-		next = CF_LE_W(((unsigned short *) data)[(first &
+		next = CF_LE_W(((unsigned short *) bh->b_data)[(first &
 		    (SECTOR_SIZE-1)) >> 1]);
 		if (next >= 0xfff7) next = -1;
 	}
 	else {
-		p_first = &((unsigned char *) data)[first & (SECTOR_SIZE-1)];
-		p_last = &((unsigned char *) data2)[(first+1) &
+		p_first = &((unsigned char *) bh->b_data)[first & (SECTOR_SIZE-1)];
+		p_last = &((unsigned char *) bh2->b_data)[(first+1) &
 		    (SECTOR_SIZE-1)];
 		if (nr & 1) next = ((*p_first >> 4) | (*p_last << 4)) & 0xfff;
 		else next = (*p_first+(*p_last << 8)) & 0xfff;
@@ -62,7 +60,7 @@ int fat_access(struct super_block *sb,int nr,int new_value)
 	}
 	if (new_value != -1) {
 		if (MSDOS_SB(sb)->fat_bits == 16)
-			((unsigned short *) data)[(first & (SECTOR_SIZE-1)) >>
+			((unsigned short *) bh->b_data)[(first & (SECTOR_SIZE-1)) >>
 			    1] = CT_LE_W(new_value);
 		else {
 			if (nr & 1) {
@@ -77,27 +75,27 @@ int fat_access(struct super_block *sb,int nr,int new_value)
 		}
 		mark_buffer_dirty(bh, 1);
 		for (copy = 1; copy < MSDOS_SB(sb)->fats; copy++) {
-			if (!(c_bh = msdos_sread(sb->s_dev,MSDOS_SB(sb)->
+			if (!(c_bh = bread(sb->s_dev,MSDOS_SB(sb)->
 			    fat_start+(first >> SECTOR_BITS)+MSDOS_SB(sb)->
-			    fat_length*copy,&c_data))) break;
-			memcpy(c_data,data,SECTOR_SIZE);
+			    fat_length*copy,SECTOR_SIZE))) break;
+			memcpy(c_bh->b_data,bh->b_data,SECTOR_SIZE);
 			mark_buffer_dirty(c_bh, 1);
-			if (data != data2 || bh != bh2) {
-				if (!(c_bh2 = msdos_sread(sb->s_dev,
+			if (bh != bh2) {
+				if (!(c_bh2 = bread(sb->s_dev,
 				    MSDOS_SB(sb)->fat_start+(first >>
 				    SECTOR_BITS)+MSDOS_SB(sb)->fat_length*copy
-				    +1,&c_data2))) {
+				    +1,SECTOR_SIZE))) {
 					brelse(c_bh);
 					break;
 				}
-				memcpy(c_data2,data2,SECTOR_SIZE);
+				memcpy(c_bh2->b_data,bh2->b_data,SECTOR_SIZE);
 				brelse(c_bh2);
 			}
 			brelse(c_bh);
 		}
 	}
 	brelse(bh);
-	if (data != data2) brelse(bh2);
+	if (bh != bh2) brelse(bh2);
 	return next;
 }
 

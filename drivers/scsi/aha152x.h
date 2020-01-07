@@ -2,16 +2,16 @@
 #define _AHA152X_H
 
 /*
- * $Id: aha152x.h,v 1.2 1994/07/03 13:01:47 root Exp $
+ * $Id: aha152x.h,v 1.6 1994/11/24 21:35:38 root Exp root $
  */
+
+#if defined(__KERNEL__)
 
 #include "../block/blk.h"
 #include "scsi.h"
-#if defined(__KERNEL__)
 #include <asm/io.h>
 
 int        aha152x_detect(Scsi_Host_Template *);
-const char *aha152x_info(void);
 int        aha152x_command(Scsi_Cmnd *);
 int        aha152x_queue(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
 int        aha152x_abort(Scsi_Cmnd *);
@@ -22,14 +22,15 @@ int        aha152x_biosparam(Disk *, int, int*);
    (unless we support more than 1 cmd_per_lun this should do) */
 #define AHA152X_MAXQUEUE	7		
 
-#define AHA152X_REVID "Adaptec 152x SCSI driver; $Revision: 1.2 $"
+#define AHA152X_REVID "Adaptec 152x SCSI driver; $Revision: 1.6 $"
 
 /* Initial value of Scsi_Host entry */
 #define AHA152X       { /* next */		NULL,			    \
+			/* usage_count */  	NULL,			    \
 			/* name */		AHA152X_REVID, 		    \
 			/* detect */		aha152x_detect,             \
 			/* release */		NULL,			    \
-			/* info */		aha152x_info,               \
+			/* info */		NULL,		            \
 			/* command */		aha152x_command,            \
 			/* queuecommand */	aha152x_queue,              \
                         /* abort */		aha152x_abort,              \
@@ -335,5 +336,26 @@ typedef union {
 
 #define TESTLO(PORT, BITS)	\
 	((inb(PORT) & (BITS)) == 0)
+
+#ifdef DEBUG_AHA152X
+enum {
+        debug_skipports =0x0001,
+        debug_queue     =0x0002,
+        debug_intr      =0x0004,
+        debug_selection =0x0008,
+        debug_msgo      =0x0010,
+        debug_msgi      =0x0020,
+        debug_status    =0x0040,
+        debug_cmd       =0x0080,
+        debug_datai     =0x0100,
+        debug_datao     =0x0200,
+        debug_abort     =0x0400,
+        debug_done      =0x0800,
+        debug_biosparam =0x1000,
+        debug_phases    =0x2000,
+        debug_queues    =0x4000,
+        debug_reset     =0x8000,
+};
+#endif
 
 #endif /* _AHA152X_H */

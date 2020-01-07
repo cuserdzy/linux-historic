@@ -55,23 +55,14 @@
  */
 static int ext_match(int len,const char * name,struct ext_dir_entry * de)
 {
-	register int same;
-
 	if (!de || !de->inode || len > EXT_NAME_LEN)
 		return 0;
 	/* "" means "." ---> so paths like "/usr/lib//libc.a" work */
 	if (!len && (de->name[0]=='.') && (de->name[1]=='\0'))
 		return 1;
-	if (len < EXT_NAME_LEN && len != de->name_len)
+	if (len != de->name_len)
 		return 0;
-	__asm__ __volatile__(
-		"cld\n\t"
-		"repe ; cmpsb\n\t"
-		"setz %%al"
-		:"=a" (same)
-		:"0" (0),"S" ((long) name),"D" ((long) de->name),"c" (len)
-		:"cx","di","si");
-	return same;
+	return !memcmp(name, de->name, len);
 }
 
 /*
@@ -127,7 +118,7 @@ static struct buffer_head * ext_find_entry(struct inode * dir,
 		    de->rec_len < de->name_len + 8 ||
 		    (((char *) de) + de->rec_len-1 >= BLOCK_SIZE+bh->b_data)) {
 			printk ("ext_find_entry: bad dir entry\n");
-			printk ("dev=%d, dir=%d, offset=%d, rec_len=%d, name_len=%d\n",
+			printk ("dev=%d, dir=%ld, offset=%ld, rec_len=%d, name_len=%d\n",
 				dir->i_dev, dir->i_ino, offset, de->rec_len, de->name_len);
 			de = (struct ext_dir_entry *) (bh->b_data+BLOCK_SIZE);
 			offset = ((offset / BLOCK_SIZE) + 1) * BLOCK_SIZE;
@@ -275,7 +266,7 @@ printk ("ext_add_entry : creating next block\n");
 		    de->rec_len < de->name_len + 8 ||
 		    (((char *) de) + de->rec_len-1 >= BLOCK_SIZE+bh->b_data)) {
 			printk ("ext_addr_entry: bad dir entry\n");
-			printk ("dev=%d, dir=%d, offset=%d, rec_len=%d, name_len=%d\n",
+			printk ("dev=%d, dir=%ld, offset=%ld, rec_len=%d, name_len=%d\n",
 				dir->i_dev, dir->i_ino, offset, de->rec_len, de->name_len);
 			brelse (bh);
 			return NULL;
@@ -504,7 +495,7 @@ static int empty_dir(struct inode * inode)
 		if (de->rec_len < 8 || de->rec_len %4 != 0 ||
 		    de->rec_len < de->name_len + 8) {
 			printk ("empty_dir: bad dir entry\n");
-			printk ("dev=%d, dir=%d, offset=%d, rec_len=%d, name_len=%d\n",
+			printk ("dev=%d, dir=%ld, offset=%ld, rec_len=%d, name_len=%d\n",
 				inode->i_dev, inode->i_ino, offset, de->rec_len, de->name_len);
 			brelse (bh);
 			return 1;
@@ -605,7 +596,7 @@ int ext_unlink(struct inode * dir, const char * name, int len)
 	if (S_ISDIR(inode->i_mode))
 		goto end_unlink;
 	if (!inode->i_nlink) {
-		printk("Deleting nonexistent file (%04x:%d), %d\n",
+		printk("Deleting nonexistent file (%04x:%ld), %d\n",
 			inode->i_dev,inode->i_ino,inode->i_nlink);
 		inode->i_nlink=1;
 	}
@@ -819,8 +810,7 @@ start_up:
 		retval = -EEXIST;
 		if (new_bh)
 			goto end_rename;
-		retval = -EACCES;
-		if (!permission(old_inode, MAY_WRITE))
+		if ((retval = permission(old_inode, MAY_WRITE)) != 0)
 			goto end_rename;
 		retval = -EINVAL;
 		if (subdir(new_dir, old_inode))

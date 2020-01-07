@@ -43,10 +43,10 @@
  *		Alan Cox	:	for new sk_buff allocations wmalloc/rmalloc now call alloc_skb
  *		Alan Cox	:	kfree_s calls now are kfree_skbmem so we can track skb resources
  *		Alan Cox	:	Supports socket option broadcast now as does udp. Packet and raw need fixing.
- *		Alan Cox	:	Added RCVBUF,SNDBUF size setting. It suddenly occured to me how easy it was so...
+ *		Alan Cox	:	Added RCVBUF,SNDBUF size setting. It suddenly occurred to me how easy it was so...
  *		Rick Sladkey	:	Relaxed UDP rules for matching packets.
  *		C.E.Hawkins	:	IFF_PROMISC/SIOCGHWADDR support
- *	Pauline Middelink	:	Pidentd support
+ *	Pauline Middelink	:	identd support
  *		Alan Cox	:	Fixed connect() taking signals I think.
  *		Alan Cox	:	SO_LINGER supported
  *		Alan Cox	:	Error reporting fixes
@@ -61,6 +61,7 @@
  *		Adam Caldwell	:	Missing return in SO_DONTROUTE/SO_DEBUG code
  *		Alan Cox	:	Split IP from generic code
  *		Alan Cox	:	New kfree_skbmem()
+ *		Alan Cox	:	Make SO_DEBUG superuser only.
  *
  * To Fix:
  *
@@ -133,6 +134,8 @@ int sock_setsockopt(struct sock *sk, int level, int optname,
 		  	return(-ENOPROTOOPT);
 
 		case SO_DEBUG:	
+			if(!suser())
+				return(-EPERM);
 			sk->debug=val?1:0;
 			return 0;
 		case SO_DONTROUTE:
@@ -317,9 +320,11 @@ struct sk_buff *sock_wmalloc(struct sock *sk, unsigned long size, int force, int
 			struct sk_buff * c = alloc_skb(size, priority);
 			if (c) 
 			{
+				unsigned long flags;
+				save_flags(flags);
 				cli();
 				sk->wmem_alloc+= c->mem_len;
-				sti();
+				restore_flags(flags); /* was sti(); */
 			}
 			return c;
 		}
@@ -338,9 +343,11 @@ struct sk_buff *sock_rmalloc(struct sock *sk, unsigned long size, int force, int
 			struct sk_buff *c = alloc_skb(size, priority);
 			if (c) 
 			{
+				unsigned long flags;
+				save_flags(flags);
 				cli();
 				sk->rmem_alloc += c->mem_len;
-				sti();
+				restore_flags(flags); /* was sti(); */
 			}
 			return(c);
 		}
@@ -383,11 +390,17 @@ unsigned long sock_wspace(struct sock *sk)
 
 void sock_wfree(struct sock *sk, struct sk_buff *skb, unsigned long size)
 {
+#ifdef CONFIG_SKB_CHECK
 	IS_SKB(skb);
+#endif
 	kfree_skbmem(skb, size);
 	if (sk) 
 	{
+		unsigned long flags;
+		save_flags(flags);
+		cli();
 		sk->wmem_alloc -= size;
+		restore_flags(flags);
 		/* In case it might be waiting for more memory. */
 		if (!sk->dead)
 			sk->write_space(sk);
@@ -398,26 +411,143 @@ void sock_wfree(struct sock *sk, struct sk_buff *skb, unsigned long size)
 
 void sock_rfree(struct sock *sk, struct sk_buff *skb, unsigned long size)
 {
+#ifdef CONFIG_SKB_CHECK
 	IS_SKB(skb);
+#endif	
 	kfree_skbmem(skb, size);
 	if (sk) 
 	{
+		unsigned long flags;
+		save_flags(flags);
+		cli();
 		sk->rmem_alloc -= size;
+		restore_flags(flags);
 	}
 }
 
+/*
+ *	Generic send/receive buffer handlers
+ */
+
+struct sk_buff *sock_alloc_send_skb(struct sock *sk, unsigned long size, int noblock, int *errcode)
+{
+	struct sk_buff *skb;
+	int err;
+
+	sk->inuse=1;
+		
+	do
+	{
+		if(sk->err!=0)
+		{
+			cli();
+			err= -sk->err;
+			sk->err=0;
+			sti();
+			*errcode=err;
+			return NULL;
+		}
+		
+		if(sk->shutdown&SEND_SHUTDOWN)
+		{
+			*errcode=-EPIPE;
+			return NULL;
+		}
+		
+		skb = sock_wmalloc(sk, size, 0, GFP_KERNEL);
+		
+		if(skb==NULL)
+		{
+			unsigned long tmp;
+
+			sk->socket->flags |= SO_NOSPACE;
+			if(noblock)
+			{
+				*errcode=-EAGAIN;
+				return NULL;
+			}
+			if(sk->shutdown&SEND_SHUTDOWN)
+			{
+				*errcode=-EPIPE;
+				return NULL;
+			}
+			tmp = sk->wmem_alloc;
+			cli();
+			if(sk->shutdown&SEND_SHUTDOWN)
+			{
+				sti();
+				*errcode=-EPIPE;
+				return NULL;
+			}
+			
+			if( tmp <= sk->wmem_alloc)
+			{
+				sk->socket->flags &= ~SO_NOSPACE;
+				interruptible_sleep_on(sk->sleep);
+				if (current->signal & ~current->blocked) 
+				{
+					sti();
+					*errcode = -ERESTARTSYS;
+					return NULL;
+				}
+			}
+			sti();
+		}
+	}
+	while(skb==NULL);
+		
+	return skb;
+}
+
+/*
+ *	Queue a received datagram if it will fit. Stream and sequenced protocols
+ *	can't normally use this as they need to fit buffers in and play with them.
+ */
+
+int sock_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
+{
+	unsigned long flags;
+	if(sk->rmem_alloc + skb->mem_len >= sk->rcvbuf)
+		return -ENOMEM;
+	save_flags(flags);
+	cli();
+	sk->rmem_alloc+=skb->mem_len;
+	skb->sk=sk;
+	restore_flags(flags);
+	skb_queue_tail(&sk->receive_queue,skb);
+	if(!sk->dead)
+		sk->data_ready(sk,skb->len);
+	return 0;
+}
 
 void release_sock(struct sock *sk)
 {
+	unsigned long flags;
+#ifdef CONFIG_INET
 	struct sk_buff *skb;
+#endif
 
 	if (!sk->prot)
 		return;
+	/*
+	 *	Make the backlog atomic. If we don't do this there is a tiny
+	 *	window where a packet may arrive between the sk->blog being 
+	 *	tested and then set with sk->inuse still 0 causing an extra 
+	 *	unwanted re-entry into release_sock().
+	 */
+
+	save_flags(flags);
+	cli();
 	if (sk->blog) 
+	{
+		restore_flags(flags);
 		return;
+	}
+	sk->blog=1;
+	sk->inuse = 1;
+	restore_flags(flags);
 #ifdef CONFIG_INET
 	/* See if we have any packets built up. */
-	sk->inuse = 1;
 	while((skb = skb_dequeue(&sk->back_log)) != NULL) 
 	{
 		sk->blog = 1;

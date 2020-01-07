@@ -16,20 +16,15 @@
 .c.o:
 	$(CC) $(CFLAGS) -c $<
 
-OBJS  = sched.o sys_call.o traps.o irq.o dma.o fork.o exec_domain.o \
- 	panic.o printk.o vsprintf.o sys.o module.o ksyms.o exit.o \
-	signal.o ptrace.o ioport.o itimer.o \
-	info.o ldt.o time.o tqueue.o vm86.o bios32.o splx.o
+OBJS  = sched.o dma.o fork.o exec_domain.o panic.o printk.o sys.o \
+	module.o ksyms.o exit.o signal.o itimer.o info.o time.o softirq.o \
+	resource.o
 
 all: kernel.o
 
 kernel.o: $(OBJS)
 	$(LD) -r -o kernel.o $(OBJS)
 	sync
-
-sys_call.s: sys_call.S
-
-sys_call.o: sys_call.s
 
 sched.o: sched.c
 	$(CC) $(CFLAGS) $(PROFILING) -fno-omit-frame-pointer -c $<
@@ -38,6 +33,7 @@ dep:
 	$(CPP) -M *.c > .depend
 
 dummy:
+modules:
 
 #
 # include a dependency file if one exists

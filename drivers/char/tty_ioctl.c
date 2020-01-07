@@ -1,5 +1,5 @@
 /*
- *  linux/kernel/drivers/char/tty_ioctl.c
+ *  linux/drivers/char/tty_ioctl.c
  *
  *  Copyright (C) 1991, 1992, 1993, 1994  Linus Torvalds
  *
@@ -12,7 +12,6 @@
 #include <linux/termios.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/major.h>
 #include <linux/tty.h>
@@ -23,6 +22,8 @@
 #include <asm/bitops.h>
 #include <asm/segment.h>
 #include <asm/system.h>
+
+#undef TTY_DEBUG_WAIT_UNTIL_SENT
 
 #undef	DEBUG
 #ifdef DEBUG
@@ -42,6 +43,9 @@ void wait_until_sent(struct tty_struct * tty, int timeout)
 {
 	struct wait_queue wait = { current, NULL };
 
+#ifdef TTY_DEBUG_WAIT_UNTIL_SENT
+	printk("%s wait until sent...\n", tty_name(tty));
+#endif
 	if (!tty->driver.chars_in_buffer ||
 	    !tty->driver.chars_in_buffer(tty))
 		return;
@@ -52,6 +56,9 @@ void wait_until_sent(struct tty_struct * tty, int timeout)
 	else
 		current->timeout = (unsigned) -1;
 	do {
+#ifdef TTY_DEBUG_WAIT_UNTIL_SENT
+		printk("waiting %s...(%d)\n", tty_name(tty), tty->driver.chars_in_buffer(tty));
+#endif
 		current->state = TASK_INTERRUPTIBLE;
 		if (current->signal & ~current->blocked)
 			break;
@@ -98,6 +105,9 @@ static int set_termios(struct tty_struct * tty, unsigned long arg, int opt)
 		return retval;
 
 	if (opt & TERMIOS_TERMIO) {
+		retval = verify_area(VERIFY_READ, (void *) arg, sizeof(struct termio));
+		if (retval)
+			return retval;
 		tmp_termios = *tty->termios;
 		memcpy_fromfs(&tmp_termio, (struct termio *) arg,
 			      sizeof (struct termio));
@@ -109,9 +119,13 @@ static int set_termios(struct tty_struct * tty, unsigned long arg, int opt)
 		SET_LOW_BITS(tmp_termios.c_lflag, tmp_termio.c_lflag);
 		memcpy(&tmp_termios.c_cc, &tmp_termio.c_cc, NCC);
 #undef SET_LOW_BITS
-	} else
+	} else {
+		retval = verify_area(VERIFY_READ, (void *) arg, sizeof(struct termios));
+		if (retval)
+			return retval;
 		memcpy_fromfs(&tmp_termios, (struct termios *) arg,
 			      sizeof (struct termios));
+	}
 
 	if ((opt & TERMIOS_FLUSH) && tty->ldisc.flush_buffer)
 		tty->ldisc.flush_buffer(tty);
@@ -307,20 +321,22 @@ int n_tty_ioctl(struct tty_struct * tty, struct file * file,
 					    (unsigned long *) arg);
 			return 0;
 		case TIOCGLCKTRMIOS:
-			arg = get_fs_long((unsigned long *) arg);
 			retval = verify_area(VERIFY_WRITE, (void *) arg,
 					     sizeof (struct termios));
 			if (retval)
 				return retval;
 			memcpy_tofs((struct termios *) arg,
-				    &real_tty->termios_locked,
+				    real_tty->termios_locked,
 				    sizeof (struct termios));
 			return 0;
 		case TIOCSLCKTRMIOS:
 			if (!suser())
 				return -EPERM;
-			arg = get_fs_long((unsigned long *) arg);
-			memcpy_fromfs(&real_tty->termios_locked,
+			retval = verify_area(VERIFY_READ, (void *) arg,
+					     sizeof (struct termios));
+			if (retval)
+				return retval;
+			memcpy_fromfs(real_tty->termios_locked,
 				      (struct termios *) arg,
 				      sizeof (struct termios));
 			return 0;

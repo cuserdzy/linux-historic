@@ -12,6 +12,9 @@
 #include <linux/string.h>
 #include <linux/stat.h>
 
+#include "msbuffer.h"
+
+#define PRINTK(x)
 /* Well-known binary file extensions */
 
 static char bin_extensions[] =
@@ -109,9 +112,10 @@ void unlock_fat(struct super_block *sb)
 
 int msdos_add_cluster(struct inode *inode)
 {
-	int count,nr,limit,last,current,sector;
-	void *data;
+	struct super_block *sb = inode->i_sb;
+	int count,nr,limit,last,current,sector,last_sector;
 	struct buffer_head *bh;
+	int cluster_size = MSDOS_SB(inode->i_sb)->cluster_size;
 
 	if (inode->i_ino == MSDOS_ROOT_INO) return -ENOSPC;
 	if (!MSDOS_SB(inode->i_sb)->free_clusters) return -ENOSPC;
@@ -161,44 +165,29 @@ printk("last = %d\n",last);
 #ifdef DEBUG
 if (last) printk("next set to %d\n",fat_access(inode->i_sb,last,-1));
 #endif
-	for (current = 0; current < MSDOS_SB(inode->i_sb)->cluster_size;
-	    current++) {
-		sector = MSDOS_SB(inode->i_sb)->data_start+(nr-2)*
-		    MSDOS_SB(inode->i_sb)->cluster_size+current;
-#ifdef DEBUG
-printk("zeroing sector %d\n",sector);
-#endif
-		if (current < MSDOS_SB(inode->i_sb)->cluster_size-1 &&
-		    !(sector & 1)) {
-			if (!(bh = getblk(inode->i_dev,sector >> 1,
-			    BLOCK_SIZE)))
-				printk("getblk failed\n");
-			else {
-				memset(bh->b_data,0,BLOCK_SIZE);
-				bh->b_uptodate = 1;
-			}
-			current++;
-		}
+	sector = MSDOS_SB(inode->i_sb)->data_start+(nr-2)*cluster_size;
+	last_sector = sector + cluster_size;
+	for ( ; sector < last_sector; sector++) {
+		#ifdef DEBUG
+			printk("zeroing sector %d\n",sector);
+		#endif
+		if (!(bh = getblk(inode->i_dev,sector,SECTOR_SIZE)))
+			printk("getblk failed\n");
 		else {
-			if (!(bh = msdos_sread(inode->i_dev,sector,
-			    &data)))
-				printk("msdos_sread failed\n");
-			else memset(data,0,SECTOR_SIZE);
-		}
-		if (bh) {
+			memset(bh->b_data,0,SECTOR_SIZE);
+			msdos_set_uptodate(sb,bh,1);
 			mark_buffer_dirty(bh, 1);
 			brelse(bh);
 		}
 	}
-	inode->i_blocks += MSDOS_SB(inode->i_sb)->cluster_size;
+	inode->i_blocks += cluster_size;
 	if (S_ISDIR(inode->i_mode)) {
 		if (inode->i_size & (SECTOR_SIZE-1)) {
 			fs_panic(inode->i_sb,"Odd directory size");
 			inode->i_size = (inode->i_size+SECTOR_SIZE) &
 			    ~(SECTOR_SIZE-1);
 		}
-		inode->i_size += SECTOR_SIZE*MSDOS_SB(inode->i_sb)->
-		    cluster_size;
+		inode->i_size += SECTOR_SIZE*cluster_size;
 #ifdef DEBUG
 printk("size is %d now (%x)\n",inode->i_size,inode);
 #endif
@@ -265,26 +254,30 @@ void date_unix2dos(int unix_date,unsigned short *time,
    non-NULL, it is brelse'd before. Pos is incremented. The buffer header is
    returned in bh. */
 
-int msdos_get_entry(struct inode *dir, off_t *pos,struct buffer_head **bh,
+int msdos_get_entry(struct inode *dir, loff_t *pos,struct buffer_head **bh,
     struct msdos_dir_entry **de)
 {
+	struct super_block *sb = dir->i_sb;
 	int sector,offset;
-	void *data;
 
 	while (1) {
 		offset = *pos;
+		PRINTK (("get_entry offset %d\n",offset));
 		if ((sector = msdos_smap(dir,offset >> SECTOR_BITS)) == -1)
 			return -1;
+		PRINTK (("get_entry sector %d %p\n",sector,*bh));
 		if (!sector)
 			return -1; /* beyond EOF */
 		*pos += sizeof(struct msdos_dir_entry);
 		if (*bh)
 			brelse(*bh);
-		if (!(*bh = msdos_sread(dir->i_dev,sector,&data))) {
+		PRINTK (("get_entry sector apres brelse\n"));
+		if (!(*bh = bread(dir->i_dev,sector,SECTOR_SIZE))) {
 			printk("Directory sread (sector %d) failed\n",sector);
 			continue;
 		}
-		*de = (struct msdos_dir_entry *) (data+(offset &
+		PRINTK (("get_entry apres sread\n"));
+		*de = (struct msdos_dir_entry *) ((*bh)->b_data+(offset &
 		    (SECTOR_SIZE-1)));
 		return (sector << MSDOS_DPS_BITS)+((offset & (SECTOR_SIZE-1)) >>
 		    MSDOS_DIR_BITS);
@@ -353,7 +346,8 @@ static int raw_scan_sector(struct super_block *sb,int sector,char *name,
 	struct inode *inode;
 	int entry,start,done;
 
-	if (!(bh = msdos_sread(sb->s_dev,sector,(void **) &data))) return -EIO;
+	if (!(bh = bread(sb->s_dev,sector,SECTOR_SIZE))) return -EIO;
+	data = (struct msdos_dir_entry *) bh->b_data;
 	for (entry = 0; entry < MSDOS_DPS; entry++) {
 		if (name) RSS_NAME
 		else {

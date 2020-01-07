@@ -4,10 +4,21 @@
  *  Copyright (C) 1992  Rick Sladkey
  *
  *  nfs inode and superblock handling functions
+ *
+ *  Modularised by Alan Cox <Alan.Cox@linux.org>, while hacking some
+ *  experimental NFS changes. Modularisation taken straight from SYS5 fs.
  */
 
 #include <asm/system.h>
 #include <asm/segment.h>
+
+#ifdef MODULE
+#include <linux/module.h>
+#include <linux/version.h>
+#else
+#define MOD_INC_USE_COUNT
+#define MOD_DEC_USE_COUNT
+#endif
 
 #include <linux/sched.h>
 #include <linux/nfs_fs.h>
@@ -20,7 +31,7 @@
 
 extern int close_fp(struct file *filp, unsigned int fd);
 
-static int nfs_notify_change(int, struct inode *);
+static int nfs_notify_change(struct inode *, struct iattr *);
 static void nfs_put_inode(struct inode *);
 static void nfs_put_super(struct super_block *);
 static void nfs_statfs(struct super_block *, struct statfs *);
@@ -48,6 +59,7 @@ void nfs_put_super(struct super_block *sb)
 	lock_super(sb);
 	sb->s_dev = 0;
 	unlock_super(sb);
+	MOD_DEC_USE_COUNT;
 }
 
 /*
@@ -67,9 +79,11 @@ struct super_block *nfs_read_super(struct super_block *sb, void *raw_data,
 	struct file *filp;
 	dev_t dev = sb->s_dev;
 
+	MOD_INC_USE_COUNT;
 	if (!data) {
 		printk("nfs_read_super: missing data argument\n");
 		sb->s_dev = 0;
+		MOD_DEC_USE_COUNT;
 		return NULL;
 	}
 	fd = data->fd;
@@ -80,11 +94,13 @@ struct super_block *nfs_read_super(struct super_block *sb, void *raw_data,
 	if (fd >= NR_OPEN || !(filp = current->files->fd[fd])) {
 		printk("nfs_read_super: invalid file descriptor\n");
 		sb->s_dev = 0;
+		MOD_DEC_USE_COUNT;
 		return NULL;
 	}
 	if (!S_ISSOCK(filp->f_inode->i_mode)) {
 		printk("nfs_read_super: not a socket\n");
 		sb->s_dev = 0;
+		MOD_DEC_USE_COUNT;
 		return NULL;
 	}
 	filp->f_count++;
@@ -121,6 +137,7 @@ struct super_block *nfs_read_super(struct super_block *sb, void *raw_data,
 	if (!(sb->s_mounted = nfs_fhget(sb, &data->root, NULL))) {
 		sb->s_dev = 0;
 		printk("nfs_read_super: get root inode failed\n");
+		MOD_DEC_USE_COUNT;
 		return NULL;
 	}
 	return sb;
@@ -193,36 +210,44 @@ struct inode *nfs_fhget(struct super_block *sb, struct nfs_fh *fhandle,
 	return inode;
 }
 
-int nfs_notify_change(int flags, struct inode *inode)
+int nfs_notify_change(struct inode *inode, struct iattr *attr)
 {
 	struct nfs_sattr sattr;
 	struct nfs_fattr fattr;
 	int error;
 
-	if (flags & NOTIFY_MODE)
-		sattr.mode = inode->i_mode;
+	if (attr->ia_valid & ATTR_MODE) 
+		sattr.mode = attr->ia_mode;
 	else
 		sattr.mode = (unsigned) -1;
-	if (flags & NOTIFY_UIDGID) {
-		sattr.uid = inode->i_uid;
-		sattr.gid = inode->i_gid;
-	}
+
+	if (attr->ia_valid & ATTR_UID)
+		sattr.uid = attr->ia_uid;
 	else
-		sattr.uid = sattr.gid = (unsigned) -1;
-	if (flags & NOTIFY_SIZE)
-		sattr.size = S_ISREG(inode->i_mode) ? inode->i_size : -1;
+		sattr.uid = (unsigned) -1;
+
+	if (attr->ia_valid & ATTR_GID)
+		sattr.gid = attr->ia_gid;
+	else
+		sattr.gid = (unsigned) -1;
+
+	if (attr->ia_valid & ATTR_SIZE)
+		sattr.size = S_ISREG(inode->i_mode) ? attr->ia_size : -1;
 	else
 		sattr.size = (unsigned) -1;
-	if (flags & NOTIFY_TIME) {
-		sattr.mtime.seconds = inode->i_mtime;
+
+	if (attr->ia_valid & ATTR_MTIME) {
+		sattr.mtime.seconds = attr->ia_mtime;
 		sattr.mtime.useconds = 0;
-		sattr.atime.seconds = inode->i_atime;
-		sattr.atime.useconds = 0;
-	}
-	else {
+	} else 
 		sattr.mtime.seconds = sattr.mtime.useconds = (unsigned) -1;
+
+	if (attr->ia_valid & ATTR_ATIME) {
+		sattr.atime.seconds = attr->ia_atime;
+		sattr.atime.useconds = 0;
+	} else
 		sattr.atime.seconds = sattr.atime.useconds = (unsigned) -1;
-	}
+
 	error = nfs_proc_setattr(NFS_SERVER(inode), NFS_FH(inode),
 		&sattr, &fattr);
 	if (!error)
@@ -231,3 +256,25 @@ int nfs_notify_change(int flags, struct inode *inode)
 	return error;
 }
 
+#ifdef MODULE
+
+/* Every kernel module contains stuff like this. */
+
+char kernel_version[] = UTS_RELEASE;
+
+static struct file_system_type nfs_fs_type = {
+	nfs_read_super, "nfs", 0, NULL
+};
+
+int init_module(void)
+{
+	register_filesystem(&nfs_fs_type);
+	return 0;
+}
+
+void cleanup_module(void)
+{
+	unregister_filesystem(&nfs_fs_type);
+}
+
+#endif

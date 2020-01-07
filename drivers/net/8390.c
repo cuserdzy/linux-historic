@@ -1,37 +1,34 @@
 /* 8390.c: A general NS8390 ethernet driver core for linux. */
 /*
-  Written 1992,1993 by Donald Becker.
+	Written 1992-94 by Donald Becker.
   
-  Copyright 1993 United States Government as represented by the
-  Director, National Security Agency.	 This software may be used and
-  distributed according to the terms of the GNU Public License,
-  incorporated herein by reference.
+	Copyright 1993 United States Government as represented by the
+	Director, National Security Agency.
+
+	This software may be used and distributed according to the terms
+	of the GNU Public License, incorporated herein by reference.
+
+	The author may be reached as becker@CESDIS.gsfc.nasa.gov, or C/O
+	Center of Excellence in Space Data and Information Sciences
+	   Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
   
   This is the chip-specific code for many 8390-based ethernet adaptors.
   This is not a complete driver, it must be combined with board-specific
   code such as ne.c, wd.c, 3c503.c, etc.
-  
-  The Author may be reached as becker@super.org or
-  C/O Supercomputing Research Ctr., 17100 Science Dr., Bowie MD 20715
   */
 
 static char *version =
-    "8390.c:v0.99-15e 2/16/94 Donald Becker (becker@super.org)\n";
-#include <linux/config.h>
+    "8390.c:v1.10 9/23/94 Donald Becker (becker@cesdis.gsfc.nasa.gov)\n";
 
 /*
   Braindamage remaining:
-  Much of this code should be cleaned up post-1.00, but it has been
-  extensively beta tested in the current form.
+  Much of this code should have been cleaned up, but every attempt 
+  has broken some clone part.
   
   Sources:
   The National Semiconductor LAN Databook, and the 3Com 3c503 databook.
-  The NE* programming info came from the Crynwr packet driver, and figuring
-  out that the those boards are similar to the NatSemi evaluation board
-  described in AN-729.	Thanks NS, no thanks to Novell/Eagle.
   */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/fs.h>
@@ -42,7 +39,7 @@ static char *version =
 #include <asm/segment.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
-#include <errno.h>
+#include <linux/errno.h>
 #include <linux/fcntl.h>
 #include <linux/in.h>
 #include <linux/interrupt.h>
@@ -55,7 +52,7 @@ static char *version =
 
 #ifdef MODULE
 #include <linux/module.h>
-#include "../../tools/version.h"
+#include <linux/version.h>
 #endif
 
 /* These are the operational function interfaces to board-specific
@@ -140,6 +137,10 @@ static int ei_start_xmit(struct sk_buff *skb, struct device *dev)
 			return 1;
 		}
 		isr = inb(e8390_base+EN0_ISR);
+		if (dev->start == 0) {
+			printk("%s: xmit on stopped card\n", dev->name);
+			return 1;
+		}
 		printk(KERN_DEBUG "%s: transmit timed out, TX status %#2x, ISR %#2x.\n",
 			   dev->name, txsr, isr);
 		/* Does the 8390 thinks it has posted an interrupt? */
@@ -237,9 +238,8 @@ static int ei_start_xmit(struct sk_buff *skb, struct device *dev)
 
 /* The typical workload of the driver:
    Handle the ether interface interrupts. */
-void ei_interrupt(int reg_ptr)
+void ei_interrupt(int irq, struct pt_regs * regs)
 {
-    int irq = -(((struct pt_regs *)reg_ptr)->orig_eax+2);
     struct device *dev = (struct device *)(irq2dev_map[irq]);
     int e8390_base;
     int interrupts, boguscount = 0;
@@ -274,6 +274,11 @@ void ei_interrupt(int reg_ptr)
     /* !!Assumption!! -- we stay in page 0.	 Don't break this. */
     while ((interrupts = inb_p(e8390_base + EN0_ISR)) != 0
 		   && ++boguscount < 9) {
+		if (dev->start == 0) {
+			printk("%s: interrupt from stopped card\n", dev->name);
+			interrupts = 0;
+			break;
+		}
 		if (interrupts & ENISR_RDC) {
 			/* Ack meaningless DMA complete. */
 			outb_p(ENISR_RDC, e8390_base + EN0_ISR);
@@ -302,7 +307,11 @@ void ei_interrupt(int reg_ptr)
     }
     
     if (interrupts && ei_debug) {
-		printk("%s: unknown interrupt %#2x\n", dev->name, interrupts);
+		if (boguscount == 9)
+			printk("%s: Too much work at interrupt, status %#2.2x\n",
+				   dev->name, interrupts);
+		else
+			printk("%s: unknown interrupt %#2x\n", dev->name, interrupts);
 		outb_p(E8390_NODMA+E8390_PAGE0+E8390_START, e8390_base + E8390_CMD);
 		outb_p(0xff, e8390_base + EN0_ISR); /* Ack. all intrs. */
     }

@@ -17,43 +17,52 @@
 #ifndef _LINUX_TCP_H
 #define _LINUX_TCP_H
 
+#include <asm/types.h>
 
 #define HEADER_SIZE	64		/* maximum header size		*/
 
 
 struct tcphdr {
-  unsigned short	source;
-  unsigned short	dest;
-  unsigned long		seq;
-  unsigned long		ack_seq;
+	__u16	source;
+	__u16	dest;
+	__u32	seq;
+	__u32	ack_seq;
 #if defined(__i386__)
-  unsigned short	res1:4,
-			doff:4,
-			fin:1,
-			syn:1,
-			rst:1,
-			psh:1,
-			ack:1,
-			urg:1,
-			res2:2;
-#else
-#if defined(__mc680x0__)
-  unsigned short	res2:2,
-  			urg:1,
-  			ack:1,
-  			psh:1,
-  			rst:1,
-  			syn:1,
-  			fin:1,
-  			doff:4,
-  			res1:4;
+	__u16	res1:4,
+		doff:4,
+		fin:1,
+		syn:1,
+		rst:1,
+		psh:1,
+		ack:1,
+		urg:1,
+		res2:2;
+#elif defined(__mc68000__)
+	__u16	res2:2,
+		urg:1,
+		ack:1,
+		psh:1,
+		rst:1,
+		syn:1,
+		fin:1,
+		doff:4,
+		res1:4;
+#elif defined(__alpha__)
+	__u16	res1:4,
+		doff:4,
+		fin:1,
+		syn:1,
+		rst:1,
+		psh:1,
+		ack:1,
+		urg:1,
+		res2:2;
 #else
 #error	"Adjust this structure for your cpu alignment rules"
-#endif  		
 #endif	
-  unsigned short	window;
-  unsigned short	check;
-  unsigned short	urg_ptr;
+	__u16	window;
+	__u16	check;
+	__u16	urg_ptr;
 };
 
 

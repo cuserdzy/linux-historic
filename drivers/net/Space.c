@@ -28,8 +28,6 @@
 #include <linux/netdevice.h>
 #include <linux/errno.h>
 
-#define LOOPBACK			/* always present, right?	*/
-
 #define	NEXT_DEV	NULL
 
 
@@ -49,6 +47,8 @@ extern int el3_probe(struct device *);
 extern int at1500_probe(struct device *);
 extern int at1700_probe(struct device *);
 extern int depca_probe(struct device *);
+extern int apricot_probe(struct device *);
+extern int ewrk3_probe(struct device *);
 extern int el1_probe(struct device *);
 extern int el16_probe(struct device *);
 extern int elplus_probe(struct device *);
@@ -107,6 +107,12 @@ ethif_probe(struct device *dev)
 #endif
 #ifdef CONFIG_DEPCA		/* DEC DEPCA */
 	&& depca_probe(dev)
+#endif
+#ifdef CONFIG_EWRK3             /* DEC EtherWORKS 3 */
+        && ewrk3_probe(dev)
+#endif
+#ifdef CONFIG_APRICOT		/* Apricot I82596 */
+	&& apricot_probe(dev)
 #endif
 #ifdef CONFIG_EL1		/* 3c501 */
 	&& el1_probe(dev)
@@ -192,6 +198,25 @@ static struct device eth0_dev = {
 
 #if defined(SLIP) || defined(CONFIG_SLIP)
     extern int slip_init(struct device *);
+    
+#ifdef SL_SLIP_LOTS
+
+    static struct device slip15_dev={"sl15",0,0,0,0,15,0,0,0,0,NEXT_DEV,slip_init};
+    static struct device slip14_dev={"sl14",0,0,0,0,14,0,0,0,0,&slip15_dev,slip_init};
+    static struct device slip13_dev={"sl13",0,0,0,0,13,0,0,0,0,&slip14_dev,slip_init};
+    static struct device slip12_dev={"sl12",0,0,0,0,12,0,0,0,0,&slip13_dev,slip_init};
+    static struct device slip11_dev={"sl11",0,0,0,0,11,0,0,0,0,&slip12_dev,slip_init};
+    static struct device slip10_dev={"sl10",0,0,0,0,10,0,0,0,0,&slip11_dev,slip_init};
+    static struct device slip9_dev={"sl9",0,0,0,0,9,0,0,0,0,&slip10_dev,slip_init};
+    static struct device slip8_dev={"sl8",0,0,0,0,8,0,0,0,0,&slip9_dev,slip_init};
+    static struct device slip7_dev={"sl7",0,0,0,0,7,0,0,0,0,&slip8_dev,slip_init};
+    static struct device slip6_dev={"sl6",0,0,0,0,6,0,0,0,0,&slip7_dev,slip_init};
+    static struct device slip5_dev={"sl5",0,0,0,0,5,0,0,0,0,&slip6_dev,slip_init};
+    static struct device slip4_dev={"sl4",0,0,0,0,4,0,0,0,0,&slip5_dev,slip_init};
+#   undef	NEXT_DEV
+#   define	NEXT_DEV	(&slip4_dev)
+#endif	/* SL_SLIP_LOTS */
+    
     static struct device slip3_dev = {
 	"sl3",			/* Internal SLIP driver, channel 3	*/
 	0x0,			/* recv memory end			*/
@@ -258,6 +283,14 @@ static struct device ppp0_dev = {
 #define NEXT_DEV (&ppp0_dev)
 #endif   /* PPP */
 
+#ifdef CONFIG_ARCNET
+    extern int arcnet_probe(struct device *dev);
+    static struct device arcnet_dev = {
+	"arc0", 0x0, 0x0, 0x0, 0x0, 0, 0, 0, 0, 0, NEXT_DEV, arcnet_probe, };
+#   undef	NEXT_DEV
+#   define	NEXT_DEV	(&arcnet_dev)
+#endif
+
 #ifdef CONFIG_DUMMY
     extern int dummy_init(struct device *dev);
     static struct device dummy_dev = {
@@ -266,9 +299,8 @@ static struct device ppp0_dev = {
 #   define	NEXT_DEV	(&dummy_dev)
 #endif
 
-#ifdef LOOPBACK
-    extern int loopback_init(struct device *dev);
-    static struct device loopback_dev = {
+extern int loopback_init(struct device *dev);
+struct device loopback_dev = {
 	"lo",			/* Software Loopback interface		*/
 	0x0,			/* recv memory end			*/
 	0x0,			/* recv memory start			*/
@@ -279,10 +311,6 @@ static struct device ppp0_dev = {
 	0, 0, 0,		/* flags				*/
 	NEXT_DEV,		/* next device				*/
 	loopback_init		/* loopback_init should set up the rest	*/
-    };
-#   undef	NEXT_DEV
-#   define	NEXT_DEV	(&loopback_dev)
-#endif
+};
 
-
-struct device *dev_base = NEXT_DEV;
+struct device *dev_base = &loopback_dev;

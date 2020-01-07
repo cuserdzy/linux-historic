@@ -119,7 +119,7 @@ static void isofs_determine_filetype(struct inode * inode)
 static int isofs_file_read(struct inode * inode, struct file * filp, char * buf, int count)
 {
 	int read,left,chars;
-	int block, blocks, offset;
+	int block, blocks, offset, total_blocks;
 	int bhrequest;
 	int ra_blocks, max_block, nextblock;
 	struct buffer_head ** bhb, ** bhe;
@@ -146,12 +146,25 @@ static int isofs_file_read(struct inode * inode, struct file * filp, char * buf,
 		return 0;
 	read = 0;
 	block = filp->f_pos >> ISOFS_BUFFER_BITS(inode);
-	offset = filp->f_pos & (ISOFS_BUFFER_SIZE(inode)-1);
+	offset = (inode->u.isofs_i.i_first_extent + filp->f_pos)
+	  & (ISOFS_BUFFER_SIZE(inode)-1);
 	blocks = (left + offset + ISOFS_BUFFER_SIZE(inode) - 1) / ISOFS_BUFFER_SIZE(inode);
 	bhb = bhe = buflist;
 
 	ra_blocks = read_ahead[MAJOR(inode->i_dev)] / (BLOCK_SIZE >> 9);
 	if(ra_blocks > blocks) blocks = ra_blocks;
+
+	/*
+	 * this is for stopping read ahead at EOF. It's  important for
+	 * reading PhotoCD's, because they have many small data tracks instead
+	 * of one big. And between two data-tracks are some unreadable sectors.
+	 * A read ahead after a EOF may try to read such an unreadable sector.
+	 *    kraxel@cs.tu-berlin.de (Gerd Knorr)
+	 */
+	total_blocks = (inode->i_size + (1 << ISOFS_BUFFER_BITS(inode)) - 1)
+	   >> ISOFS_BUFFER_BITS(inode);
+	if (block + blocks > total_blocks)
+		blocks = total_blocks - block;
 
 	max_block = (inode->i_size + BLOCK_SIZE - 1)/BLOCK_SIZE;
 	nextblock = -1;

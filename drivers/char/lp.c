@@ -4,6 +4,8 @@
  * - Thanks much to Gunter Windau for pointing out to me where the error
  *   checking ought to be.
  * Copyright (C) 1993 by Nigel Gamble (added interrupt code)
+ * Copyright (C) 1994 by Alan Cox (Modularised it)
+ * LPCAREFUL, LPABORT, LPGETSTATUS added by Chris Metcalf, metcalf@lcs.mit.edu
  */
 
 #include <linux/errno.h>
@@ -12,10 +14,51 @@
 #include <linux/sched.h>
 #include <linux/lp.h>
 #include <linux/malloc.h>
+#include <linux/ioport.h>
+#include <linux/fcntl.h>
 
 #include <asm/io.h>
 #include <asm/segment.h>
 #include <asm/system.h>
+
+/* the BIOS manuals say there can be up to 4 lpt devices
+ * but I have not seen a board where the 4th address is listed
+ * if you have different hardware change the table below 
+ * please let me know if you have different equipment
+ * if you have more than 3 printers, remember to increase LP_NO
+ */
+struct lp_struct lp_table[] = {
+	{ 0x3bc, 0, 0, LP_INIT_CHAR, LP_INIT_TIME, LP_INIT_WAIT, NULL, NULL, },
+	{ 0x378, 0, 0, LP_INIT_CHAR, LP_INIT_TIME, LP_INIT_WAIT, NULL, NULL, },
+	{ 0x278, 0, 0, LP_INIT_CHAR, LP_INIT_TIME, LP_INIT_WAIT, NULL, NULL, },
+}; 
+#define LP_NO 3
+
+#ifdef MODULE
+#include <linux/module.h>
+#include <linux/version.h>
+#else
+#define MOD_INC_USE_COUNT
+#define MOD_DEC_USE_COUNT
+#endif
+
+/* Test if printer is ready (and optionally has no error conditions) */
+#define LP_READY(minor, status) \
+  ((LP_F(minor) & LP_CAREFUL) ? _LP_CAREFUL_READY(status) : (status & LP_PBUSY))
+#define LP_CAREFUL_READY(minor, status) \
+  ((LP_F(minor) & LP_CAREFUL) ? _LP_CAREFUL_READY(status) : 1)
+#define _LP_CAREFUL_READY(status) \
+   (status & (LP_PBUSY|LP_POUTPA|LP_PSELECD|LP_PERRORP)) == \
+      (LP_PBUSY|LP_PSELECD|LP_PERRORP) 
+
+/* Allow old versions of tunelp to continue to work */
+#define OLD_LPCHAR   0x0001
+#define OLD_LPTIME   0x0002
+#define OLD_LPABORT  0x0004
+#define OLD_LPSETIRQ 0x0005
+#define OLD_LPGETIRQ 0x0006
+#define OLD_LPWAIT   0x0008
+#define OLD_IOCTL_MAX 8
 
 /* 
  * All my debugging code assumes that you debug with only one printer at
@@ -53,7 +96,7 @@ static int lp_char_polled(char lpchar, int minor)
 		count ++;
 		if(need_resched)
 			schedule();
-	} while(!(status & LP_PBUSY) && count < LP_CHAR(minor));
+	} while(!LP_READY(minor,status) && count < LP_CHAR(minor));
 
 	if (count == LP_CHAR(minor)) {
 		return 0;
@@ -88,6 +131,8 @@ static int lp_char_interrupt(char lpchar, int minor)
 	|| !((status = LP_S(minor)) & LP_PACK) || (status & LP_PBUSY)
 	|| !((status = LP_S(minor)) & LP_PACK) || (status & LP_PBUSY)) {
 
+		if (!LP_CAREFUL_READY(minor, status))
+			return 0;
 		outb_p(lpchar, LP_B(minor));
 		/* must wait before taking strobe high, and after taking strobe
 		   low, according spec.  Some printers need it, others don't. */
@@ -108,7 +153,7 @@ static int lp_char_interrupt(char lpchar, int minor)
 	unsigned int lp_last_call = 0;
 #endif
 
-static void lp_interrupt(int irq)
+static void lp_interrupt(int irq, struct pt_regs *regs)
 {
 	struct lp_struct *lp = &lp_table[0];
 	struct lp_struct *lp_end = &lp_table[LP_NO];
@@ -140,29 +185,26 @@ static int lp_write_interrupt(struct inode * inode, struct file * file, char * b
 				--copy_size;
 				++bytes_written;
 			} else {
-				if (!((status = LP_S(minor)) & LP_PERRORP)) {
-					int rc = total_bytes_written + bytes_written;
-
-					if ((status & LP_POUTPA)) {
-						printk("lp%d out of paper\n", minor);
-						if (!rc)
-							rc = -ENOSPC;
-					} else if (!(status & LP_PSELECD)) {
-						printk("lp%d off-line\n", minor);
-						if (!rc)
-							rc = -EIO;
-					} else {
-						printk("lp%d printer error\n", minor);
-						if (!rc)
-							rc = -EIO;
-					}
-					if(LP_F(minor) & LP_ABORT)
-						return rc;
+				int rc = total_bytes_written + bytes_written;
+				status = LP_S(minor);
+				if ((status & LP_POUTPA)) {
+					printk(KERN_INFO "lp%d out of paper\n", minor);
+					if (LP_F(minor) & LP_ABORT)
+						return rc?rc:-ENOSPC;
+				} else if (!(status & LP_PSELECD)) {
+					printk(KERN_INFO "lp%d off-line\n", minor);
+					if (LP_F(minor) & LP_ABORT)
+						return rc?rc:-EIO;
+				} else if (!(status & LP_PERRORP)) {
+					printk(KERN_ERR "lp%d printer error\n", minor);
+					if (LP_F(minor) & LP_ABORT)
+						return rc?rc:-EIO;
 				}
 				cli();
 				outb_p((LP_PSELECP|LP_PINITP|LP_PINTEN), (LP_C(minor)));
 				status = LP_S(minor);
-				if (!(status & LP_PACK) || (status & LP_PBUSY)) {
+				if ((!(status & LP_PACK) || (status & LP_PBUSY))
+				  && LP_CAREFUL_READY(minor, status)) {
 					outb_p((LP_PSELECP|LP_PINITP), (LP_C(minor)));
 					sti();
 					continue;
@@ -218,7 +260,7 @@ static int lp_write_polled(struct inode * inode, struct file * file,
 			int status = LP_S(minor);
 
 			if (status & LP_POUTPA) {
-				printk("lp%d out of paper\n", minor);
+				printk(KERN_INFO "lp%d out of paper\n", minor);
 				if(LP_F(minor) & LP_ABORT)
 					return temp-buf?temp-buf:-ENOSPC;
 				current->state = TASK_INTERRUPTIBLE;
@@ -226,7 +268,7 @@ static int lp_write_polled(struct inode * inode, struct file * file,
 				schedule();
 			} else
 			if (!(status & LP_PSELECD)) {
-				printk("lp%d off-line\n", minor);
+				printk(KERN_INFO "lp%d off-line\n", minor);
 				if(LP_F(minor) & LP_ABORT)
 					return temp-buf?temp-buf:-EIO;
 				current->state = TASK_INTERRUPTIBLE;
@@ -235,9 +277,9 @@ static int lp_write_polled(struct inode * inode, struct file * file,
 			} else
 	                /* not offline or out of paper. on fire? */
 			if (!(status & LP_PERRORP)) {
-				printk("lp%d reported invalid error status (on fire, eh?)\n", minor);
+				printk(KERN_ERR "lp%d reported invalid error status (on fire, eh?)\n", minor);
 				if(LP_F(minor) & LP_ABORT)
-					return temp-buf?temp-buf:-EFAULT;
+					return temp-buf?temp-buf:-EIO;
 				current->state = TASK_INTERRUPTIBLE;
 				current->timeout = jiffies + LP_TIMEOUT_POLLED;
 				schedule();
@@ -290,22 +332,48 @@ static int lp_open(struct inode * inode, struct file * file)
 	if (LP_F(minor) & LP_BUSY)
 		return -EBUSY;
 
+	MOD_INC_USE_COUNT;
+
+	/* If ABORTOPEN is set and the printer is offline or out of paper,
+	   we may still want to open it to perform ioctl()s.  Therefore we
+	   have commandeered O_NONBLOCK, even though it is being used in
+	   a non-standard manner.  This is strictly a Linux hack, and
+	   should most likely only ever be used by the tunelp application. */
+        if ((LP_F(minor) & LP_ABORTOPEN) && !(file->f_flags & O_NONBLOCK)) {
+		int status = LP_S(minor);
+		if (status & LP_POUTPA) {
+			printk(KERN_INFO "lp%d out of paper\n", minor);
+			MOD_DEC_USE_COUNT;
+			return -ENOSPC;
+		} else if (!(status & LP_PSELECD)) {
+			printk(KERN_INFO "lp%d off-line\n", minor);
+			MOD_DEC_USE_COUNT;
+			return -EIO;
+		} else if (!(status & LP_PERRORP)) {
+			printk(KERN_ERR "lp%d printer error\n", minor);
+			MOD_DEC_USE_COUNT;
+			return -EIO;
+		}
+	}
+
 	if ((irq = LP_IRQ(minor))) {
 		lp_table[minor].lp_buffer = (char *) kmalloc(LP_BUFFER_SIZE, GFP_KERNEL);
-		if (!lp_table[minor].lp_buffer)
+		if (!lp_table[minor].lp_buffer) {
+			MOD_DEC_USE_COUNT;
 			return -ENOMEM;
+		}
 
 		ret = request_irq(irq, lp_interrupt, SA_INTERRUPT, "printer");
 		if (ret) {
 			kfree_s(lp_table[minor].lp_buffer, LP_BUFFER_SIZE);
 			lp_table[minor].lp_buffer = NULL;
 			printk("lp%d unable to use interrupt %d, error %d\n", minor, irq, ret);
+			MOD_DEC_USE_COUNT;
 			return ret;
 		}
 	}
 
 	LP_F(minor) |= LP_BUSY;
-
 	return 0;
 }
 
@@ -321,6 +389,7 @@ static void lp_release(struct inode * inode, struct file * file)
 	}
 
 	LP_F(minor) &= ~LP_BUSY;
+	MOD_DEC_USE_COUNT;
 }
 
 
@@ -337,22 +406,42 @@ static int lp_ioctl(struct inode *inode, struct file *file,
 		return -ENODEV;
 	if ((LP_F(minor) & LP_EXIST) == 0)
 		return -ENODEV;
+	if (cmd <= OLD_IOCTL_MAX)
+		printk(KERN_NOTICE "lp%d: warning: obsolete ioctl %#x (perhaps you need a new tunelp)\n",
+		    minor, cmd);
 	switch ( cmd ) {
+		case OLD_LPTIME:
 		case LPTIME:
 			LP_TIME(minor) = arg;
 			break;
+		case OLD_LPCHAR:
 		case LPCHAR:
 			LP_CHAR(minor) = arg;
 			break;
+		case OLD_LPABORT:
 		case LPABORT:
 			if (arg)
 				LP_F(minor) |= LP_ABORT;
 			else
 				LP_F(minor) &= ~LP_ABORT;
 			break;
+		case LPABORTOPEN:
+			if (arg)
+				LP_F(minor) |= LP_ABORTOPEN;
+			else
+				LP_F(minor) &= ~LP_ABORTOPEN;
+			break;
+		case LPCAREFUL:
+			if (arg)
+				LP_F(minor) |= LP_CAREFUL;
+			else
+				LP_F(minor) &= ~LP_CAREFUL;
+			break;
+		case OLD_LPWAIT:
 		case LPWAIT:
 			LP_WAIT(minor) = arg;
 			break;
+		case OLD_LPSETIRQ:
 		case LPSETIRQ: {
 			int oldirq;
 			int newirq = arg;
@@ -396,8 +485,28 @@ static int lp_ioctl(struct inode *inode, struct file *file,
 			lp_reset(minor);
 			break;
 		}
-		case LPGETIRQ:
+		case OLD_LPGETIRQ:
 			retval = LP_IRQ(minor);
+			break;
+		case LPGETIRQ:
+			retval = verify_area(VERIFY_WRITE, (void *) arg,
+			    sizeof(int));
+		    	if (retval)
+		    		return retval;
+			memcpy_tofs((int *) arg, &LP_IRQ(minor), sizeof(int));
+			break;
+		case LPGETSTATUS:
+			retval = verify_area(VERIFY_WRITE, (void *) arg,
+			    sizeof(int));
+		    	if (retval)
+		    		return retval;
+			else {
+				int status = LP_S(minor);
+				memcpy_tofs((int *) arg, &status, sizeof(int));
+			}
+			break;
+		case LPRESET:
+			lp_reset(minor);
 			break;
 		default:
 			retval = -EINVAL;
@@ -418,6 +527,8 @@ static struct file_operations lp_fops = {
 	lp_release
 };
 
+#ifndef MODULE
+
 long lp_init(long kmem_start)
 {
 	int offset = 0;
@@ -430,6 +541,8 @@ long lp_init(long kmem_start)
 	}
 	/* take on all known port values */
 	for (offset = 0; offset < LP_NO; offset++) {
+		if (check_region(LP_B(offset), 3))
+			continue;
 		/* write to port & read back to check */
 		outb_p( LP_DUMMY, LP_B(offset));
 		for (testvalue = 0 ; testvalue < LP_DELAY ; testvalue++)
@@ -438,7 +551,8 @@ long lp_init(long kmem_start)
 		if (testvalue == LP_DUMMY) {
 			LP_F(offset) |= LP_EXIST;
 			lp_reset(offset);
-			printk("lp_init: lp%d exists, ", offset);
+			printk("lp%d at 0x%04x, ", offset,LP_B(offset));
+			request_region(LP_B(offset), 3, "lp");
 			if (LP_IRQ(offset))
 				printk("using IRQ%d\n", LP_IRQ(offset));
 			else
@@ -450,3 +564,55 @@ long lp_init(long kmem_start)
 		printk("lp_init: no lp devices found\n");
 	return kmem_start;
 }
+
+#else
+
+char kernel_version[]= UTS_RELEASE;
+
+int init_module(void)
+{
+	int offset = 0;
+	unsigned int testvalue = 0;
+	int count = 0;
+
+	if (register_chrdev(LP_MAJOR,"lp",&lp_fops)) {
+		printk("unable to get major %d for line printer\n", LP_MAJOR);
+		return -EIO;
+	}
+	/* take on all known port values */
+	for (offset = 0; offset < LP_NO; offset++) {
+		/* write to port & read back to check */
+		outb_p( LP_DUMMY, LP_B(offset));
+		for (testvalue = 0 ; testvalue < LP_DELAY ; testvalue++)
+			;
+		testvalue = inb_p(LP_B(offset));
+		if (testvalue == LP_DUMMY) {
+			LP_F(offset) |= LP_EXIST;
+			lp_reset(offset);
+			printk("lp%d at 0x%04x, ", offset,LP_B(offset));
+			request_region(LP_B(offset),3,"lp");
+			if (LP_IRQ(offset))
+				printk("using IRQ%d\n", LP_IRQ(offset));
+			else
+				printk("using polling driver\n");
+			count++;
+		}
+	}
+	if (count == 0)
+		printk("lp_init: no lp devices found\n");
+	return 0;
+}
+
+void cleanup_module(void)
+{
+        int offset;
+	if(MOD_IN_USE)
+               printk("lp: busy - remove delayed\n");
+        else
+               unregister_chrdev(LP_MAJOR,"lp");
+	       for (offset = 0; offset < LP_NO; offset++) 
+			if(LP_F(offset) && LP_EXIST) 
+		 		release_region(LP_B(offset),3);
+}
+
+#endif

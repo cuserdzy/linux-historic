@@ -1,6 +1,8 @@
 #ifndef _LINUX_PROC_FS_H
 #define _LINUX_PROC_FS_H
 
+#include <linux/config.h>
+
 /*
  * The proc filesystem constants/structures
  */
@@ -12,6 +14,8 @@ enum root_directory_inos {
 	PROC_MEMINFO,
 	PROC_KMSG,
 	PROC_VERSION,
+	PROC_CPUINFO,
+	PROC_PCI,
 	PROC_SELF,	/* will change inode # */
 	PROC_NET,
 #ifdef CONFIG_DEBUG_MALLOC
@@ -23,7 +27,10 @@ enum root_directory_inos {
 	PROC_DEVICES,
 	PROC_INTERRUPTS,
 	PROC_FILESYSTEMS,
-	PROC_KSYMS
+	PROC_KSYMS,
+	PROC_DMA,	
+	PROC_IOPORTS,
+	PROC_PROFILE /* whether enabled or not */
 };
 
 enum pid_directory_inos {
@@ -57,6 +64,16 @@ enum net_directory_inos {
 #ifdef CONFIG_INET_RARP
 	PROC_NET_RARP,
 #endif
+#ifdef CONFIG_IP_MULTICAST
+	PROC_NET_IGMP,
+#endif
+#ifdef CONFIG_IP_FIREWALL
+	PROC_NET_IPFWFWD,
+	PROC_NET_IPBLFWD,
+#endif
+#ifdef CONFIG_IP_ACCT
+	PROC_NET_IPACCT,
+#endif
 #endif
 #ifdef CONFIG_IPX
 	PROC_NET_IPX_ROUTE,
@@ -71,6 +88,7 @@ enum net_directory_inos {
 	PROC_NET_NR,
 #endif
 #endif
+	PROC_NET_SOCKSTAT,
 	PROC_NET_LAST
 };
 
@@ -96,6 +114,7 @@ extern struct inode_operations proc_net_inode_operations;
 extern struct inode_operations proc_mem_inode_operations;
 extern struct inode_operations proc_array_inode_operations;
 extern struct inode_operations proc_kcore_inode_operations;
+extern struct inode_operations proc_profile_inode_operations;
 extern struct inode_operations proc_kmsg_inode_operations;
 extern struct inode_operations proc_link_inode_operations;
 extern struct inode_operations proc_fd_inode_operations;

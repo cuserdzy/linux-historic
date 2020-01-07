@@ -22,6 +22,9 @@
 #include <linux/sched.h>
 #include <linux/locks.h>
 
+#define NAME_OFFSET(de) ((int) ((de)->d_name - (char *) (de)))
+#define ROUND_UP(x) (((x)+3) & ~3)
+
 static int isofs_readdir(struct inode *, struct file *, struct dirent *, int);
 
 static struct file_operations isofs_dir_operations = {
@@ -69,6 +72,7 @@ static int isofs_readdir(struct inode * inode, struct file * filp,
 	void * cpnt = NULL;
 	unsigned int old_offset;
 	int dlen, rrflag;
+	int high_sierra = 0;
 	char * dpnt, *dpnt1;
 	struct iso_directory_record * de;
 	
@@ -86,7 +90,7 @@ static int isofs_readdir(struct inode * inode, struct file * filp,
 
 	while (filp->f_pos < inode->i_size) {
 #ifdef DEBUG
-		printk("Block, offset: %x %x %x\n",
+		printk("Block, offset, f_pos: %x %x %x\n",
 		       block, offset, filp->f_pos);
 #endif
 		de = (struct iso_directory_record *) (bh->b_data + offset);
@@ -118,10 +122,11 @@ static int isofs_readdir(struct inode * inode, struct file * filp,
 		offset += *((unsigned char *) de);
 		filp->f_pos += *((unsigned char *) de);
 
-		if (offset >=  bufsize) {
+		if (offset > bufsize) {
 		        unsigned int frag1;
 			frag1 = bufsize - old_offset;
 			cpnt = kmalloc(*((unsigned char *) de),GFP_KERNEL);
+			if (!cpnt) return 0;
 			memcpy(cpnt, bh->b_data + old_offset, frag1);
 			de = (struct iso_directory_record *) ((char *)cpnt);
 			brelse(bh);
@@ -153,8 +158,7 @@ static int isofs_readdir(struct inode * inode, struct file * filp,
 			put_fs_byte('.',dirent->d_name+1);
 			i = 2;
 			dpnt = "..";
-			if((inode->i_sb->u.isofs_sb.s_firstdatazone
-			    << bufbits) != inode->i_ino)
+			if((inode->i_sb->u.isofs_sb.s_firstdatazone) != inode->i_ino)
 				inode_number = inode->u.isofs_i.i_backlink;
 			else
 				inode_number = inode->i_ino;
@@ -175,6 +179,15 @@ static int isofs_readdir(struct inode * inode, struct file * filp,
 		   is no Rock Ridge NM field. */
 		
 		else {
+		  /* Do not report hidden or associated files */
+		        high_sierra = inode->i_sb->u.isofs_sb.s_high_sierra;
+		        if (de->flags[-high_sierra] & 5) {
+			  if (cpnt) {
+			    kfree(cpnt);
+			    cpnt = NULL;
+			  };
+			  continue;
+			}
 			dlen = de->name_len[0];
 			dpnt = de->name;
 			i = dlen;
@@ -193,6 +206,7 @@ static int isofs_readdir(struct inode * inode, struct file * filp,
 			  if(inode->i_sb->u.isofs_sb.s_mapping == 'n') {
 			    dpnt1 = dpnt;
 			    dpnt = kmalloc(dlen, GFP_KERNEL);
+			    if (!dpnt) goto out;
 			    for (i = 0; i < dlen && i < NAME_MAX; i++) {
 			      if (!(c = dpnt1[i])) break;
 			      if (c >= 'A' && c <= 'Z') c |= 0x20;  /* lower case */
@@ -228,7 +242,7 @@ static int isofs_readdir(struct inode * inode, struct file * filp,
 			put_fs_byte(0,i+dirent->d_name);
 			put_fs_word(i,&dirent->d_reclen);
 			brelse(bh);
-			return i;
+			return ROUND_UP(NAME_OFFSET(dirent) + i + 1);
 		}
 	      }
 	/* We go here for any condition we cannot handle.  We also drop through

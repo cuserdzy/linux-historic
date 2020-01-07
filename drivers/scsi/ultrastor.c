@@ -283,18 +283,21 @@ static const unsigned short ultrastor_ports_14f[] = {
 };
 #endif
 
-static void ultrastor_interrupt(int cpl);
+static void ultrastor_interrupt(int, struct pt_regs *);
 static inline void build_sg_list(struct mscp *, Scsi_Cmnd *SCpnt);
 
 
 static inline int find_and_clear_bit_16(unsigned short *field)
 {
   int rv;
+  unsigned long flags;
+
+  save_flags(flags);
   cli();
   if (*field == 0) panic("No free mscp");
   asm("xorl %0,%0\n0:\tbsfw %1,%w0\n\tbtr %0,%1\n\tjnc 0b"
       : "=&r" (rv), "=m" (*field) : "1" (*field));
-  sti();
+  restore_flags(flags);
   return rv;
 }
 
@@ -309,7 +312,7 @@ static inline int find_and_clear_bit_16(unsigned short *field)
 static inline unsigned char xchgb(unsigned char reg,
 				  volatile unsigned char *mem)
 {
-  asm ("xchgb %0, (%2)" : "=q" (reg) : "0" (reg), "q" (mem) : "m");
+  __asm__ ("xchgb %0,%1" : "=q" (reg), "=m" (*mem) : "0" (reg));
   return reg;
 }
 
@@ -435,7 +438,8 @@ static int ultrastor_14f_detect(Scsi_Host_Template * tpnt)
     /* All above tests passed, must be the right thing.  Get some useful
        info. */
 
-    snarf_region(config.port_address, 0x0c); /* Register the I/O space that we use */
+    request_region(config.port_address, 0x0c,"ultrastor"); 
+    /* Register the I/O space that we use */
 
     *(char *)&config_1 = inb(CONFIG(config.port_address + 0));
     *(char *)&config_2 = inb(CONFIG(config.port_address + 1));
@@ -461,11 +465,11 @@ static int ultrastor_14f_detect(Scsi_Host_Template * tpnt)
 	return FALSE;
     }
 
-    /* Final consistancy check, verify previous info. */
+    /* Final consistency check, verify previous info. */
     if (config.subversion != U34F)
 	if (!config.dma_channel || !(config_2.tfr_port & 0x2)) {
 #if (ULTRASTOR_DEBUG & UD_DETECT)
-	    printk("US14F: detect: consistancy check failed\n");
+	    printk("US14F: detect: consistency check failed\n");
 #endif
 	    return FALSE;
 	}
@@ -498,7 +502,7 @@ static int ultrastor_14f_detect(Scsi_Host_Template * tpnt)
 	       config.interrupt);
 	return FALSE;
     }
-    if (config.dma_channel && request_dma(config.dma_channel)) {
+    if (config.dma_channel && request_dma(config.dma_channel,"Ultrastor")) {
 	printk("Unable to allocate DMA channel %u for UltraStor controller.\n",
 	       config.dma_channel);
 	free_irq(config.interrupt);
@@ -620,7 +624,7 @@ int ultrastor_detect(Scsi_Host_Template * tpnt)
   return ultrastor_14f_detect(tpnt) || ultrastor_24f_detect(tpnt);
 }
 
-const char *ultrastor_info(void)
+const char *ultrastor_info(struct Scsi_Host * shpnt)
 {
     static char buf[64];
 
@@ -714,7 +718,7 @@ int ultrastor_queuecommand(Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
     my_mscp->command_link = 0;		/*???*/
     my_mscp->scsi_command_link_id = 0;	/*???*/
     my_mscp->length_of_sense_byte = sizeof SCpnt->sense_buffer;
-    my_mscp->length_of_scsi_cdbs = COMMAND_SIZE(*(unsigned char *)SCpnt->cmnd);
+    my_mscp->length_of_scsi_cdbs = SCpnt->cmd_len;
     memcpy(my_mscp->scsi_cdbs, SCpnt->cmnd, my_mscp->length_of_scsi_cdbs);
     my_mscp->adapter_status = 0;
     my_mscp->target_status = 0;
@@ -1010,7 +1014,7 @@ int ultrastor_biosparam(Disk * disk, int dev, int * dkinfo)
     return 0;
 }
 
-static void ultrastor_interrupt(int cpl)
+static void ultrastor_interrupt(int irq, struct pt_regs *regs)
 {
     unsigned int status;
 #if ULTRASTOR_MAX_CMDS > 1

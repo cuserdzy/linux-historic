@@ -28,7 +28,15 @@
  *              Ross Martin     :       Rewrote arp_rcv() and arp_get_info()
  *		Stephen Henson	:	Add AX25 support to arp_get_info()
  *		Alan Cox	:	Drop data when a device is downed.
- *		Alan Cox	:	Use init_timer()
+ *		Alan Cox	:	Use init_timer().
+ *		Alan Cox	:	Double lock fixes.
+ *		Martin Seine	:	Move the arphdr structure
+ *					to if_arp.h for compatibility.
+ *					with BSD based programs.
+ *              Andrew Tridgell :       Added ARP netmask code and
+ *                                      re-arranged proxy handling.
+ *		Alan Cox	:	Changed to use notifiers.
+ *		Niibe Yutaka	:	Reply for this device or proxies only.
  */
 
 #include <linux/types.h>
@@ -58,6 +66,7 @@
 #include "ax25.h"
 #endif
 
+
 /*
  *	This structure defines the ARP mapping cache. As long as we make changes
  *	in this structure, we keep interrupts of. But normally we can copy the
@@ -71,6 +80,7 @@ struct arp_table
 	unsigned long			last_used;		/* For expiry 			*/
 	unsigned int			flags;			/* Control status 		*/
 	unsigned long			ip;			/* ip address of entry 		*/
+	unsigned long			mask;			/* netmask - used for generalised proxy arps (tridge) 		*/
 	unsigned char			ha[MAX_ADDR_LEN];	/* Hardware address		*/
 	unsigned char			hlen;			/* Length of hardware address 	*/
 	unsigned short			htype;			/* Type of hardware in use	*/
@@ -85,29 +95,6 @@ struct arp_table
 	struct sk_buff_head		skb;			/* list of queued packets 	*/
 };
 
-/*
- *	This structure defines an ethernet arp header.
- */
-
-struct arphdr
-{
-	unsigned short	ar_hrd;		/* format of hardware address	*/
-	unsigned short	ar_pro;		/* format of protocol address	*/
-	unsigned char	ar_hln;		/* length of hardware address	*/
-	unsigned char	ar_pln;		/* length of protocol address	*/
-	unsigned short	ar_op;		/* ARP opcode (command)		*/
-
-#if 0
-	 /*
-	  *	 Ethernet looks like this : This bit is variable sized however...
-	  */
-	unsigned char		ar_sha[ETH_ALEN];	/* sender hardware address	*/
-	unsigned char		ar_sip[4];		/* sender IP address		*/
-	unsigned char		ar_tha[ETH_ALEN];	/* target hardware address	*/
-	unsigned char		ar_tip[4];		/* target IP address		*/
-#endif
-
-};
 
 /*
  *	Configurable Parameters (don't touch unless you know what you are doing
@@ -141,12 +128,22 @@ struct arphdr
 
 #define ARP_CHECK_INTERVAL	(60 * HZ)
 
-
-static void arp_check_expire (unsigned long);  /* Forward declaration. */
+/* Forward declarations. */
+static void arp_check_expire (unsigned long);  
+static struct arp_table *arp_lookup(unsigned long paddr, int exact);
 
 
 static struct timer_list arp_timer =
 	{ NULL, NULL, ARP_CHECK_INTERVAL, 0L, &arp_check_expire };
+
+/*
+ * The default arp netmask is just 255.255.255.255 which means it's
+ * a single machine entry. Only proxy entries can have other netmasks
+ *
+*/
+
+#define DEF_ARP_NETMASK (~0)
+
 
 /*
  * 	The size of the hash table. Must be a power of two.
@@ -154,26 +151,29 @@ static struct timer_list arp_timer =
  * 	on Patrick Schaaf's Host-Cache-Lookup...
  */
 
+
 #define ARP_TABLE_SIZE  16
 
-struct arp_table *arp_tables[ARP_TABLE_SIZE] =
+/* The ugly +1 here is to cater for proxy entries. They are put in their 
+   own list for efficiency of lookup. If you don't want to find a proxy
+   entry then don't look in the last entry, otherwise do 
+*/
+
+#define FULL_ARP_TABLE_SIZE (ARP_TABLE_SIZE+1)
+
+struct arp_table *arp_tables[FULL_ARP_TABLE_SIZE] =
 {
 	NULL,
 };
 
+
 /*
  *	The last bits in the IP address are used for the cache lookup.
+ *      A special entry is used for proxy arp entries
  */
 
 #define HASH(paddr) 		(htonl(paddr) & (ARP_TABLE_SIZE - 1))
-
-/*
- *	Number of proxy arp entries. This is normally zero and we use it to do
- *	some optimizing for normal uses.
- */
-
-static int proxies = 0;
-
+#define PROXY_HASH ARP_TABLE_SIZE
 
 /*
  *	Check if there are too old entries and remove them. If the ATF_PERM
@@ -191,7 +191,7 @@ static void arp_check_expire(unsigned long dummy)
 	save_flags(flags);
 	cli();
 
-	for (i = 0; i < ARP_TABLE_SIZE; i++)
+	for (i = 0; i < FULL_ARP_TABLE_SIZE; i++)
 	{
 		struct arp_table *entry;
 		struct arp_table **pentry = &arp_tables[i];
@@ -202,8 +202,6 @@ static void arp_check_expire(unsigned long dummy)
 				&& !(entry->flags & ATF_PERM))
 			{
 				*pentry = entry->next;	/* remove from list */
-				if (entry->flags & ATF_PUBL)
-					proxies--;
 				del_timer(&entry->timer);	/* Paranoia */
 				kfree_s(entry, sizeof(struct arp_table));
 			}
@@ -232,9 +230,6 @@ static void arp_release_entry(struct arp_table *entry)
 	struct sk_buff *skb;
 	unsigned long flags;
 
-	if (entry->flags & ATF_PUBL)
-		proxies--;
-		
 	save_flags(flags);
 	cli();
 	/* Release the list of `skb' pointers. */
@@ -254,17 +249,21 @@ static void arp_release_entry(struct arp_table *entry)
  *	Purge a device from the ARP queue
  */
  
-void arp_device_down(struct device *dev)
+int arp_device_event(unsigned long event, void *ptr)
 {
+	struct device *dev=ptr;
 	int i;
 	unsigned long flags;
 	
+	if(event!=NETDEV_DOWN)
+		return NOTIFY_DONE;
 	/*
 	 *	This is a bit OTT - maybe we need some arp semaphores instead.
 	 */
+	 
 	save_flags(flags);
 	cli();
-	for (i = 0; i < ARP_TABLE_SIZE; i++)
+	for (i = 0; i < FULL_ARP_TABLE_SIZE; i++)
 	{
 		struct arp_table *entry;
 		struct arp_table **pentry = &arp_tables[i];
@@ -274,8 +273,6 @@ void arp_device_down(struct device *dev)
 			if(entry->dev==dev)
 			{
 				*pentry = entry->next;	/* remove from list */
-				if (entry->flags & ATF_PUBL)
-					proxies--;
 				del_timer(&entry->timer);	/* Paranoia */
 				kfree_s(entry, sizeof(struct arp_table));
 			}
@@ -284,6 +281,7 @@ void arp_device_down(struct device *dev)
 		}
 	}
 	restore_flags(flags);
+	return NOTIFY_DONE;
 }
 
 
@@ -406,9 +404,16 @@ static void arp_expire_request (unsigned long arg)
 	 *	loop through everything again. Maybe hash is good enough, but
 	 *	I will look at it later.
 	 */
-	
+
 	hash = HASH(entry->ip);
-	pentry = &arp_tables[hash];
+
+	/* proxy entries shouldn't really time out so this is really
+	   only here for completeness
+	*/
+	if (entry->flags & ATF_PUBL)
+	  pentry = &arp_tables[PROXY_HASH];
+	else
+	  pentry = &arp_tables[hash];
 	while (*pentry != NULL)
 	{
 		if (*pentry == entry)
@@ -485,12 +490,16 @@ static void arp_send_q(struct arp_table *entry, unsigned char *hw_dest)
 
 void arp_destroy(unsigned long ip_addr, int force)
 {
+        int checked_proxies = 0;
 	struct arp_table *entry;
 	struct arp_table **pentry;
 	unsigned long hash = HASH(ip_addr);
 
 	cli();
 	pentry = &arp_tables[hash];
+	if (! *pentry) /* also check proxy entries */
+	  pentry = &arp_tables[PROXY_HASH];
+
 	while ((entry = *pentry) != NULL)
 	{
 		if (entry->ip == ip_addr)
@@ -504,6 +513,12 @@ void arp_destroy(unsigned long ip_addr, int force)
 			return;
 		}
 		pentry = &entry->next;
+		if (!checked_proxies && ! *pentry)
+		  { /* ugly. we have to make sure we check proxy
+		       entries as well */
+		    checked_proxies = 1;
+		    pentry = &arp_tables[PROXY_HASH];
+		  }
 	}
 	sti();
 }
@@ -526,7 +541,7 @@ int arp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 	struct arp_table *entry;
 	struct arp_table *proxy_entry;
 	int addr_hint,hlen,htype;
-	unsigned long hash,dest_hash;
+	unsigned long hash;
 	unsigned char ha[MAX_ADDR_LEN];	/* So we can enable ints again. */
 	long sip,tip;
 	unsigned char *sha,*tha;
@@ -565,6 +580,9 @@ int arp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 			break;
 #endif
 		case ARPHRD_ETHER:
+#ifdef CONFIG_ARCNET
+		case ARPHRD_ARCNET:
+#endif
 			if(arp->ar_pro != htons(ETH_P_IP))
 			{
 				kfree_skb(skb, FREE_READ);
@@ -647,22 +665,25 @@ int arp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
  * 	check if that someone else is one of our proxies.  If it isn't,
  * 	we can toss it.
  */
-			if (proxies == 0)
-			{
-				kfree_skb(skb, FREE_READ);
-				return 0;
-			}
-	
-			dest_hash = HASH(tip);
 			cli();
-			for(proxy_entry=arp_tables[dest_hash];
-				proxy_entry;
-				proxy_entry = proxy_entry->next)
+			for(proxy_entry=arp_tables[PROXY_HASH];
+			    proxy_entry;
+			    proxy_entry = proxy_entry->next)
 			{
-				if(proxy_entry->ip == tip && proxy_entry->htype==htype)
-					break;
+			  /* we will respond to a proxy arp request
+			     if the masked arp table ip matches the masked
+			     tip. This allows a single proxy arp table
+			     entry to be used on a gateway machine to handle
+			     all requests for a whole network, rather than
+			     having to use a huge number of proxy arp entries
+			     and having to keep them uptodate.
+			     */
+			  if (proxy_entry->htype == htype && 
+			      !((proxy_entry->ip^tip)&proxy_entry->mask))
+			    break;
+
 			}
-			if (proxy_entry && (proxy_entry->flags & ATF_PUBL))
+			if (proxy_entry)
 			{
 				memcpy(ha, proxy_entry->ha, hlen);
 				sti();
@@ -682,7 +703,8 @@ int arp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 /*
  * 	To get here, it must be an arp request for us.  We need to reply.
  */
-			arp_send(ARPOP_REPLY,ETH_P_ARP,sip,dev,tip,sha,dev->dev_addr);
+ 			if(tip==dev->pa_addr)	/* Only reply for the real device address */
+				arp_send(ARPOP_REPLY,ETH_P_ARP,sip,dev,tip,sha,dev->dev_addr);
 		}
 	}
 
@@ -743,6 +765,7 @@ int arp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 			return 0;
 		}
 
+                entry->mask = DEF_ARP_NETMASK;
 		entry->ip = sip;
 		entry->hlen = hlen;
 		entry->htype = htype;
@@ -774,6 +797,10 @@ int arp_find(unsigned char *haddr, unsigned long paddr, struct device *dev,
 {
 	struct arp_table *entry;
 	unsigned long hash;
+#ifdef CONFIG_IP_MULTICAST
+	unsigned long taddr;
+#endif	
+
 	switch (ip_chk_addr(paddr))
 	{
 		case IS_MYADDR:
@@ -781,6 +808,26 @@ int arp_find(unsigned char *haddr, unsigned long paddr, struct device *dev,
 			memcpy(haddr, dev->dev_addr, dev->addr_len);
 			skb->arp = 1;
 			return 0;
+#ifdef CONFIG_IP_MULTICAST
+		case IS_MULTICAST:
+			if(dev->type==ARPHRD_ETHER || dev->type==ARPHRD_IEEE802)
+			{
+				haddr[0]=0x01;
+				haddr[1]=0x00;
+				haddr[2]=0x5e;
+				taddr=ntohl(paddr);
+				haddr[5]=taddr&0xff;
+				taddr=taddr>>8;
+				haddr[4]=taddr&0xff;
+				taddr=taddr>>8;
+				haddr[3]=taddr&0x7f;
+				return 0;
+			}
+		/*
+		 *	If a device does not support multicast broadcast the stuff (eg AX.25 for now)
+		 */
+#endif
+		
 		case IS_BROADCAST:
 			memcpy(haddr, dev->broadcast, dev->addr_len);
 			skb->arp = 1;
@@ -793,10 +840,7 @@ int arp_find(unsigned char *haddr, unsigned long paddr, struct device *dev,
 	/*
 	 *	Find an entry
 	 */
-	for (entry = arp_tables[hash]; entry != NULL; entry = entry->next)
-		if (entry->ip == paddr)
-			break;
-
+	entry = arp_lookup(paddr, 0);
 
 	if (entry != NULL) 	/* It exists */
 	{
@@ -808,7 +852,10 @@ int arp_find(unsigned char *haddr, unsigned long paddr, struct device *dev,
 			 */
 			
 			if (skb != NULL)
+			{
 				skb_queue_tail(&entry->skb, skb);
+				skb_device_unlock(skb);
+			}
 			sti();
 			return 1;
 		}
@@ -833,6 +880,7 @@ int arp_find(unsigned char *haddr, unsigned long paddr, struct device *dev,
 					GFP_ATOMIC);
 	if (entry != NULL)
 	{
+	        entry->mask = DEF_ARP_NETMASK;
 		entry->ip = paddr;
 		entry->hlen = dev->addr_len;
 		entry->htype = dev->type;
@@ -850,7 +898,10 @@ int arp_find(unsigned char *haddr, unsigned long paddr, struct device *dev,
 		entry->retries = ARP_MAX_TRIES;
 		skb_queue_head_init(&entry->skb);
 		if (skb != NULL)
+		{
 			skb_queue_tail(&entry->skb, skb);
+			skb_device_unlock(skb);
+		}
 	}
 	else
 	{
@@ -887,12 +938,13 @@ int arp_get_info(char *buffer, char **start, off_t offset, int length)
 	int i,j,k;
 	const char hexbuf[] =  "0123456789ABCDEF";
 
-	size = sprintf(buffer,"IP address       HW type     Flags       HW address\n");
+	size = sprintf(buffer,"IP address       HW type     Flags       HW address            Mask\n");
+
 	pos+=size;
 	len+=size;
 	  
 	cli();
-	for(i=0; i<ARP_TABLE_SIZE; i++)
+	for(i=0; i<FULL_ARP_TABLE_SIZE; i++)
 	{
 		for(entry=arp_tables[i]; entry!=NULL; entry=entry->next)
 		{
@@ -918,11 +970,15 @@ int arp_get_info(char *buffer, char **start, off_t offset, int length)
 			}
 #endif
 			size = sprintf(buffer+len,
-				"%-17s0x%-10x0x%-10x%s\n",
+				"%-17s0x%-10x0x%-10x%s",
 				in_ntoa(entry->ip),
 				(unsigned int)entry->htype,
 				entry->flags,
 				hbuffer);
+			size += sprintf(buffer+len+size,
+				 "     %-17s\n",
+				  entry->mask==DEF_ARP_NETMASK?
+				   "*":in_ntoa(entry->mask));
 	
 			len+=size;
 			pos=begin+len;
@@ -948,17 +1004,24 @@ int arp_get_info(char *buffer, char **start, off_t offset, int length)
 
 /*
  *	This will find an entry in the ARP table by looking at the IP address.
- *	Be careful, interrupts are turned off on exit!!!
+ *      If exact is true then only exact IP matches will be allowed
+ *      for proxy entries, otherwise the netmask will be used
  */
 
-static struct arp_table *arp_lookup(unsigned long paddr)
+static struct arp_table *arp_lookup(unsigned long paddr, int exact)
 {
 	struct arp_table *entry;
 	unsigned long hash = HASH(paddr);
-
-	cli();
+	
 	for (entry = arp_tables[hash]; entry != NULL; entry = entry->next)
 		if (entry->ip == paddr) break;
+
+	/* it's possibly a proxy entry (with a netmask) */
+	if (!entry)
+	for (entry=arp_tables[PROXY_HASH]; entry != NULL; entry = entry->next)
+	  if (exact? (entry->ip==paddr) : !((entry->ip^paddr)&entry->mask)) 
+	    break;	  
+
 	return entry;
 }
 
@@ -973,7 +1036,7 @@ static int arp_req_set(struct arpreq *req)
 	struct arp_table *entry;
 	struct sockaddr_in *si;
 	int htype, hlen;
-	unsigned long ip, hash;
+	unsigned long ip;
 	struct rtable *rt;
 
 	memcpy_fromfs(&r, req, sizeof(r));
@@ -993,6 +1056,12 @@ static int arp_req_set(struct arpreq *req)
 			htype = ARPHRD_ETHER;
 			hlen = ETH_ALEN;
 			break;
+#ifdef CONFIG_ARCNET
+		case ARPHRD_ARCNET:
+			htype = ARPHRD_ARCNET;
+			hlen = 1;	/* length of arcnet addresses */
+			break;
+#endif
 #ifdef CONFIG_AX25
 		case ARPHRD_AX25:
 			htype = ARPHRD_AX25;
@@ -1023,15 +1092,12 @@ static int arp_req_set(struct arpreq *req)
 	 *	Is there an existing entry for this address?
 	 */
 	
-	hash = HASH(ip);
 	cli();
 
 	/*
 	 *	Find the entry
 	 */
-	for (entry = arp_tables[hash]; entry != NULL; entry = entry->next)
-		if (entry->ip == ip)
-			break;
+	entry = arp_lookup(ip, 1);
 
 	/*
 	 *	Do we need to create a new entry
@@ -1039,6 +1105,10 @@ static int arp_req_set(struct arpreq *req)
 	
 	if (entry == NULL)
 	{
+	        unsigned long hash = HASH(ip);
+		if (r.arp_flags & ATF_PUBL)
+		  hash = PROXY_HASH;
+
 		entry = (struct arp_table *) kmalloc(sizeof(struct arp_table),
 					GFP_ATOMIC);
 		if (entry == NULL)
@@ -1054,9 +1124,6 @@ static int arp_req_set(struct arpreq *req)
 		arp_tables[hash] = entry;
 		skb_queue_head_init(&entry->skb);
 	}
-	else
-		if (entry->flags & ATF_PUBL)
-			proxies--;
 	/*
 	 *	We now have a pointer to an ARP entry.  Update it!
 	 */
@@ -1064,8 +1131,13 @@ static int arp_req_set(struct arpreq *req)
 	memcpy(&entry->ha, &r.arp_ha.sa_data, hlen);
 	entry->last_used = jiffies;
 	entry->flags = r.arp_flags | ATF_COM;
-	if (entry->flags & ATF_PUBL)
-		proxies++;
+	if ((entry->flags & ATF_PUBL) && (entry->flags & ATF_NETMASK))
+	  {
+	    si = (struct sockaddr_in *) &r.arp_netmask;
+	    entry->mask = si->sin_addr.s_addr;
+	  }
+	else
+	  entry->mask = DEF_ARP_NETMASK;
 	entry->dev = rt->rt_dev;
 	sti();
 
@@ -1097,7 +1169,8 @@ static int arp_req_get(struct arpreq *req)
 	 */
 	
 	si = (struct sockaddr_in *) &r.arp_pa;
-	entry = arp_lookup(si->sin_addr.s_addr);
+	cli();
+	entry = arp_lookup(si->sin_addr.s_addr,0);
 
 	if (entry == NULL)
 	{
@@ -1174,10 +1247,16 @@ int arp_ioctl(unsigned int cmd, void *arg)
 static struct packet_type arp_packet_type =
 {
 	0,	/* Should be: __constant_htons(ETH_P_ARP) - but this _doesn't_ come out constant! */
-	0,		/* copy */
+	NULL,		/* All devices */
 	arp_rcv,
 	NULL,
 	NULL
+};
+
+static struct notifier_block arp_dev_notifier={
+	arp_device_event,
+	NULL,
+	0
 };
 
 void arp_init (void)
@@ -1187,5 +1266,7 @@ void arp_init (void)
 	dev_add_pack(&arp_packet_type);
 	/* Start with the regular checks for expired arp entries. */
 	add_timer(&arp_timer);
+	/* Register for device down reports */
+	register_netdevice_notifier(&arp_dev_notifier);
 }
 

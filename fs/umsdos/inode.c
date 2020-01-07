@@ -6,7 +6,6 @@
  *
  */
 
-#include <stdlib.h>
 #include <linux/fs.h>
 #include <linux/msdos_fs.h>
 #include <linux/kernel.h>
@@ -14,9 +13,16 @@
 #include <linux/errno.h>
 #include <asm/segment.h>
 #include <linux/string.h>
-#include <linux/ctype.h>
 #include <linux/stat.h>
 #include <linux/umsdos_fs.h>
+
+#ifdef MODULE
+#include <linux/module.h>
+#include <linux/version.h>
+#else
+#define MOD_INC_USE_COUNT
+#define MOD_DEC_USE_COUNT
+#endif
 
 struct inode *pseudo_root=NULL;		/* Useful to simulate the pseudo DOS */
 									/* directory. See UMSDOS_readdir_x() */
@@ -41,6 +47,9 @@ void UMSDOS_put_inode(struct inode *inode)
 	PRINTK (("put inode %x owner %x pos %d dir %x\n",inode
 		,inode->u.umsdos_i.i_emd_owner,inode->u.umsdos_i.pos
 		,inode->u.umsdos_i.i_emd_dir));
+	if (inode != NULL && inode == pseudo_root){
+		printk ("Umsdos: Oops releasing pseudo_root. Notify jacques@solucorp.qc.ca\n");
+	}
 	msdos_put_inode(inode);
 }
 
@@ -48,6 +57,7 @@ void UMSDOS_put_inode(struct inode *inode)
 void UMSDOS_put_super(struct super_block *sb)
 {
 	msdos_put_super(sb);
+	MOD_DEC_USE_COUNT;
 }
 
 
@@ -145,18 +155,11 @@ void umsdos_patch_inode (
 	if (!umsdos_isinit(inode)){
 		inode->u.umsdos_i.i_emd_dir = 0;
 		if (S_ISREG(inode->i_mode)){
-			static char is_init = 0;
-			if (!is_init){
-				/*
-					I don't want to change the msdos file system code
-					so I get the address of some subroutine dynamically
-					once.
-				*/
-				umsdos_file_inode_operations.bmap = inode->i_op->bmap;
+			if (inode->i_op->bmap != NULL){
 				inode->i_op = &umsdos_file_inode_operations;
-				is_init = 1;
+			}else{
+				inode->i_op = &umsdos_file_inode_operations_no_bmap;
 			}
-			inode->i_op = &umsdos_file_inode_operations;
 		}else if (S_ISDIR(inode->i_mode)){
 			if (dir != NULL){
 				umsdos_setup_dir_inode(inode);
@@ -257,13 +260,30 @@ void UMSDOS_read_inode(struct inode *inode)
 */
 void UMSDOS_write_inode(struct inode *inode)
 {
+	struct iattr newattrs;
+
 	PRINTK (("UMSDOS_write_inode emd %d\n",inode->u.umsdos_i.i_emd_owner));
 	msdos_write_inode(inode);
-	UMSDOS_notify_change (NOTIFY_TIME,inode);
+	newattrs.ia_mtime = inode->i_mtime;
+	newattrs.ia_atime = inode->i_atime;
+	newattrs.ia_ctime = inode->i_ctime;
+	newattrs.ia_valid = ATTR_MTIME | ATTR_ATIME | ATTR_CTIME;
+	/*
+		UMSDOS_notify_change is convenient to call here
+		to update the EMD entry associated with this inode.
+		But it has the side effect to re"dirt" the inode.
+	*/
+	UMSDOS_notify_change (inode, &newattrs);
+	inode->i_dirt = 0;
 }
-int UMSDOS_notify_change (int flags, struct inode *inode)
+
+int UMSDOS_notify_change(struct inode *inode, struct iattr *attr)
 {
 	int ret = 0;
+
+	if ((ret = inode_change_ok(inode, attr)) != 0) 
+		return ret;
+
 	if (inode->i_nlink > 0){
 		/* #Specification: notify_change / i_nlink > 0
 			notify change is only done for inode with nlink > 0. An inode
@@ -300,31 +320,31 @@ int UMSDOS_notify_change (int flags, struct inode *inode)
 				struct file filp;
 				struct umsdos_dirent entry;
 				filp.f_pos = inode->u.umsdos_i.pos;
+				filp.f_reada = 0;
 				PRINTK (("pos = %d ",filp.f_pos));
 				/* Read only the start of the entry since we don't touch */
 				/* the name */
 				ret = umsdos_emd_dir_read (emd_owner,&filp,(char*)&entry
 					,UMSDOS_REC_SIZE);
 				if (ret == 0){
-					if (flags & NOTIFY_UIDGID){
-						entry.uid = inode->i_uid;
-						entry.gid = inode->i_gid;
-						/* Remove those flags msdos don't like */
-						flags &= ~NOTIFY_UIDGID;
-					}
-					if (flags & NOTIFY_MODE){
-						entry.mode = inode->i_mode;
-						flags &= ~NOTIFY_MODE;
-					}
-					if (flags & NOTIFY_TIME){
-						entry.atime = inode->i_atime;
-						entry.mtime = inode->i_mtime;
-						entry.ctime = inode->i_ctime;
-					}
+					if (attr->ia_valid & ATTR_UID) 
+						entry.uid = attr->ia_uid;
+					if (attr->ia_valid & ATTR_GID) 
+						entry.gid = attr->ia_gid;
+					if (attr->ia_valid & ATTR_MODE) 
+						entry.mode = attr->ia_mode;
+					if (attr->ia_valid & ATTR_ATIME) 
+						entry.atime = attr->ia_atime;
+					if (attr->ia_valid & ATTR_MTIME) 
+						entry.mtime = attr->ia_mtime;
+					if (attr->ia_valid & ATTR_CTIME) 
+						entry.ctime = attr->ia_ctime;
+
 					entry.nlink = inode->i_nlink;
 					filp.f_pos = inode->u.umsdos_i.pos;
 					ret = umsdos_emd_dir_write (emd_owner,&filp,(char*)&entry
 						,UMSDOS_REC_SIZE);
+
 					PRINTK (("notify pos %d ret %d nlink %d "
 						,inode->u.umsdos_i.pos
 						,ret,entry.nlink));
@@ -332,20 +352,14 @@ int UMSDOS_notify_change (int flags, struct inode *inode)
 						notify_change operation are done only on the
 						EMD file. The msdos fs is not even called.
 					*/
-					#if 0
-					if (ret == 0
-						&& (S_ISDIR(inode->i_mode)
-							|| S_ISREG(inode->i_mode))){
-						ret = msdos_notify_change(flags, inode);
-						printk ("msdos_notify %x %d",inode,ret);
-					}
-					#endif
 				}
 				iput (emd_owner);
 			}
 			PRINTK (("\n"));
 		}
 	}
+	if (ret == 0) 
+		inode_setattr(inode, attr);
 	return ret;
 }
 
@@ -390,8 +404,10 @@ struct super_block *UMSDOS_read_super(
 		which do not have an EMD file. They behave like normal
 		msdos directory, with all limitation of msdos.
 	*/
-	struct super_block *sb = msdos_read_super(s,data,silent);
-	printk ("UMSDOS Alpha 0.4 (compatibility level %d.%d)\n"
+	struct super_block *sb;
+	MOD_INC_USE_COUNT;
+	sb = msdos_read_super(s,data,silent);
+	printk ("UMSDOS Beta 0.6 (compatibility level %d.%d, fast msdos)\n"
 		,UMSDOS_VERSION,UMSDOS_RELEASE);
 	if (sb != NULL){
 		sb->s_op = &umsdos_sops;
@@ -459,8 +475,31 @@ struct super_block *UMSDOS_read_super(
 			}
 			iput (pseudo);
 		}
+	} else {
+		MOD_DEC_USE_COUNT;
 	}
 	return sb;
 }
 
+
+#ifdef MODULE
+
+char kernel_version[] = UTS_RELEASE;
+
+static struct file_system_type umsdos_fs_type = {
+	UMSDOS_read_super, "umsdos", 1, NULL
+};
+
+int init_module(void)
+{
+	register_filesystem(&umsdos_fs_type);
+	return 0;
+}
+
+void cleanup_module(void)
+{
+	unregister_filesystem(&umsdos_fs_type);
+}
+
+#endif
 

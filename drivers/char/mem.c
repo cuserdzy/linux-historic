@@ -83,33 +83,16 @@ static int write_mem(struct inode * inode, struct file * file,char * buf, int co
 	return count;
 }
 
-static int mmap_mem(struct inode * inode, struct file * file,
-	unsigned long addr, size_t len, int prot, unsigned long off)
+static int mmap_mem(struct inode * inode, struct file * file, struct vm_area_struct * vma)
 {
-	struct vm_area_struct * mpnt;
-
-	if (off & 0xfff || off + len < off)
+	if (vma->vm_offset & ~PAGE_MASK)
 		return -ENXIO;
-	if (x86 > 3 && off >= high_memory)
-		prot |= PAGE_PCD;
-	if (remap_page_range(addr, off, len, prot))
+	if (x86 > 3 && vma->vm_offset >= high_memory)
+		vma->vm_page_prot |= PAGE_PCD;
+	if (remap_page_range(vma->vm_start, vma->vm_offset, vma->vm_end - vma->vm_start, vma->vm_page_prot))
 		return -EAGAIN;
-/* try to create a dummy vmm-structure so that the rest of the kernel knows we are here */
-	mpnt = (struct vm_area_struct * ) kmalloc(sizeof(struct vm_area_struct), GFP_KERNEL);
-	if (!mpnt)
-		return 0;
-
-	mpnt->vm_task = current;
-	mpnt->vm_start = addr;
-	mpnt->vm_end = addr + len;
-	mpnt->vm_page_prot = prot;
-	mpnt->vm_share = NULL;
-	mpnt->vm_inode = inode;
+	vma->vm_inode = inode;
 	inode->i_count++;
-	mpnt->vm_offset = off;
-	mpnt->vm_ops = NULL;
-	insert_vm_struct(current, mpnt);
-	merge_segments(current->mmap, NULL, NULL);
 	return 0;
 }
 
@@ -176,33 +159,12 @@ static int read_zero(struct inode * node,struct file * file,char * buf,int count
 	return count;
 }
 
-static int mmap_zero(struct inode * inode, struct file * file,
-	unsigned long addr, size_t len, int prot, unsigned long off)
+static int mmap_zero(struct inode * inode, struct file * file, struct vm_area_struct * vma)
 {
-	struct vm_area_struct *mpnt;
-
-	if (prot & PAGE_RW)
+	if (vma->vm_page_prot & PAGE_RW)
 		return -EINVAL;
-	if (zeromap_page_range(addr, len, prot))
+	if (zeromap_page_range(vma->vm_start, vma->vm_end - vma->vm_start, vma->vm_page_prot))
 		return -EAGAIN;
-	/*
-	 * try to create a dummy vmm-structure so that the
-	 * rest of the kernel knows we are here
-	 */
-	mpnt = (struct vm_area_struct *)kmalloc(sizeof(*mpnt), GFP_KERNEL);
-	if (!mpnt)
-		return 0;
-
-	mpnt->vm_task = current;
-	mpnt->vm_start = addr;
-	mpnt->vm_end = addr + len;
-	mpnt->vm_page_prot = prot;
-	mpnt->vm_share = NULL;
-	mpnt->vm_inode = NULL;
-	mpnt->vm_offset = off;
-	mpnt->vm_ops = NULL;
-	insert_vm_struct(current, mpnt);
-	merge_segments(current->mmap, ignoff_mergep, inode);
 	return 0;
 }
 
@@ -409,8 +371,8 @@ long chr_dev_init(long mem_start, long mem_end)
 #ifdef CONFIG_SOUND
 	mem_start = soundcard_init(mem_start);
 #endif
-#if CONFIG_TAPE_QIC02
-	mem_start = tape_qic02_init(mem_start);
+#if CONFIG_QIC02_TAPE
+	mem_start = qic02_tape_init(mem_start);
 #endif
 /*
  *      Rude way to allocate kernel memory buffer for tape device
@@ -418,7 +380,7 @@ long chr_dev_init(long mem_start, long mem_end)
 #ifdef CONFIG_FTAPE
         /* allocate NR_FTAPE_BUFFERS 32Kb buffers at aligned address */
         ftape_big_buffer= (char*) ((mem_start + 0x7fff) & ~0x7fff);
-        printk( "ftape: allocated %d buffers alligned at: %p\n",
+        printk( "ftape: allocated %d buffers aligned at: %p\n",
                NR_FTAPE_BUFFERS, ftape_big_buffer);
         mem_start = (long) ftape_big_buffer + NR_FTAPE_BUFFERS * 0x8000;
 #endif 

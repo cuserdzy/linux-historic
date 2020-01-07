@@ -6,6 +6,8 @@
 
 #define __WCLONE	0x80000000
 
+#ifdef __KERNEL__
+
 struct wait_queue {
 	struct task_struct * task;
 	struct wait_queue * next;
@@ -17,6 +19,7 @@ struct semaphore {
 };
 
 #define MUTEX ((struct semaphore) { 1, NULL })
+#define MUTEX_LOCKED ((struct semaphore) { 0, NULL })
 
 struct select_table_entry {
 	struct wait_queue wait;
@@ -29,5 +32,7 @@ typedef struct select_table_struct {
 } select_table;
 
 #define __MAX_SELECT_TABLE_ENTRIES (4096 / sizeof (struct select_table_entry))
+
+#endif /* __KERNEL__ */
 
 #endif

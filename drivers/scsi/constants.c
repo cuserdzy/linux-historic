@@ -7,18 +7,22 @@
 #include "../block/blk.h"
 #include <linux/kernel.h>
 #include "scsi.h"
+#include "hosts.h"
 
 #define CONST_COMMAND 	0x01
 #define CONST_STATUS 	0x02
 #define CONST_SENSE 	0x04
 #define CONST_XSENSE 	0x08
+#define CONST_CMND	0x10
+#define CONST_MSG	0x20
+
 static const char unknown[] = "UNKNOWN";
 
 #ifdef CONFIG_SCSI_CONSTANTS
 #ifdef CONSTANTS
 #undef CONSTANTS
 #endif
-#define CONSTANTS (CONST_COMMAND | CONST_STATUS | CONST_SENSE | CONST_XSENSE)
+#define CONSTANTS (CONST_COMMAND | CONST_STATUS | CONST_SENSE | CONST_XSENSE | CONST_CMND | CONST_MSG)
 #endif
 
 #if (CONSTANTS & CONST_COMMAND)
@@ -73,7 +77,7 @@ static const char reserved[] = "RESERVED";
 static const char vendor[] = "VENDOR SPECIFIC";
 
 static void print_opcode(int opcode) {
-  char **table = commands[ group(opcode) ];
+  const char **table = commands[ group(opcode) ];
   switch ((int) table) {
   case RESERVED_GROUP:
   	printk("%s(0x%02x) ", reserved, opcode); 
@@ -85,7 +89,7 @@ static void print_opcode(int opcode) {
   	printk("%s(0x%02x) ", vendor, opcode); 
   	break;
   default:
-  	printk("%s ",table[opcode & 0x31]);
+  	printk("%s ",table[opcode & 0x1f]);
   }
 }
 #else /* CONST & CONST_COMMAND */
@@ -351,8 +355,8 @@ static struct error_info additional[] =
 static char *snstext[] = {
 	"None","Recovered Error","Not Ready","Medium Error","Hardware Error",
 	"Illegal Request","Unit Attention","Data Protect","Blank Check",
-	"Key=E","Key=F","Filemark","End-Of-Medium","Incorrect Block Length",
-	"14","15"};
+	"Key=9","Copy Aborted","Aborted Command","End-Of-Medium",
+	"Volume Overflow", "Miscompare", "Key=15"};
 #endif
 
 
@@ -394,9 +398,6 @@ void print_sense(char * devclass, Scsi_Cmnd * SCpnt)
 	  printk("%s error ", error);
 	  
 #if (CONSTANTS & CONST_SENSE)
-	  if (sense_buffer[2] & 0x80) printk( "FMK ");
-	  if (sense_buffer[2] & 0x40) printk( "EOM ");
-	  if (sense_buffer[2] & 0x20) printk( "ILI ");
 	  printk( "%s%x: sense key %s\n", devclass, dev, snstext[sense_buffer[2] & 0x0f]);
 #else
 	  printk("%s%x: sns = %2x %2x\n", devclass, dev, sense_buffer[0], sense_buffer[2]);
@@ -437,9 +438,12 @@ void print_sense(char * devclass, Scsi_Cmnd * SCpnt)
 	}
 	
       done:
+#if !(CONSTANTS & CONST_SENSE)
+	printk("Raw sense data:");
 	for (i = 0; i < s; ++i) 
 	  printk("0x%02x ", sense_buffer[i]);
-
+	printk("\n");
+#endif
 	return;
 }
 
@@ -451,14 +455,14 @@ static const char *one_byte_msgs[] = {
 /* 0x0a */ "Linked Command Complete", "Linked Command Complete w/flag",
 /* 0x0c */ "Bus device reset", "Abort Tag", "Clear Queue", 
 /* 0x0f */ "Initiate Recovery", "Release Recovery"
-}
+};
 
 #define NO_ONE_BYTE_MSGS (sizeof(one_byte_msgs)  / sizeof (const char *))
 
-static const char *queue_tag_msgs[] = {
+static const char *two_byte_msgs[] = {
 /* 0x20 */ "Simple Queue Tag", "Head of Queue Tag", "Ordered Queue Tag"
 /* 0x23 */ "Ignore Wide Residue"
-}
+};
 
 #define NO_TWO_BYTE_MSGS (sizeof(two_byte_msgs)  / sizeof (const char *))
 
@@ -475,15 +479,30 @@ int print_msg (const unsigned char *msg) {
     if (msg[0] == EXTENDED_MESSAGE) {
 	len = 3 + msg[1];
 #if (CONSTANTS & CONST_MSG)
-	printk("Extended Message code %s arguments ", 
-	    (msg[2] < NO_EXTENDED_MESSAGES) ?
-	    printk("%s " extended_msgs[msg[2]]),
-	    reserved);
-	for (i = 3; i < msg[1]; ++i) 
+	if (msg[2] < NO_EXTENDED_MSGS)
+	    printk ("%s ", extended_msgs[msg[2]]); 
+	else 
+	    printk ("Extended Message, reserved code (0x%02x) ", (int) msg[2]);
+	switch (msg[2]) {
+	case EXTENDED_MODIFY_DATA_POINTER:
+	    printk("pointer = %d", (int) (msg[3] << 24) | (msg[4] << 16) | 
+		(msg[5] << 8) | msg[6]);
+	    break;
+	case EXTENDED_SDTR:
+	    printk("period = %d ns, offset = %d", (int) msg[3] * 4, (int) 
+		msg[4]);
+	    break;
+	case EXTENDED_WDTR:
+	    printk("width = 2^%d bytes", msg[3]);
+	    break;
+	default:
+	    for (i = 2; i < len; ++i) 
+		printk("%02x ", msg[i]);
+	}
 #else
-	for (i = 0; i < msg[1]; ++i)
-#endif
+	for (i = 0; i < len; ++i)
 	    printk("%02x ", msg[i]);
+#endif
     /* Identify */
     } else if (msg[0] & 0x80) {
 #if (CONSTANTS & CONST_MSG)
@@ -509,7 +528,7 @@ int print_msg (const unsigned char *msg) {
     /* Two byte */
     } else if (msg[0] <= 0x2f) {
 #if (CONSTANTS & CONST_MSG)
-	if ((msg[0] - 0x20) < NO_TWO_BYTE_MESSAGES) 
+	if ((msg[0] - 0x20) < NO_TWO_BYTE_MSGS)
 	    printk("%s %02x ", two_byte_msgs[msg[0] - 0x20], 
 		msg[1]);
 	else 
@@ -526,4 +545,13 @@ int print_msg (const unsigned char *msg) {
 	printk("%02x ", msg[0]);
 #endif
     return len;
+}
+
+void print_Scsi_Cmnd (Scsi_Cmnd *cmd) {
+    printk("scsi%d : destination target %d, lun %d\n", 
+    cmd->host->host_no, 
+    cmd->target, 
+    cmd->lun);
+    printk("        command = ");
+    print_command (cmd->cmnd);
 }

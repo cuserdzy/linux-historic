@@ -1,7 +1,7 @@
 /*
  *  linux/fs/isofs/file.c
  *
- *  (C) 1992  Eric Youngdale Modified for ISO9660 filesystem.
+ *  (C) 1992, 1993, 1994  Eric Youngdale Modified for ISO9660 filesystem.
  *
  *  (C) 1991  Linus Torvalds - minix filesystem
  *
@@ -68,18 +68,23 @@ struct inode_operations isofs_file_inode_operations = {
 
 /* This is a heuristic to determine if a file is text of binary.  If it
  * is text, then we translate all 0x0d characters to spaces.  If the 0x0d
- * character is not preceeded or followed by a 0x0a, then we turn it into
+ * character is not preceded or followed by a 0x0a, then we turn it into
  * a 0x0a.  A control-Z is also turned into a linefeed.
  */
 
-static inline void unixify_text_buffer(char * buffer, int chars, int mode)
+static inline void unixify_to_fs(char * outbuf, char * buffer, int chars,
+				 int mode)
 {
+	char outchar;
+
 	while(chars--){
-		if(*buffer == 0x1a) *buffer = 0x0a;
-		if(*buffer == 0x0d){
-			if(mode == ISOFS_FILE_TEXT_M) *buffer = 0x0a;
-			if(mode == ISOFS_FILE_TEXT) *buffer = ' ';
+	  	outchar = *buffer;
+		if(outchar == 0x1a) outchar = 0x0a;
+		if(outchar == 0x0d){
+			if(mode == ISOFS_FILE_TEXT_M) outchar = 0x0a;
+			if(mode == ISOFS_FILE_TEXT) outchar = ' ';
 		}
+		put_fs_byte(outchar, outbuf++);
 		buffer++;
 	}
 }
@@ -146,6 +151,8 @@ static int isofs_file_read(struct inode * inode, struct file * filp, char * buf,
 	bhb = bhe = buflist;
 
 	ra_blocks = read_ahead[MAJOR(inode->i_dev)] / (BLOCK_SIZE >> 9);
+	if(ra_blocks > blocks) blocks = ra_blocks;
+
 	max_block = (inode->i_size + BLOCK_SIZE - 1)/BLOCK_SIZE;
 	nextblock = -1;
 
@@ -169,7 +176,6 @@ static int isofs_file_read(struct inode * inode, struct file * filp, char * buf,
 			if (*bhb && !(*bhb)->b_uptodate) {
 			        uptodate = 0;
 			        bhreq[bhrequest++] = *bhb;
-				nextblock = (*bhb)->b_blocknr + 1;
 			      };
 
 			if (++bhb == &buflist[NBUF])
@@ -177,37 +183,12 @@ static int isofs_file_read(struct inode * inode, struct file * filp, char * buf,
 
 			/* If the block we have on hand is uptodate, go ahead
 			   and complete processing. */
-			if(bhrequest == 0 && uptodate) break;
+			if(uptodate) break;
 
 			if (bhb == bhe)
 				break;
 		      }
 
-		if(blocks == 0 && bhrequest && filp->f_reada && bhb != bhe) { 
-		  /* If we are going to read something anyways, add in the
-		     read-ahead blocks */
-		  while(ra_blocks){
-		    if (block >= max_block) break;
-		    if(bhrequest == NBUF) break;  /* Block full */
-		    --ra_blocks;
-		    *bhb = getblk(inode->i_dev,isofs_bmap(inode, block++), ISOFS_BUFFER_SIZE(inode));
-
-		    if (*bhb && !(*bhb)->b_uptodate) {
-		      if((*bhb)->b_blocknr != nextblock) {
-			brelse(*bhb);
-			break;
-		      };
-		      nextblock = (*bhb)->b_blocknr + 1;
-		      bhreq[bhrequest++] = *bhb;
-		    };
-		    
-		    if (++bhb == &buflist[NBUF])
-		      bhb = buflist;
-		    
-		    if (bhb == bhe)
-		      break;
-		  };
-		};
 		/* Now request them all */
 		if (bhrequest)
 		  ll_rw_block(READ, bhrequest, bhreq);
@@ -234,9 +215,10 @@ static int isofs_file_read(struct inode * inode, struct file * filp, char * buf,
 		  if (*bhe) {
 		    if (inode->u.isofs_i.i_file_format == ISOFS_FILE_TEXT ||
 			inode->u.isofs_i.i_file_format == ISOFS_FILE_TEXT_M)
-		      unixify_text_buffer(offset+(*bhe)->b_data,
-					  chars, inode->u.isofs_i.i_file_format);
-		    memcpy_tofs(buf,offset+(*bhe)->b_data,chars);
+		      unixify_to_fs(buf, offset+(*bhe)->b_data, chars, 
+				    inode->u.isofs_i.i_file_format);
+		    else
+		      memcpy_tofs(buf,offset+(*bhe)->b_data,chars);
 		    brelse(*bhe);
 		    buf += chars;
 		  } else {

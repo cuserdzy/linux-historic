@@ -9,18 +9,7 @@
 #define VERIFY_READ 0
 #define VERIFY_WRITE 1
 
-int __verify_write(unsigned long addr, unsigned long count);
-
-extern inline int verify_area(int type, const void * addr, unsigned long size)
-{
-	if (TASK_SIZE <= (unsigned long) addr)
-		return -EFAULT;
-	if (size > TASK_SIZE - (unsigned long) addr)
-		return -EFAULT;
-	if (wp_works_ok || type == VERIFY_READ || !size)
-		return 0;
-	return __verify_write((unsigned long) addr,size);
-}
+extern int verify_area(int, const void *, unsigned long);
 
 /*
  * Linux kernel virtual memory manager primitives.
@@ -42,12 +31,36 @@ struct vm_area_struct {
 	unsigned long vm_start;
 	unsigned long vm_end;
 	unsigned short vm_page_prot;
+	unsigned short vm_flags;
 	struct vm_area_struct * vm_next;	/* linked list */
 	struct vm_area_struct * vm_share;	/* linked list */
-	struct inode * vm_inode;
-	unsigned long vm_offset;
 	struct vm_operations_struct * vm_ops;
+	unsigned long vm_offset;
+	struct inode * vm_inode;
+	unsigned long vm_pte;			/* shared mem */
 };
+
+/*
+ * vm_flags..
+ */
+#define VM_READ		0x0001	/* currently active flags */
+#define VM_WRITE	0x0002
+#define VM_EXEC		0x0004
+#define VM_SHARED	0x0008
+
+#define VM_MAYREAD	0x0010	/* limits for mprotect() etc */
+#define VM_MAYWRITE	0x0020
+#define VM_MAYEXEC	0x0040
+#define VM_MAYSHARE	0x0080
+
+#define VM_GROWSDOWN	0x0100	/* general info on the segment */
+#define VM_GROWSUP	0x0200
+#define VM_SHM		0x0400
+#define VM_DENYWRITE	0x0800	/* ETXTBSY on write attempts.. */
+
+#define VM_EXECUTABLE	0x1000
+
+#define VM_STACK_FLAGS	0x0177
 
 /*
  * These are the virtual MM functions - opening of an area, closing it (needed to
@@ -58,11 +71,14 @@ struct vm_area_struct {
 struct vm_operations_struct {
 	void (*open)(struct vm_area_struct * area);
 	void (*close)(struct vm_area_struct * area);
-	void (*nopage)(int error_code,
-		       struct vm_area_struct * area, unsigned long address);
-	void (*wppage)(struct vm_area_struct * area, unsigned long address);
+	unsigned long (*nopage)(struct vm_area_struct * area, unsigned long address,
+		unsigned long page, int error_code);
+	unsigned long (*wppage)(struct vm_area_struct * area, unsigned long address,
+		unsigned long page);
 	int (*share)(struct vm_area_struct * from, struct vm_area_struct * to, unsigned long address);
 	int (*unmap)(struct vm_area_struct *area, unsigned long, size_t);
+	void (*swapout)(struct vm_area_struct *,  unsigned long *);
+	unsigned long (*swapin)(struct vm_area_struct *,  unsigned long);
 };
 
 extern unsigned long __bad_page(void);
@@ -91,6 +107,8 @@ struct page_info {
 	struct wait_queue *wait;
 };
 /* end of planning stage */
+
+#ifdef __KERNEL__
 
 /*
  * Free area management
@@ -138,6 +156,7 @@ extern void free_pages(unsigned long addr, unsigned long order);
 extern void show_free_areas(void);
 extern unsigned long put_dirty_page(struct task_struct * tsk,unsigned long page,
 	unsigned long address);
+
 extern void free_page_tables(struct task_struct * tsk);
 extern void clear_page_tables(struct task_struct * tsk);
 extern int copy_page_tables(struct task_struct * to);
@@ -146,10 +165,10 @@ extern int unmap_page_range(unsigned long from, unsigned long size);
 extern int remap_page_range(unsigned long from, unsigned long to, unsigned long size, int mask);
 extern int zeromap_page_range(unsigned long from, unsigned long size, int mask);
 
-extern void do_wp_page(unsigned long error_code, unsigned long address,
-	struct task_struct *tsk, unsigned long user_esp);
-extern void do_no_page(unsigned long error_code, unsigned long address,
-	struct task_struct *tsk, unsigned long user_esp);
+extern void do_wp_page(struct vm_area_struct * vma, unsigned long address,
+	unsigned long error_code);
+extern void do_no_page(struct vm_area_struct * vma, unsigned long address,
+	unsigned long error_code);
 
 extern unsigned long paging_init(unsigned long start_mem, unsigned long end_mem);
 extern void mem_init(unsigned long low_start_mem,
@@ -168,19 +187,15 @@ extern int vread(char *buf, char *addr, int count);
 
 extern void swap_free(unsigned long page_nr);
 extern unsigned long swap_duplicate(unsigned long page_nr);
-extern void swap_in(unsigned long *table_ptr);
+extern unsigned long swap_in(unsigned long entry);
 extern void si_swapinfo(struct sysinfo * val);
 extern void rw_swap_page(int rw, unsigned long nr, char * buf);
 
 /* mmap.c */
 extern int do_mmap(struct file * file, unsigned long addr, unsigned long len,
 	unsigned long prot, unsigned long flags, unsigned long off);
-typedef int (*map_mergep_fnp)(const struct vm_area_struct *,
-			      const struct vm_area_struct *, void *);
-extern void merge_segments(struct vm_area_struct *, map_mergep_fnp, void *);
+extern void merge_segments(struct vm_area_struct *);
 extern void insert_vm_struct(struct task_struct *, struct vm_area_struct *);
-extern int ignoff_mergep(const struct vm_area_struct *,
-			 const struct vm_area_struct *, void *);
 extern int do_munmap(unsigned long, size_t);
 
 #define read_swap_page(nr,buf) \
@@ -217,10 +232,79 @@ extern unsigned short * mem_map;
 #define GFP_ATOMIC	0x01
 #define GFP_USER	0x02
 #define GFP_KERNEL	0x03
+#define GFP_NOBUFFER	0x04
 
 
-/* vm_ops not present page codes */
+/*
+ * vm_ops not present page codes for shared memory.
+ *
+ * Will go away eventually..
+ */
 #define SHM_SWP_TYPE 0x41
 extern void shm_no_page (ulong *);
+
+/*
+ * swap cache stuff (in swap.c)
+ */
+#define SWAP_CACHE_INFO
+
+extern unsigned long * swap_cache;
+
+#ifdef SWAP_CACHE_INFO
+extern unsigned long swap_cache_add_total;
+extern unsigned long swap_cache_add_success;
+extern unsigned long swap_cache_del_total;
+extern unsigned long swap_cache_del_success;
+extern unsigned long swap_cache_find_total;
+extern unsigned long swap_cache_find_success;
+#endif
+
+extern inline unsigned long in_swap_cache(unsigned long addr)
+{
+	return swap_cache[addr >> PAGE_SHIFT]; 
+}
+
+extern inline long find_in_swap_cache (unsigned long addr)
+{
+	unsigned long entry;
+
+#ifdef SWAP_CACHE_INFO
+	swap_cache_find_total++;
+#endif
+	__asm__ __volatile__("xchgl %0,%1"
+		:"=m" (swap_cache[addr >> PAGE_SHIFT]),
+		 "=r" (entry)
+		:"0" (swap_cache[addr >> PAGE_SHIFT]),
+		 "1" (0));
+#ifdef SWAP_CACHE_INFO
+	if (entry)
+		swap_cache_find_success++;
+#endif	
+	return entry;
+}
+
+extern inline int delete_from_swap_cache(unsigned long addr)
+{
+	unsigned long entry;
+	
+#ifdef SWAP_CACHE_INFO
+	swap_cache_del_total++;
+#endif	
+	__asm__ __volatile__("xchgl %0,%1"
+		:"=m" (swap_cache[addr >> PAGE_SHIFT]),
+		 "=r" (entry)
+		:"0" (swap_cache[addr >> PAGE_SHIFT]),
+		 "1" (0));
+	if (entry)  {
+#ifdef SWAP_CACHE_INFO
+		swap_cache_del_success++;
+#endif
+		swap_free(entry);
+		return 1;
+	}
+	return 0;
+}
+
+#endif /* __KERNEL__ */
 
 #endif

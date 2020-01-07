@@ -1,5 +1,5 @@
 #
-# Makefile for the Linix TCP/IP (INET) layer.
+# Makefile for the Linux TCP/IP (INET) layer.
 #
 # Note! Dependencies are done automagically by 'make dep', which also
 # removes any old dependencies. DON'T put your own dependencies here
@@ -8,19 +8,41 @@
 # Note 2! The CFLAGS definition is now in the main makefile...
 
 .c.o:
-	$(CC) $(CFLAGS) -c -o $*.o $<
+	$(CC) $(CFLAGS) -c $<
 .s.o:
 	$(AS) -o $*.o $<
 .c.s:
-	$(CC) $(CFLAGS) -S -o $*.s $<
+	$(CC) $(CFLAGS) -S $<
 
 
-OBJS	= sock.o utils.o route.o proc.o timer.o protocol.o loopback.o \
-	  eth.o packet.o arp.o dev.o ip.o raw.o icmp.o tcp.o udp.o \
-	  datagram.o skbuff.o
-#	  ipx.o ax25.o ax25_in.o ax25_out.o ax25_subr.o ax25_timer.o
+OBJS	:= sock.o eth.o dev.o skbuff.o datagram.o
 
 ifdef CONFIG_INET
+
+OBJS	:= $(OBJS) utils.o route.o proc.o timer.o protocol.o packet.o \
+		   arp.o ip.o raw.o icmp.o tcp.o udp.o devinet.o af_inet.o
+
+endif
+
+ifdef CONFIG_INET_RARP
+
+OBJS	:= $(OBJS) rarp.o
+
+endif
+
+ifdef CONFIG_AX25
+
+OBJS	:= $(OBJS) ax25.o ax25_in.o ax25_out.o ax25_route.o ax25_subr.o ax25_timer.o
+
+endif
+
+ifdef CONFIG_IPX
+
+OBJS	:= $(OBJS) ipx.o pe2.o p8022.o p8023.o
+
+endif
+
+ifdef CONFIG_NET
 
 inet.o:		$(OBJS)
 		$(LD) -r -o inet.o $(OBJS)

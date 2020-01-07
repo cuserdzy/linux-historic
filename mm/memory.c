@@ -45,6 +45,15 @@
 #include <linux/types.h>
 #include <linux/ptrace.h>
 #include <linux/mman.h>
+#include <linux/segment.h>
+#include <asm/segment.h>
+
+/*
+ * Define this if things work differently on a i386 and a i486:
+ * it will (on a i486) warn about kernel memory accesses that are
+ * done without a 'verify_area(VERIFY_WRITE,..)'
+ */
+#undef CONFIG_TEST_VERIFY_AREA
 
 unsigned long high_memory = 0;
 
@@ -52,6 +61,7 @@ extern unsigned long pg0[1024];		/* page table for 0-4MB for everybody */
 
 extern void sound_mem_init(void);
 extern void die_if_kernel(char *,struct pt_regs *,long);
+extern void show_net_buffers(void);
 
 /*
  * The free_area_list arrays point to the queue heads of the free areas
@@ -71,11 +81,11 @@ unsigned short * mem_map = NULL;
 
 /*
  * oom() prints a message (so that the user knows why the process died),
- * and gives the process an untrappable SIGSEGV.
+ * and gives the process an untrappable SIGKILL.
  */
 void oom(struct task_struct * task)
 {
-	printk("\nout of memory\n");
+	printk("\nOut of memory.\n");
 	task->sigaction[SIGKILL-1].sa_handler = NULL;
 	task->blocked &= ~(1<<(SIGKILL-1));
 	send_sig(SIGKILL,task,1);
@@ -253,11 +263,15 @@ int copy_page_tables(struct task_struct * tsk)
 				*new_page_table = swap_duplicate(pg);
 				continue;
 			}
-			if ((pg & (PAGE_RW | PAGE_COW)) == (PAGE_RW | PAGE_COW))
-				pg &= ~PAGE_RW;
-			*new_page_table = pg;
-			if (mem_map[MAP_NR(pg)] & MAP_PAGE_RESERVED)
+			if (pg > high_memory || (mem_map[MAP_NR(pg)] & MAP_PAGE_RESERVED)) {
+				*new_page_table = pg;
 				continue;
+			}
+			if (pg & PAGE_COW)
+				pg &= ~PAGE_RW;
+			if (delete_from_swap_cache(pg))
+				pg |= PAGE_DIRTY;
+			*new_page_table = pg;
 			*old_page_table = pg;
 			mem_map[MAP_NR(pg)]++;
 		}
@@ -307,8 +321,8 @@ int unmap_page_range(unsigned long from, unsigned long size)
 				*page_table = 0;
 				if (1 & page) {
 					if (!(mem_map[MAP_NR(page)] & MAP_PAGE_RESERVED))
-						if (current->rss > 0)
-							--current->rss;
+						if (current->mm->rss > 0)
+							--current->mm->rss;
 					free_page(PAGE_MASK & page);
 				} else
 					swap_free(page);
@@ -367,8 +381,8 @@ int zeromap_page_range(unsigned long from, unsigned long size, int mask)
 				*page_table = 0;
 				if (page & PAGE_PRESENT) {
 					if (!(mem_map[MAP_NR(page)] & MAP_PAGE_RESERVED))
-						if (current->rss > 0)
-							--current->rss;
+						if (current->mm->rss > 0)
+							--current->mm->rss;
 					free_page(PAGE_MASK & page);
 				} else
 					swap_free(page);
@@ -429,8 +443,8 @@ int remap_page_range(unsigned long from, unsigned long to, unsigned long size, i
 				*page_table = 0;
 				if (PAGE_PRESENT & page) {
 					if (!(mem_map[MAP_NR(page)] & MAP_PAGE_RESERVED))
-						if (current->rss > 0)
-							--current->rss;
+						if (current->mm->rss > 0)
+							--current->mm->rss;
 					free_page(PAGE_MASK & page);
 				} else
 					swap_free(page);
@@ -451,7 +465,7 @@ int remap_page_range(unsigned long from, unsigned long to, unsigned long size, i
 			else {
 				*page_table++ = (to | mask);
 				if (!(mem_map[MAP_NR(to)] & MAP_PAGE_RESERVED)) {
-					++current->rss;
+					++current->mm->rss;
 					mem_map[MAP_NR(to)]++;
 				}
 			}
@@ -544,20 +558,17 @@ unsigned long put_dirty_page(struct task_struct * tsk, unsigned long page, unsig
  * to a shared page. It is done by copying the page to a new address
  * and decrementing the shared-page counter for the old page.
  *
- * Note that we do many checks twice (look at do_wp_page()), as
- * we have to be careful about race-conditions.
- *
  * Goto-purists beware: the only reason for goto's here is that it results
  * in better assembly code.. The "default" path will see no jumps at all.
  */
-static void __do_wp_page(unsigned long error_code, unsigned long address,
-	struct task_struct * tsk, unsigned long user_esp)
+void do_wp_page(struct vm_area_struct * vma, unsigned long address,
+	unsigned long error_code)
 {
 	unsigned long *pde, pte, old_page, prot;
 	unsigned long new_page;
 
 	new_page = __get_free_page(GFP_KERNEL);
-	pde = PAGE_DIR_OFFSET(tsk->tss.cr3,address);
+	pde = PAGE_DIR_OFFSET(vma->vm_task->tss.cr3,address);
 	pte = *pde;
 	if (!(pte & PAGE_PRESENT))
 		goto end_wp_page;
@@ -572,13 +583,13 @@ static void __do_wp_page(unsigned long error_code, unsigned long address,
 		goto bad_wp_page;
 	if (old_page & PAGE_RW)
 		goto end_wp_page;
-	tsk->min_flt++;
-	prot = (old_page & ~PAGE_MASK) | PAGE_RW;
+	vma->vm_task->mm->min_flt++;
+	prot = (old_page & ~PAGE_MASK) | PAGE_RW | PAGE_DIRTY;
 	old_page &= PAGE_MASK;
 	if (mem_map[MAP_NR(old_page)] != 1) {
 		if (new_page) {
 			if (mem_map[MAP_NR(old_page)] & MAP_PAGE_RESERVED)
-				++tsk->rss;
+				++vma->vm_task->mm->rss;
 			copy_page(old_page,new_page);
 			*(unsigned long *) pte = new_page | prot;
 			free_page(old_page);
@@ -586,12 +597,12 @@ static void __do_wp_page(unsigned long error_code, unsigned long address,
 			return;
 		}
 		free_page(old_page);
-		oom(tsk);
+		oom(vma->vm_task);
 		*(unsigned long *) pte = BAD_PAGE | prot;
 		invalidate();
 		return;
 	}
-	*(unsigned long *) pte |= PAGE_RW;
+	*(unsigned long *) pte |= PAGE_RW | PAGE_DIRTY;
 	invalidate();
 	if (new_page)
 		free_page(new_page);
@@ -599,12 +610,12 @@ static void __do_wp_page(unsigned long error_code, unsigned long address,
 bad_wp_page:
 	printk("do_wp_page: bogus page at address %08lx (%08lx)\n",address,old_page);
 	*(unsigned long *) pte = BAD_PAGE | PAGE_SHARED;
-	send_sig(SIGKILL, tsk, 1);
+	send_sig(SIGKILL, vma->vm_task, 1);
 	goto end_wp_page;
 bad_wp_pagetable:
 	printk("do_wp_page: bogus page-table at address %08lx (%08lx)\n",address,pte);
 	*pde = BAD_PAGETABLE | PAGE_TABLE;
-	send_sig(SIGKILL, tsk, 1);
+	send_sig(SIGKILL, vma->vm_task, 1);
 end_wp_page:
 	if (new_page)
 		free_page(new_page);
@@ -612,58 +623,73 @@ end_wp_page:
 }
 
 /*
- * check that a page table change is actually needed, and call
- * the low-level function only in that case..
+ * Ugly, ugly, but the goto's result in better assembly..
  */
-void do_wp_page(unsigned long error_code, unsigned long address,
-	struct task_struct * tsk, unsigned long user_esp)
+int verify_area(int type, const void * addr, unsigned long size)
 {
-	unsigned long page;
-	unsigned long * pg_table;
+	struct vm_area_struct * vma;
+	unsigned long start = (unsigned long) addr;
 
-	pg_table = PAGE_DIR_OFFSET(tsk->tss.cr3,address);
-	page = *pg_table;
-	if (!page)
-		return;
-	if ((page & PAGE_PRESENT) && page < high_memory) {
-		pg_table = (unsigned long *) ((page & PAGE_MASK) + PAGE_PTR(address));
-		page = *pg_table;
-		if (!(page & PAGE_PRESENT))
-			return;
-		if (page & PAGE_RW)
-			return;
-		if (!(page & PAGE_COW)) {
-			if (user_esp && tsk == current) {
-				current->tss.cr2 = address;
-				current->tss.error_code = error_code;
-				current->tss.trap_no = 14;
-				send_sig(SIGSEGV, tsk, 1);
-				return;
-			}
-		}
-		if (mem_map[MAP_NR(page)] == 1) {
-			*pg_table |= PAGE_RW | PAGE_DIRTY;
-			invalidate();
-			return;
-		}
-		__do_wp_page(error_code, address, tsk, user_esp);
-		return;
+	/* If the current user space is mapped to kernel space (for the
+	 * case where we use a fake user buffer with get_fs/set_fs()) we
+	 * don't expect to find the address in the user vm map.
+	 */
+	if (get_fs() == get_ds())
+		return 0;
+
+	for (vma = current->mm->mmap ; ; vma = vma->vm_next) {
+		if (!vma)
+			goto bad_area;
+		if (vma->vm_end > start)
+			break;
 	}
-	printk("bad page directory entry %08lx\n",page);
-	*pg_table = 0;
-}
+	if (vma->vm_start <= start)
+		goto good_area;
+	if (!(vma->vm_flags & VM_GROWSDOWN))
+		goto bad_area;
+	if (vma->vm_end - start > current->rlim[RLIMIT_STACK].rlim_cur)
+		goto bad_area;
 
-int __verify_write(unsigned long start, unsigned long size)
-{
+good_area:
+	if (!wp_works_ok && type == VERIFY_WRITE)
+		goto check_wp_fault_by_hand;
+	for (;;) {
+		struct vm_area_struct * next;
+		if (!(vma->vm_page_prot & PAGE_USER))
+			goto bad_area;
+		if (type != VERIFY_READ && !(vma->vm_page_prot & (PAGE_COW | PAGE_RW)))
+			goto bad_area;
+		if (vma->vm_end - start >= size)
+			return 0;
+		next = vma->vm_next;
+		if (!next || vma->vm_end != next->vm_start)
+			goto bad_area;
+		vma = next;
+	}
+
+check_wp_fault_by_hand:
 	size--;
 	size += start & ~PAGE_MASK;
 	size >>= PAGE_SHIFT;
 	start &= PAGE_MASK;
-	do {
-		do_wp_page(1,start,current,0);
+
+	for (;;) {
+		if (!(vma->vm_page_prot & (PAGE_COW | PAGE_RW)))
+			goto bad_area;
+		do_wp_page(vma, start, PAGE_PRESENT);
+		if (!size)
+			return 0;
+		size--;
 		start += PAGE_SIZE;
-	} while (size--);
-	return 0;
+		if (start < vma->vm_end)
+			continue;
+		vma = vma->vm_next;
+		if (!vma || vma->vm_start != start)
+			break;
+	}
+
+bad_area:
+	return -EFAULT;
 }
 
 static inline void get_empty_page(struct task_struct * tsk, unsigned long address)
@@ -684,34 +710,33 @@ static inline void get_empty_page(struct task_struct * tsk, unsigned long addres
  * task.
  *
  * NOTE! This assumes we have checked that p != current, and that they
- * share the same executable or library.
- *
- * We may want to fix this to allow page sharing for PIC pages at different
- * addresses so that ELF will really perform properly. As long as the vast
- * majority of sharable libraries load at fixed addresses this is not a
- * big concern. Any sharing of pages between the buffer cache and the
- * code space reduces the need for this as well.  - ERY
+ * share the same inode and can generally otherwise be shared.
  */
-static int try_to_share(unsigned long address, struct task_struct * tsk,
-	struct task_struct * p, unsigned long error_code, unsigned long newpage)
+static int try_to_share(unsigned long to_address, struct vm_area_struct * to_area,
+	unsigned long from_address, struct vm_area_struct * from_area,
+	unsigned long newpage)
 {
 	unsigned long from;
 	unsigned long to;
 	unsigned long from_page;
 	unsigned long to_page;
 
-	from_page = (unsigned long)PAGE_DIR_OFFSET(p->tss.cr3,address);
-	to_page = (unsigned long)PAGE_DIR_OFFSET(tsk->tss.cr3,address);
+	from_page = (unsigned long)PAGE_DIR_OFFSET(from_area->vm_task->tss.cr3,from_address);
+	to_page = (unsigned long)PAGE_DIR_OFFSET(to_area->vm_task->tss.cr3,to_address);
 /* is there a page-directory at from? */
 	from = *(unsigned long *) from_page;
 	if (!(from & PAGE_PRESENT))
 		return 0;
 	from &= PAGE_MASK;
-	from_page = from + PAGE_PTR(address);
+	from_page = from + PAGE_PTR(from_address);
 	from = *(unsigned long *) from_page;
-/* is the page clean and present? */
-	if ((from & (PAGE_PRESENT | PAGE_DIRTY)) != PAGE_PRESENT)
+/* is the page present? */
+	if (!(from & PAGE_PRESENT))
 		return 0;
+/* if it is private, it must be clean to be shared */
+	if ((from_area->vm_page_prot & PAGE_COW) && (from & PAGE_DIRTY))
+		return 0;
+/* is the page reasonable at all? */
 	if (from >= high_memory)
 		return 0;
 	if (mem_map[MAP_NR(from)] & MAP_PAGE_RESERVED)
@@ -721,68 +746,100 @@ static int try_to_share(unsigned long address, struct task_struct * tsk,
 	if (!(to & PAGE_PRESENT))
 		return 0;
 	to &= PAGE_MASK;
-	to_page = to + PAGE_PTR(address);
+	to_page = to + PAGE_PTR(to_address);
 	if (*(unsigned long *) to_page)
 		return 0;
-/* share them if read - do COW immediately otherwise */
-	if (error_code & PAGE_RW) {
-		if(!newpage)	/* did the page exist?  SRB. */
-			return 0;
-		copy_page((from & PAGE_MASK),newpage);
-		to = newpage | PAGE_PRIVATE;
-	} else {
-		mem_map[MAP_NR(from)]++;
-		from &= ~PAGE_RW;
-		to = from;
-		if(newpage)	/* only if it existed. SRB. */
-			free_page(newpage);
+/* do we copy? */
+	if (newpage) {
+		if (in_swap_cache(from)) { /* implies PAGE_DIRTY */
+			if (from_area->vm_page_prot & PAGE_COW)
+				return 0;
+		}
+		copy_page((from & PAGE_MASK), newpage);
+		*(unsigned long *) to_page = newpage | to_area->vm_page_prot;
+		return 1;
 	}
-	*(unsigned long *) from_page = from;
+/* do a final swap-cache test before sharing them.. */
+	if (in_swap_cache(from)) {
+		if (from_area->vm_page_prot & PAGE_COW)
+			return 0;
+		from |= PAGE_DIRTY;
+		*(unsigned long *) from_page = from;
+		delete_from_swap_cache(from);
+		invalidate();
+	}
+	mem_map[MAP_NR(from)]++;
+/* fill in the 'to' field, checking for COW-stuff */
+	to = (from & (PAGE_MASK | PAGE_DIRTY)) | to_area->vm_page_prot;
+	if (to & PAGE_COW)
+		to &= ~PAGE_RW;
 	*(unsigned long *) to_page = to;
+/* Check if we need to do anything at all to the 'from' field */
+	if (!(from & PAGE_RW))
+		return 1;
+	if (!(from_area->vm_page_prot & PAGE_COW))
+		return 1;
+/* ok, need to mark it read-only, so invalidate any possible old TB entry */
+	from &= ~PAGE_RW;
+	*(unsigned long *) from_page = from;
 	invalidate();
 	return 1;
 }
 
 /*
  * share_page() tries to find a process that could share a page with
- * the current one. Address is the address of the wanted page relative
- * to the current data space.
+ * the current one.
  *
- * We first check if it is at all feasible by checking executable->i_count.
+ * We first check if it is at all feasible by checking inode->i_count.
  * It should be >1 if there are other tasks sharing this inode.
  */
-int share_page(struct vm_area_struct * area, struct task_struct * tsk,
-	struct inode * inode,
-	unsigned long address, unsigned long error_code, unsigned long newpage)
+static int share_page(struct vm_area_struct * area, unsigned long address,
+	unsigned long error_code, unsigned long newpage)
 {
+	struct inode * inode;
 	struct task_struct ** p;
+	unsigned long offset;
+	unsigned long from_address;
+	unsigned long give_page;
 
-	if (!inode || inode->i_count < 2 || !area->vm_ops)
+	if (!area || !(inode = area->vm_inode) || inode->i_count < 2)
 		return 0;
+	/* do we need to copy or can we just share? */
+	give_page = 0;
+	if ((area->vm_page_prot & PAGE_COW) && (error_code & PAGE_RW)) {
+		if (!newpage)
+			return 0;
+		give_page = newpage;
+	}
+	offset = address - area->vm_start + area->vm_offset;
 	for (p = &LAST_TASK ; p > &FIRST_TASK ; --p) {
+		struct vm_area_struct * mpnt;
 		if (!*p)
 			continue;
-		if (tsk == *p)
+		if (area->vm_task == *p)
 			continue;
-		if (inode != (*p)->executable) {
-			  if(!area) continue;
-			/* Now see if there is something in the VMM that
-			   we can share pages with */
-			if(area){
-			  struct vm_area_struct * mpnt;
-			  for (mpnt = (*p)->mmap; mpnt; mpnt = mpnt->vm_next) {
-			    if (mpnt->vm_ops == area->vm_ops &&
-			       mpnt->vm_inode->i_ino == area->vm_inode->i_ino&&
-			       mpnt->vm_inode->i_dev == area->vm_inode->i_dev){
-			      if (mpnt->vm_ops->share(mpnt, area, address))
-				break;
-			    };
-			  };
-			  if (!mpnt) continue;  /* Nope.  Nuthin here */
-			};
-		}
-		if (try_to_share(address,tsk,*p,error_code,newpage))
+		/* Now see if there is something in the VMM that
+		   we can share pages with */
+		for (mpnt = (*p)->mm->mmap; mpnt; mpnt = mpnt->vm_next) {
+			/* must be same inode */
+			if (mpnt->vm_inode != inode)
+				continue;
+			/* offsets must be mutually page-aligned */
+			if ((mpnt->vm_offset ^ area->vm_offset) & ~PAGE_MASK)
+				continue;
+			/* the other area must actually cover the wanted page.. */
+			from_address = offset + mpnt->vm_start - mpnt->vm_offset;
+			if (from_address < mpnt->vm_start || from_address >= mpnt->vm_end)
+				continue;
+			/* .. NOW we can actually try to use the same physical page */
+			if (!try_to_share(address, area, from_address, mpnt, give_page))
+				continue;
+			/* free newpage if we never used it.. */
+			if (give_page || !newpage)
+				return 1;
+			free_page(newpage);
 			return 1;
+		}
 	}
 	return 0;
 }
@@ -821,63 +878,89 @@ static inline unsigned long get_empty_pgtable(struct task_struct * tsk,unsigned 
 	return 0;
 }
 
-void do_no_page(unsigned long error_code, unsigned long address,
-	struct task_struct *tsk, unsigned long user_esp)
+static inline void do_swap_page(struct vm_area_struct * vma,
+	unsigned long address, unsigned long * pge, unsigned long entry)
 {
-	unsigned long tmp;
 	unsigned long page;
-	struct vm_area_struct * mpnt;
 
-	page = get_empty_pgtable(tsk,address);
+	if (vma->vm_ops && vma->vm_ops->swapin)
+		page = vma->vm_ops->swapin(vma, entry);
+	else
+		page = swap_in(entry);
+	if (*pge != entry) {
+		free_page(page);
+		return;
+	}
+	page = page | vma->vm_page_prot;
+	if (mem_map[MAP_NR(page)] > 1 && (page & PAGE_COW))
+		page &= ~PAGE_RW;
+	++vma->vm_task->mm->rss;
+	++vma->vm_task->mm->maj_flt;
+	*pge = page;
+	return;
+}
+
+void do_no_page(struct vm_area_struct * vma, unsigned long address,
+	unsigned long error_code)
+{
+	unsigned long page, entry, prot;
+
+	page = get_empty_pgtable(vma->vm_task,address);
 	if (!page)
 		return;
 	page &= PAGE_MASK;
 	page += PAGE_PTR(address);
-	tmp = *(unsigned long *) page;
-	if (tmp & PAGE_PRESENT)
+	entry = *(unsigned long *) page;
+	if (entry & PAGE_PRESENT)
 		return;
-	++tsk->rss;
-	if (tmp) {
-		++tsk->maj_flt;
-		swap_in((unsigned long *) page);
+	if (entry) {
+		do_swap_page(vma, address, (unsigned long *) page, entry);
 		return;
 	}
-	address &= 0xfffff000;
-	tmp = 0;
-	for (mpnt = tsk->mmap; mpnt != NULL; mpnt = mpnt->vm_next) {
-		if (address < mpnt->vm_start)
-			break;
-		if (address >= mpnt->vm_end) {
-			tmp = mpnt->vm_end;
-			continue;
-		}
-		if (!mpnt->vm_ops || !mpnt->vm_ops->nopage) {
-			++tsk->min_flt;
-			get_empty_page(tsk,address);
-			return;
-		}
-		mpnt->vm_ops->nopage(error_code, mpnt, address);
+	address &= PAGE_MASK;
+
+	if (!vma->vm_ops || !vma->vm_ops->nopage) {
+		++vma->vm_task->mm->rss;
+		++vma->vm_task->mm->min_flt;
+		get_empty_page(vma->vm_task,address);
 		return;
 	}
-	if (tsk != current)
-		goto ok_no_page;
-	if (address >= tsk->end_data && address < tsk->brk)
-		goto ok_no_page;
-	if (mpnt && mpnt == tsk->stk_vma &&
-	    address - tmp > mpnt->vm_start - address &&
-	    tsk->rlim[RLIMIT_STACK].rlim_cur > mpnt->vm_end - address) {
-		mpnt->vm_start = address;
-		goto ok_no_page;
-	}
-	tsk->tss.cr2 = address;
-	current->tss.error_code = error_code;
-	current->tss.trap_no = 14;
-	send_sig(SIGSEGV,tsk,1);
-	if (error_code & 4)	/* user level access? */
+	page = get_free_page(GFP_KERNEL);
+	if (share_page(vma, address, error_code, page)) {
+		++vma->vm_task->mm->min_flt;
+		++vma->vm_task->mm->rss;
 		return;
-ok_no_page:
-	++tsk->min_flt;
-	get_empty_page(tsk,address);
+	}
+	if (!page) {
+		oom(current);
+		put_page(vma->vm_task, BAD_PAGE, address, PAGE_PRIVATE);
+		return;
+	}
+	++vma->vm_task->mm->maj_flt;
+	++vma->vm_task->mm->rss;
+	prot = vma->vm_page_prot;
+	/*
+	 * The fourth argument is "no_share", which tells the low-level code
+	 * to copy, not share the page even if sharing is possible.  It's
+	 * essentially an early COW detection ("moo at 5 AM").
+	 */
+	page = vma->vm_ops->nopage(vma, address, page, (error_code & PAGE_RW) && (prot & PAGE_COW));
+	if (share_page(vma, address, error_code, 0)) {
+		free_page(page);
+		return;
+	}
+	/*
+	 * This silly early PAGE_DIRTY setting removes a race
+	 * due to the bad i386 page protection.
+	 */
+	if (error_code & PAGE_RW) {
+		prot |= PAGE_DIRTY;	/* can't be COW-shared: see "no_share" above */
+	} else if ((prot & PAGE_COW) && mem_map[MAP_NR(page)] > 1)
+		prot &= ~PAGE_RW;
+	if (put_page(vma->vm_task, page, address, prot))
+		return;
+	free_page(page);
+	oom(current);
 }
 
 /*
@@ -887,40 +970,90 @@ ok_no_page:
  */
 asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long error_code)
 {
+	struct vm_area_struct * vma;
 	unsigned long address;
-	unsigned long user_esp = 0;
-	unsigned int bit;
+	unsigned long page;
 
 	/* get the address */
 	__asm__("movl %%cr2,%0":"=r" (address));
-	if (address < TASK_SIZE) {
-		if (error_code & 4) {	/* user mode access? */
-			if (regs->eflags & VM_MASK) {
-				bit = (address - 0xA0000) >> PAGE_SHIFT;
-				if (bit < 32)
-					current->screen_bitmap |= 1 << bit;
-			} else 
-				user_esp = regs->esp;
-		}
-		if (error_code & 1)
-			do_wp_page(error_code, address, current, user_esp);
-		else
-			do_no_page(error_code, address, current, user_esp);
+	for (vma = current->mm->mmap ; ; vma = vma->vm_next) {
+		if (!vma)
+			goto bad_area;
+		if (vma->vm_end > address)
+			break;
+	}
+	if (vma->vm_start <= address)
+		goto good_area;
+	if (!(vma->vm_flags & VM_GROWSDOWN))
+		goto bad_area;
+	if (vma->vm_end - address > current->rlim[RLIMIT_STACK].rlim_cur)
+		goto bad_area;
+	vma->vm_offset -= vma->vm_start - (address & PAGE_MASK);
+	vma->vm_start = (address & PAGE_MASK);
+/*
+ * Ok, we have a good vm_area for this memory access, so
+ * we can handle it..
+ */
+good_area:
+	if (regs->eflags & VM_MASK) {
+		unsigned long bit = (address - 0xA0000) >> PAGE_SHIFT;
+		if (bit < 32)
+			current->screen_bitmap |= 1 << bit;
+	}
+	if (!(vma->vm_page_prot & PAGE_USER))
+		goto bad_area;
+	if (error_code & PAGE_PRESENT) {
+		if (!(vma->vm_page_prot & (PAGE_RW | PAGE_COW)))
+			goto bad_area;
+#ifdef CONFIG_TEST_VERIFY_AREA
+		if (regs->cs == KERNEL_CS)
+			printk("WP fault at %08x\n", regs->eip);
+#endif
+		do_wp_page(vma, address, error_code);
 		return;
 	}
-	address -= TASK_SIZE;
-	if (wp_works_ok < 0 && address == 0 && (error_code & PAGE_PRESENT)) {
+	do_no_page(vma, address, error_code);
+	return;
+
+/*
+ * Something tried to access memory that isn't in our memory map..
+ * Fix it, but check if it's kernel or user first..
+ */
+bad_area:
+	if (error_code & PAGE_USER) {
+		current->tss.cr2 = address;
+		current->tss.error_code = error_code;
+		current->tss.trap_no = 14;
+		send_sig(SIGSEGV, current, 1);
+		return;
+	}
+/*
+ * Oops. The kernel tried to access some bad page. We'll have to
+ * terminate things with extreme prejudice.
+ */
+	if (wp_works_ok < 0 && address == TASK_SIZE && (error_code & PAGE_PRESENT)) {
 		wp_works_ok = 1;
 		pg0[0] = PAGE_SHARED;
 		printk("This processor honours the WP bit even when in supervisor mode. Good.\n");
 		return;
 	}
-	if (address < PAGE_SIZE) {
-		printk("Unable to handle kernel NULL pointer dereference");
+	if ((unsigned long) (address-TASK_SIZE) < PAGE_SIZE) {
+		printk(KERN_ALERT "Unable to handle kernel NULL pointer dereference");
 		pg0[0] = PAGE_SHARED;
 	} else
-		printk("Unable to handle kernel paging request");
-	printk(" at address %08lx\n",address);
+		printk(KERN_ALERT "Unable to handle kernel paging request");
+	printk(" at virtual address %08lx\n",address);
+	__asm__("movl %%cr3,%0" : "=r" (page));
+	printk(KERN_ALERT "current->tss.cr3 = %08lx, %%cr3 = %08lx\n",
+		current->tss.cr3, page);
+	page = ((unsigned long *) page)[address >> 22];
+	printk(KERN_ALERT "*pde = %08lx\n", page);
+	if (page & PAGE_PRESENT) {
+		page &= PAGE_MASK;
+		address &= 0x003ff000;
+		page = ((unsigned long *) page)[address >> PAGE_SHIFT];
+		printk(KERN_ALERT "*pte = %08lx\n", page);
+	}
 	die_if_kernel("Oops", regs, error_code);
 	do_exit(SIGKILL);
 }
@@ -997,7 +1130,12 @@ void show_mem(void)
 	printk("%d reserved pages\n",reserved);
 	printk("%d pages shared\n",shared);
 	show_buffers();
+#ifdef CONFIG_NET
+	show_net_buffers();
+#endif
 }
+
+extern unsigned long free_area_init(unsigned long, unsigned long);
 
 /*
  * paging_init() sets up the page tables - note that the first 4MB are
@@ -1044,7 +1182,7 @@ unsigned long paging_init(unsigned long start_mem, unsigned long end_mem)
 		}
 	}
 	invalidate();
-	return start_mem;
+	return free_area_init(start_mem, end_mem);
 }
 
 void mem_init(unsigned long start_low_mem,
@@ -1053,41 +1191,27 @@ void mem_init(unsigned long start_low_mem,
 	int codepages = 0;
 	int reservedpages = 0;
 	int datapages = 0;
-	unsigned long tmp, mask;
-	unsigned short * p;
+	unsigned long tmp;
 	extern int etext;
 
 	cli();
 	end_mem &= PAGE_MASK;
 	high_memory = end_mem;
-	start_mem +=  0x0000000f;
-	start_mem &= ~0x0000000f;
-	tmp = MAP_NR(end_mem);
-	mem_map = (unsigned short *) start_mem;
-	p = mem_map + tmp;
-	start_mem = (unsigned long) p;
-	while (p > mem_map)
-		*--p = MAP_PAGE_RESERVED;
-
-	/* set up the free-area data structures */
-	for (mask = PAGE_MASK, tmp = 0 ; tmp < NR_MEM_LISTS ; tmp++, mask <<= 1) {
-		unsigned long bitmap_size;
-		free_area_list[tmp].prev = free_area_list[tmp].next = &free_area_list[tmp];
-		end_mem = (end_mem + ~mask) & mask;
-		bitmap_size = end_mem >> (PAGE_SHIFT + tmp);
-		bitmap_size = (bitmap_size + 7) >> 3;
-		free_area_map[tmp] = (unsigned char *) start_mem;
-		memset((void *) start_mem, 0, bitmap_size);
-		start_mem += bitmap_size;
-	}
 
 	/* mark usable pages in the mem_map[] */
 	start_low_mem = PAGE_ALIGN(start_low_mem);
 	start_mem = PAGE_ALIGN(start_mem);
-	while (start_low_mem < 0xA0000) {
+
+	/*
+	 * IBM messed up *AGAIN* in their thinkpad: 0xA0000 -> 0x9F000.
+	 * They seem to have done something stupid with the floppy
+	 * controller as well..
+	 */
+	while (start_low_mem < 0x9f000) {
 		mem_map[MAP_NR(start_low_mem)] = 0;
 		start_low_mem += PAGE_SIZE;
 	}
+
 	while (start_mem < high_memory) {
 		mem_map[MAP_NR(start_mem)] = 0;
 		start_mem += PAGE_SIZE;
@@ -1124,6 +1248,9 @@ void mem_init(unsigned long start_low_mem,
 	invalidate();
 	if (wp_works_ok < 0)
 		wp_works_ok = 0;
+#ifdef CONFIG_TEST_VERIFY_AREA
+	wp_works_ok = 0;
+#endif
 	return;
 }
 
@@ -1133,105 +1260,53 @@ void si_meminfo(struct sysinfo *val)
 
 	i = high_memory >> PAGE_SHIFT;
 	val->totalram = 0;
-	val->freeram = 0;
 	val->sharedram = 0;
+	val->freeram = nr_free_pages << PAGE_SHIFT;
 	val->bufferram = buffermem;
 	while (i-- > 0)  {
 		if (mem_map[i] & MAP_PAGE_RESERVED)
 			continue;
 		val->totalram++;
-		if (!mem_map[i]) {
-			val->freeram++;
+		if (!mem_map[i])
 			continue;
-		}
 		val->sharedram += mem_map[i]-1;
 	}
 	val->totalram <<= PAGE_SHIFT;
-	val->freeram <<= PAGE_SHIFT;
 	val->sharedram <<= PAGE_SHIFT;
 	return;
 }
 
 
-/* This handles a generic mmap of a disk file */
-void file_mmap_nopage(int error_code, struct vm_area_struct * area, unsigned long address)
+/*
+ * This handles a generic mmap of a disk file.
+ */
+static unsigned long file_mmap_nopage(struct vm_area_struct * area, unsigned long address,
+	unsigned long page, int no_share)
 {
 	struct inode * inode = area->vm_inode;
 	unsigned int block;
-	unsigned long page;
 	int nr[8];
-	int i, j;
-	int prot = area->vm_page_prot;
+	int i, *p;
 
 	address &= PAGE_MASK;
 	block = address - area->vm_start + area->vm_offset;
 	block >>= inode->i_sb->s_blocksize_bits;
-
-	page = get_free_page(GFP_KERNEL);
-	if (share_page(area, area->vm_task, inode, address, error_code, page)) {
-		++area->vm_task->min_flt;
-		return;
-	}
-
-	++area->vm_task->maj_flt;
-	if (!page) {
-		oom(current);
-		put_page(area->vm_task, BAD_PAGE, address, PAGE_PRIVATE);
-		return;
-	}
-	for (i=0, j=0; i< PAGE_SIZE ; j++, block++, i += inode->i_sb->s_blocksize)
-		nr[j] = bmap(inode,block);
-	if (error_code & PAGE_RW)
-		prot |= PAGE_RW | PAGE_DIRTY;
-	page = bread_page(page, inode->i_dev, nr, inode->i_sb->s_blocksize, prot);
-
-	if (!(prot & PAGE_RW)) {
-		if (share_page(area, area->vm_task, inode, address, error_code, page))
-			return;
-	}
-	if (put_page(area->vm_task,page,address,prot))
-		return;
-	free_page(page);
-	oom(current);
-}
-
-void file_mmap_free(struct vm_area_struct * area)
-{
-	if (area->vm_inode)
-		iput(area->vm_inode);
-#if 0
-	if (area->vm_inode)
-		printk("Free inode %x:%d (%d)\n",area->vm_inode->i_dev, 
-				 area->vm_inode->i_ino, area->vm_inode->i_count);
-#endif
-}
-
-/*
- * Compare the contents of the mmap entries, and decide if we are allowed to
- * share the pages
- */
-int file_mmap_share(struct vm_area_struct * area1, 
-		    struct vm_area_struct * area2, 
-		    unsigned long address)
-{
-	if (area1->vm_inode != area2->vm_inode)
-		return 0;
-	if (area1->vm_start != area2->vm_start)
-		return 0;
-	if (area1->vm_end != area2->vm_end)
-		return 0;
-	if (area1->vm_offset != area2->vm_offset)
-		return 0;
-	if (area1->vm_page_prot != area2->vm_page_prot)
-		return 0;
-	return 1;
+	i = PAGE_SIZE >> inode->i_sb->s_blocksize_bits;
+	p = nr;
+	do {
+		*p = bmap(inode,block);
+		i--;
+		block++;
+		p++;
+	} while (i > 0);
+	return bread_page(page, inode->i_dev, nr, inode->i_sb->s_blocksize, no_share);
 }
 
 struct vm_operations_struct file_mmap = {
 	NULL,			/* open */
-	file_mmap_free,		/* close */
+	NULL,			/* close */
 	file_mmap_nopage,	/* nopage */
 	NULL,			/* wppage */
-	file_mmap_share,	/* share */
+	NULL,			/* share */
 	NULL,			/* unmap */
 };

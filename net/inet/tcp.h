@@ -20,11 +20,11 @@
 
 #include <linux/tcp.h>
 
-#define MAX_SYN_SIZE	44 + sizeof (struct sk_buff) + MAX_HEADER
-#define MAX_FIN_SIZE	40 + sizeof (struct sk_buff) + MAX_HEADER
-#define MAX_ACK_SIZE	40 + sizeof (struct sk_buff) + MAX_HEADER
-#define MAX_RESET_SIZE	40 + sizeof (struct sk_buff) + MAX_HEADER
-#define MAX_WINDOW	4096
+#define MAX_SYN_SIZE	44 + MAX_HEADER
+#define MAX_FIN_SIZE	40 + MAX_HEADER
+#define MAX_ACK_SIZE	40 + MAX_HEADER
+#define MAX_RESET_SIZE	40 + MAX_HEADER
+#define MAX_WINDOW	8192
 #define MIN_WINDOW	2048
 #define MAX_ACK_BACKLOG	2
 #define MIN_WRITE_SPACE	2048
@@ -36,7 +36,7 @@
 #define URG_READ	0x0400
 
 #define TCP_RETR1	7	/*
-				 * This is howmany retries it does before it
+				 * This is how many retries it does before it
 				 * tries to figure out if the gateway is
 				 * down.
 				 */
@@ -47,15 +47,15 @@
 				 */
 
 #define TCP_TIMEOUT_LEN	(15*60*HZ) /* should be about 15 mins		*/
-#define TCP_TIMEWAIT_LEN (60*HZ) /* how long to wait to sucessfully 
+#define TCP_TIMEWAIT_LEN (60*HZ) /* how long to wait to successfully 
 				  * close the socket, about 60 seconds	*/
-#define TCP_ACK_TIME	3000	/* time to delay before sending an ACK	*/
+#define TCP_ACK_TIME	(3*HZ)	/* time to delay before sending an ACK	*/
 #define TCP_DONE_TIME	250	/* maximum time to wait before actually
 				 * destroying a socket			*/
 #define TCP_WRITE_TIME	3000	/* initial time to wait for an ACK,
 			         * after last transmit			*/
-#define TCP_CONNECT_TIME 2000	/* time to retransmit first SYN		*/
-#define TCP_SYN_RETRIES	5	/* number of times to retry openning a
+#define TCP_TIMEOUT_INIT (3*HZ)	/* RFC 1122 initial timeout value	*/
+#define TCP_SYN_RETRIES	5	/* number of times to retry opening a
 				 * connection 				*/
 #define TCP_PROBEWAIT_LEN 100	/* time to wait between probes when
 				 * I've got something to write and
@@ -64,7 +64,6 @@
 #define TCP_NO_CHECK	0	/* turn to one if you want the default
 				 * to be no checksum			*/
 
-#define TCP_WRITE_QUEUE_MAGIC 0xa5f23477
 
 /*
  *	TCP option
@@ -124,6 +123,9 @@ extern int	tcp_rcv(struct sk_buff *skb, struct device *dev,
 
 extern int	tcp_ioctl(struct sock *sk, int cmd, unsigned long arg);
 
+extern int tcp_select_window(struct sock *sk);
+extern void tcp_send_check(struct tcphdr *th, unsigned long saddr, 
+		unsigned long daddr, int len, struct sock *sk);
 extern void tcp_send_probe0(struct sock *sk);
 extern void tcp_enqueue_partial(struct sk_buff *, struct sock *);
 extern struct sk_buff * tcp_dequeue_partial(struct sock *);

@@ -21,16 +21,13 @@
 */
 
 
-/* A jumpstart is often required when the reset() function is called -
-   many host adapters cannot do this cleanly, so they do nothing at all.
-   To get the command going again, these routines set this bit in the flags
-   so that a scsi_request_sense() is executed, and the command starts running
-   again */
-
-#define NEEDS_JUMPSTART 0x20
-
+/* It is senseless to set SG_ALL any higher than this - the performance
+   does not get any better, and it wastes memory */
 #define SG_NONE 0
 #define SG_ALL 0xff
+
+#define DISABLE_CLUSTERING 0
+#define ENABLE_CLUSTERING 1
 
 /* The various choices mean:
    NONE: Self evident.  Host adapter is not capable of scatter-gather.
@@ -47,8 +44,14 @@
 	type of host adapter that is supported on the system.
 */
 
-typedef struct     
+typedef struct scsi_disk Disk;
+
+typedef struct  SHT
 	{
+
+	  /* Used with loadable modules so we can construct a linked list. */
+	  struct SHT * next;
+
 	/*
 		The name pointer is a pointer to the name of the SCSI
 		device detected.
@@ -72,8 +75,10 @@ typedef struct
 		especially that scsi_malloc/scsi_free must not be called.
 	*/
 
-	int (* detect)(int); 
+	int (* detect)(struct SHT *); 
 
+	  /* Used with loadable modules to unload the host structures */
+	int (*release)(struct Scsi_Host *);
 	/*
 		The info function will return whatever useful
 		information the developer sees fit.              
@@ -109,7 +114,11 @@ typedef struct
 	/*
 		Since the mid level driver handles time outs, etc, we want to 
 		be able to abort the current command.  Abort returns 0 if the 
-		abortion was successful.  If non-zero, the code passed to it 
+		abortion was successful.  The field SCpnt->abort reason
+		can be filled in with the appropriate reason why we wanted
+		the abort in the first place, and this will be used
+		in the mid-level code instead of the host_byte().
+		If non-zero, the code passed to it 
 		will be used as the return code, otherwise 
 		DID_ABORT  should be returned.
 
@@ -117,7 +126,7 @@ typedef struct
 		resetting the bus, etc.  if necessary. 
 	*/
 
-	int (* abort)(Scsi_Cmnd *, int);
+	int (* abort)(Scsi_Cmnd *);
 
 	/*
 		The reset function will reset the SCSI bus.  Any executing 
@@ -145,7 +154,7 @@ typedef struct
 		size, device number, list (heads, sectors, cylinders)
 	*/ 
 
-	int (* bios_param)(int, int, int []);
+	int (* bios_param)(Disk *, int, int []);
 	
 	/*
 		This determines if we will use a non-interrupt driven
@@ -192,6 +201,15 @@ typedef struct
 	  true if this host adapter uses unchecked DMA onto an ISA bus.
 	*/
 	unsigned unchecked_isa_dma:1;
+	/*
+	  true if this host adapter can make good use of clustering.
+	  I originally thought that if the tablesize was large that it
+	  was a waste of CPU cycles to prepare a cluster list, but
+	  it works out that the Buslogic is faster if you use a smaller
+	  number of segments (i.e. use clustering).  I guess it is
+	  inefficient.
+	*/
+	unsigned use_clustering:1;
 	} Scsi_Host_Template;
 
 /*
@@ -206,6 +224,7 @@ typedef struct
 struct Scsi_Host
 	{
 		struct Scsi_Host * next;
+		unsigned short extra_bytes;
 		volatile unsigned char host_busy;
 		char host_no;  /* Used for IOCTL_GET_IDLUN */
 		int last_reset;
@@ -226,21 +245,62 @@ struct Scsi_Host
 		int this_id;
 		short unsigned int sg_tablesize;
 		unsigned unchecked_isa_dma:1;
+		/*
+		   True if this host was loaded as a loadable module
+		   */
+		unsigned loaded_as_module:1;
+		
 		int hostdata[0];  /* Used for storage of host specific stuff */
 	};
 
 extern struct Scsi_Host * scsi_hostlist;
+extern struct Scsi_Device_Template * scsi_devicelist;
 
-extern Scsi_Host_Template scsi_hosts[];
+extern Scsi_Host_Template * scsi_hosts;
 
 /*
 	scsi_init initializes the scsi hosts.
 */
 
 
-unsigned int scsi_init(unsigned long memory_start,unsigned long memory_end);
-extern struct Scsi_Host * scsi_register(int i, int j);
-extern void scsi_unregister(struct Scsi_Host * i, int j);
+/* We use these goofy things because the MM is not set up when we init
+   the scsi subsystem.  By using these functions we can write code that
+   looks normal.  Also, it makes it possible to use the same code for a
+   loadable module. */
+
+extern void * scsi_init_malloc(unsigned int size);
+extern void scsi_init_free(char * ptr, unsigned int size);
+
+
+extern int scsi_loadable_module_flag;
+unsigned int scsi_init(void);
+extern struct Scsi_Host * scsi_register(Scsi_Host_Template *, int j);
+extern void scsi_unregister(struct Scsi_Host * i);
 
 #define BLANK_HOST {"", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 #endif
+
+struct Scsi_Device_Template
+{
+  struct Scsi_Device_Template * next;
+  char * name;
+  char * tag;
+  unsigned char scsi_type;
+  unsigned char major;
+  unsigned char nr_dev;  /* Number currently attached */
+  unsigned char dev_noticed; /* Number of devices detected. */
+  unsigned char dev_max; /* Current size of arrays */
+  unsigned blk:1;  /* 0 if character device */
+  int (*detect)(Scsi_Device *); /* Returns 1 if we can attach this device */
+  void (*init)(void);  /* Sizes arrays based upon number of devices detected */
+  void (*finish)(void);  /* Perform initialization after attachment */
+  void (*attach)(Scsi_Device *); /* Attach devices to arrays */
+  void (*detach)(Scsi_Device *);
+};
+
+extern struct Scsi_Device_Template sd_template;
+extern struct Scsi_Device_Template st_template;
+extern struct Scsi_Device_Template sr_template;
+extern struct Scsi_Device_Template sg_template;
+
+int scsi_register_device(struct Scsi_Device_Template * sdpnt);

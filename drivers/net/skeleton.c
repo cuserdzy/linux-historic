@@ -56,10 +56,9 @@ static char *version =
 #include <asm/dma.h>
 #include <errno.h>
 
-#include "dev.h"
-#include "eth.h"
-#include "skbuff.h"
-#include "arp.h"
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
+#include <linux/skbuff.h>
 
 #ifndef HAVE_AUTOIRQ
 /* From auto_irq.c, in ioport.h for later versions. */
@@ -68,11 +67,6 @@ extern int autoirq_report(int waittime);
 /* The map from IRQ number (as passed to the interrupt handler) to
    'struct device'. */
 extern struct device *irq2dev_map[16];
-#endif
-
-#ifndef HAVE_ALLOC_SKB
-#define alloc_skb(size, priority) (struct sk_buff *) kmalloc(size,priority)
-#define kfree_skbmem(addr, size) kfree_s(addr,size);
 #endif
 
 #ifndef HAVE_PORTRESERVE
@@ -111,9 +105,7 @@ static void net_interrupt(int reg_ptr);
 static void net_rx(struct device *dev);
 static int net_close(struct device *dev);
 static struct enet_statistics *net_get_stats(struct device *dev);
-#ifdef HAVE_MULTICAST
 static void set_multicast_list(struct device *dev, int num_addrs, void *addrs);
-#endif
 
 /* Example routines you must write ;->. */
 #define tx_done(dev) 1
@@ -124,7 +116,7 @@ extern void chipset_init(struct device *dev, int startp);
 /* Check for a network adaptor of this type, and return '0' iff one exists.
    If dev->base_addr == 0, probe all likely locations.
    If dev->base_addr == 1, always return failure.
-   If dev->base_addr == 2, alloate space for the device and return success
+   If dev->base_addr == 2, allocate space for the device and return success
    (detachable devices only).
    */
 int
@@ -162,7 +154,7 @@ int netcard_probe1(struct device *dev, short ioaddr)
 	for (i = 0; i < 6; i++) {
 		station_addr[i] = inb(ioaddr + i);
 	}
-	/* Check the first three octets of the S.A. for the manufactor's code. */ 
+	/* Check the first three octets of the S.A. for the manufacturer's code. */ 
 	if (station_addr[0] != SA_ADDR0
 		||	 station_addr[1] != SA_ADDR1 || station_addr[2] != SA_ADDR2) {
 		return ENODEV;
@@ -174,7 +166,7 @@ int netcard_probe1(struct device *dev, short ioaddr)
 #ifdef jumpered_interrupts
 	/* If this board has jumpered interrupts, snarf the interrupt vector
 	   now.	 There is no point in waiting since no other device can use
-	   the interrupt, and this marks the 'irqaction' as busy. */
+	   the interrupt, and this marks the irq as busy. */
 
 	if (dev->irq == -1)
 		;			/* Do nothing: a user-level program will set it. */
@@ -190,7 +182,7 @@ int netcard_probe1(struct device *dev, short ioaddr)
 	 or don't know which one to set. */
 	  dev->irq = 9;
 
-	{	 int irqval = request_irq(dev->irq, &net_interrupt);
+	{	 int irqval = request_irq(dev->irq, &net_interrupt, 0, "skeleton");
 		 if (irqval) {
 			 printk ("%s: unable to get IRQ %d (irqval=%d).\n", dev->name,
 					 dev->irq, irqval);
@@ -213,36 +205,11 @@ int netcard_probe1(struct device *dev, short ioaddr)
 	dev->stop		= net_close;
 	dev->hard_start_xmit = net_send_packet;
 	dev->get_stats	= net_get_stats;
-#ifdef HAVE_MULTICAST
 	dev->set_multicast_list = &set_multicast_list;
-#endif
 
-	/* Fill in the fields of the device structure with ethernet-generic values.
-	   This should be in a common file instead of per-driver.  */
-	for (i = 0; i < DEV_NUMBUFFS; i++)
-		dev->buffs[i] = NULL;
-
-	dev->hard_header	= eth_header;
-	dev->add_arp		= eth_add_arp;
-	dev->queue_xmit		= dev_queue_xmit;
-	dev->rebuild_header	= eth_rebuild_header;
-	dev->type_trans		= eth_type_trans;
-
-	dev->type			= ARPHRD_ETHER;
-	dev->hard_header_len = ETH_HLEN;
-	dev->mtu			= 1500; /* eth_mtu */
-	dev->addr_len		= ETH_ALEN;
-	for (i = 0; i < ETH_ALEN; i++) {
-		dev->broadcast[i]=0xff;
-	}
-
-	/* New-style flags. */
-	dev->flags			= IFF_BROADCAST;
-	dev->family			= AF_INET;
-	dev->pa_addr		= 0;
-	dev->pa_brdaddr		= 0;
-	dev->pa_mask		= 0;
-	dev->pa_alen		= sizeof(unsigned long);
+	/* Fill in the fields of the device structure with ethernet-generic values. */
+	
+	ether_setup(dev);
 
 	return 0;
 }
@@ -263,7 +230,7 @@ net_open(struct device *dev)
 
 	/* This is used if the interrupt line can turned off (shared).
 	   See 3c503.c for an example of selecting the IRQ at config-time. */
-	if (request_irq(dev->irq, &net_interrupt)) {
+	if (request_irq(dev->irq, &net_interrupt, 0, "skeleton")) {
 		return -EAGAIN;
 	}
 
@@ -314,15 +281,6 @@ net_send_packet(struct sk_buff *skb, struct device *dev)
 		return 0;
 	}
 
-	/* For ethernet, fill in the header.  This should really be done by a
-	   higher level, rather than duplicated for each ethernet adaptor. */
-	if (!skb->arp  &&  dev->rebuild_header(skb->data, dev)) {
-		skb->dev = dev;
-		arp_queue (skb);
-		return 0;
-	}
-	skb->arp=1;
-
 	/* Block a timer-based transmit from overlapping.  This could better be
 	   done with atomic_swap(1, dev->tbusy), but set_bit() works as well. */
 	if (set_bit(0, (void*)&dev->tbusy) != 0)
@@ -334,8 +292,7 @@ net_send_packet(struct sk_buff *skb, struct device *dev)
 		hardware_send_packet(ioaddr, buf, length);
 		dev->trans_start = jiffies;
 	}
-	if (skb->free)
-		kfree_skb (skb, FREE_WRITE);
+	dev_kfree_skb (skb, FREE_WRITE);
 
 	/* You might need to clean up and record Tx statistics here. */
 	if (inw(ioaddr) == /*RU*/81)
@@ -372,7 +329,7 @@ net_interrupt(int reg_ptr)
 		if (status /*& TX_INTR*/) {
 			lp->stats.tx_packets++;
 			dev->tbusy = 0;
-			mark_bh(INET_BH);	/* Inform upper layers. */
+			mark_bh(NET_BH);	/* Inform upper layers. */
 		}
 		if (status /*& COUNTERS_INTR*/) {
 			/* Increment the appropriate 'localstats' field. */
@@ -406,17 +363,14 @@ net_rx(struct device *dev)
 			if (status & 0x04) lp->stats.rx_fifo_errors++;
 		} else {
 			/* Malloc up new buffer. */
-			int sksize = sizeof(struct sk_buff) + pkt_len;
 			struct sk_buff *skb;
 
-			skb = alloc_skb(sksize, GFP_ATOMIC);
+			skb = alloc_skb(pkt_len, GFP_ATOMIC);
 			if (skb == NULL) {
 				printk("%s: Memory squeeze, dropping packet.\n", dev->name);
 				lp->stats.rx_dropped++;
 				break;
 			}
-			skb->mem_len = sksize;
-			skb->mem_addr = skb;
 			skb->len = pkt_len;
 			skb->dev = dev;
 
@@ -426,22 +380,13 @@ net_rx(struct device *dev)
 			/* or */
 			insw(ioaddr, skb->data, (pkt_len + 1) >> 1);
 
-#ifdef HAVE_NETIF_RX
 			netif_rx(skb);
-#else
-			skb->lock = 0;
-			if (dev_rint((unsigned char*)skb, pkt_len, IN_SKBUFF, dev) != 0) {
-				kfree_s(skb, sksize);
-				lp->stats.rx_dropped++;
-				break;
-			}
-#endif
 			lp->stats.rx_packets++;
 		}
 	} while (--boguscount);
 
 	/* If any worth-while packets have been received, dev_rint()
-	   has done a mark_bh(INET_BH) for us and will work on them
+	   has done a mark_bh(NET_BH) for us and will work on them
 	   when we get to the bottom-half routine. */
 	return;
 }
@@ -492,7 +437,6 @@ net_get_stats(struct device *dev)
 	return &lp->stats;
 }
 
-#ifdef HAVE_MULTICAST
 /* Set or clear the multicast filter for this adaptor.
    num_addrs == -1	Promiscuous mode, receive all packets
    num_addrs == 0	Normal mode, clear multicast list
@@ -508,7 +452,6 @@ set_multicast_list(struct device *dev, int num_addrs, void *addrs)
 	} else
 		outw(99, ioaddr);		/* Disable promiscuous mode, use normal mode */
 }
-#endif
 
 /*
  * Local variables:

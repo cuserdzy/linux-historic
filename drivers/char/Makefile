@@ -16,11 +16,11 @@
 .c.o:
 	$(CC) $(CFLAGS) -c $<
 
-OBJS  = tty_io.o console.o keyboard.o serial.o \
+OBJS  = tty_io.o n_tty.o console.o keyboard.o serial.o \
 	tty_ioctl.o pty.o vt.o mem.o \
 	defkeymap.o
 
-SRCS  = tty_io.c console.c keyboard.c serial.c \
+SRCS  = tty_io.c n_tty.c console.c keyboard.c serial.c \
 	tty_ioctl.c pty.c vt.c mem.c \
 	defkeymap.c
 
@@ -58,7 +58,7 @@ OBJS := $(OBJS) psaux.o
 SRCS := $(SRCS) psaux.c
 endif
 
-ifdef CONFIG_TAPE_QIC02
+ifdef CONFIG_QIC02_TAPE
 OBJS := $(OBJS) tpqic02.o 
 SRCS := $(SRCS) tpqic02.c
 endif

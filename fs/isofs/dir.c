@@ -1,7 +1,7 @@
 /*
  *  linux/fs/isofs/dir.c
  *
- *  (C) 1992  Eric Youngdale Modified for ISO9660 filesystem.
+ *  (C) 1992, 1993, 1994  Eric Youngdale Modified for ISO9660 filesystem.
  *
  *  (C) 1991  Linus Torvalds - minix filesystem
  *
@@ -19,6 +19,8 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/malloc.h>
+#include <linux/sched.h>
+#include <linux/locks.h>
 
 static int isofs_readdir(struct inode *, struct file *, struct dirent *, int);
 
@@ -55,12 +57,6 @@ struct inode_operations isofs_dir_inode_operations = {
 	NULL			/* permission */
 };
 
-/* This is used to speed up lookup.  Without this we would need to
-make a linear search of the directory to find the file that the
-directory read just returned.  This is a single element cache. */
-
-struct lookup_cache cache = {0,};
-
 static int isofs_readdir(struct inode * inode, struct file * filp,
 	struct dirent * dirent, int count)
 {
@@ -73,17 +69,21 @@ static int isofs_readdir(struct inode * inode, struct file * filp,
 	void * cpnt = NULL;
 	unsigned int old_offset;
 	int dlen, rrflag;
-	char * dpnt;
+	char * dpnt, *dpnt1;
 	struct iso_directory_record * de;
 	
+	dpnt1 = NULL;
 	if (!inode || !S_ISDIR(inode->i_mode))
 		return -EBADF;
 	
 	offset = filp->f_pos & (bufsize - 1);
 	block = isofs_bmap(inode,filp->f_pos>>bufbits);
-	if (!block || !(bh = bread(inode->i_dev,block,bufsize)))
-		return 0;
-	
+
+	if(!block) return 0;
+
+	if(!(bh = breada(inode->i_dev, block, bufsize, filp->f_pos, inode->i_size)))
+	  return 0;
+
 	while (filp->f_pos < inode->i_size) {
 #ifdef DEBUG
 		printk("Block, offset: %x %x %x\n",
@@ -103,7 +103,8 @@ static int isofs_readdir(struct inode * inode, struct file * filp,
 				       + ISOFS_BLOCK_SIZE);
 			block = isofs_bmap(inode,(filp->f_pos)>>bufbits);
 			if (!block
-			    || !(bh = bread(inode->i_dev,block,bufsize)))
+			    || !(bh = breada(inode->i_dev, block, bufsize, filp->f_pos, 
+					     inode->i_size)))
 				return 0;
 			continue;
 		}
@@ -118,19 +119,21 @@ static int isofs_readdir(struct inode * inode, struct file * filp,
 		filp->f_pos += *((unsigned char *) de);
 
 		if (offset >=  bufsize) {
-			cpnt = kmalloc(1 << ISOFS_BLOCK_BITS, GFP_KERNEL);
-			memcpy(cpnt, bh->b_data, bufsize);
-			de = (struct iso_directory_record *)
-				((char *)cpnt + old_offset);
+		        unsigned int frag1;
+			frag1 = bufsize - old_offset;
+			cpnt = kmalloc(*((unsigned char *) de),GFP_KERNEL);
+			memcpy(cpnt, bh->b_data + old_offset, frag1);
+			de = (struct iso_directory_record *) ((char *)cpnt);
 			brelse(bh);
 			offset = filp->f_pos & (bufsize - 1);
 			block = isofs_bmap(inode,(filp->f_pos)>> bufbits);
 			if (!block
-			    || !(bh = bread(inode->i_dev,block,bufsize))) {
-			        kfree_s(cpnt, 1 << ISOFS_BLOCK_BITS);
+			    || !(bh = breada(inode->i_dev, block, bufsize,
+					     filp->f_pos, inode->i_size))) {
+			        kfree(cpnt);
 				return 0;
 			};
-			memcpy((char *)cpnt+bufsize, bh->b_data, bufsize);
+			memcpy((char *)cpnt+frag1, bh->b_data, offset);
 		}
 		
 		/* Handle the case of the '.' directory */
@@ -179,7 +182,7 @@ static int isofs_readdir(struct inode * inode, struct file * filp,
 			if (rrflag) {
 			  if (rrflag == -1) {  /* This is a rock ridge reloc dir */
 			    if (cpnt) {
-				kfree_s(cpnt, 1 << ISOFS_BLOCK_BITS);
+				kfree(cpnt);
 				cpnt = NULL;
 			    };
 			    continue;
@@ -187,9 +190,11 @@ static int isofs_readdir(struct inode * inode, struct file * filp,
 			  i = dlen;
 			}
 			else
-			  if(inode->i_sb->u.isofs_sb.s_mapping == 'n')
+			  if(inode->i_sb->u.isofs_sb.s_mapping == 'n') {
+			    dpnt1 = dpnt;
+			    dpnt = kmalloc(dlen, GFP_KERNEL);
 			    for (i = 0; i < dlen && i < NAME_MAX; i++) {
-			      if (!(c = dpnt[i])) break;
+			      if (!(c = dpnt1[i])) break;
 			      if (c >= 'A' && c <= 'Z') c |= 0x20;  /* lower case */
 			      if (c == '.' && i == dlen-3 && de->name[i+1] == ';' && de->name[i+2] == '1')
 				break;  /* Drop trailing '.;1' (ISO9660:1988 7.5.1 requires period) */
@@ -197,26 +202,24 @@ static int isofs_readdir(struct inode * inode, struct file * filp,
 				break;  /* Drop trailing ';1' */
 			      if (c == ';') c = '.';  /* Convert remaining ';' to '.' */
 			      dpnt[i] = c;
-			  };
-			
+			    }
+			  }
 			for(j=0; j<i; j++)
 			  put_fs_byte(dpnt[j],j+dirent->d_name); /* And save it */
+			if(dpnt1) {
+			  kfree(dpnt);
+			  dpnt = dpnt1;
+			}
+			
+			dcache_add(inode, dpnt, i, inode_number);
 		      };
 #if 0
 		printk("Nchar: %d\n",i);
 #endif
 
-		if (i && i+1 < sizeof(cache.filename)) {
-			cache.ino = inode_number;
-			cache.dir = inode->i_ino;
-			cache.dev = inode->i_dev;
-			strncpy(cache.filename, dpnt, i);
-			cache.dlen = dlen;
-		      };
-
 		if (rrflag) kfree(dpnt);
 		if (cpnt) {
-			kfree_s(cpnt, 1 << ISOFS_BLOCK_BITS);
+			kfree(cpnt);
 			cpnt = NULL;
 		};
 		
@@ -232,7 +235,7 @@ static int isofs_readdir(struct inode * inode, struct file * filp,
 	   to here at the end of the directory. */
  out:
 	if (cpnt)
-		kfree_s(cpnt, 1 << ISOFS_BLOCK_BITS);
+		kfree(cpnt);
 	brelse(bh);
 	return 0;
 }

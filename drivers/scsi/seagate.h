@@ -12,11 +12,11 @@
 	$Header
 */
 #ifndef ASM
-int seagate_st0x_detect(int);
+int seagate_st0x_detect(Scsi_Host_Template *);
 int seagate_st0x_command(Scsi_Cmnd *);
 int seagate_st0x_queue_command(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
 
-int seagate_st0x_abort(Scsi_Cmnd *, int);
+int seagate_st0x_abort(Scsi_Cmnd *);
 const char *seagate_st0x_info(void);
 int seagate_st0x_reset(Scsi_Cmnd *); 
 
@@ -24,17 +24,14 @@ int seagate_st0x_reset(Scsi_Cmnd *);
 	#define NULL 0
 #endif
 
-#ifdef CONFIG_BLK_DEV_SD
-int seagate_st0x_biosparam(int, int, int*);
-#else
-#define seagate_st0x_biosparam NULL
-#endif
+int seagate_st0x_biosparam(Disk *, int, int*);
 
-#define SEAGATE_ST0X  {"Seagate ST-01/ST-02", seagate_st0x_detect, 	\
+#define SEAGATE_ST0X  {NULL, "Seagate ST-01/ST-02", seagate_st0x_detect, \
+			 NULL, 						\
 			 seagate_st0x_info, seagate_st0x_command,  	\
 			 seagate_st0x_queue_command, seagate_st0x_abort, \
 			 seagate_st0x_reset, NULL, seagate_st0x_biosparam, \
-			 1, 7, SG_ALL, 1, 0, 0}
+			 1, 7, SG_ALL, 1, 0, 0, DISABLE_CLUSTERING}
 #endif
 
 

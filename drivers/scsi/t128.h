@@ -91,9 +91,9 @@
 #define T_DATA_REG_OFFSET	0x1e00	/* rw 512 bytes long */
 
 #ifndef ASM
-int t128_abort(Scsi_Cmnd *, int);
-int t128_biosparam(int, int, int*);
-int t128_detect(int);
+int t128_abort(Scsi_Cmnd *);
+int t128_biosparam(Disk *, int, int*);
+int t128_detect(Scsi_Host_Template *);
 const char *t128_info(void);
 int t128_queue_command(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
 int t128_reset(Scsi_Cmnd *);
@@ -118,11 +118,12 @@ int t128_reset(Scsi_Cmnd *);
 
 #ifdef HOSTS_C
 
-#define TRANTOR_T128 {"Trantor T128/T128F/T228", t128_detect, t128_info,\
+#define TRANTOR_T128 {NULL, "Trantor T128/T128F/T228", t128_detect, NULL,  \
+	t128_info,							\
 	NULL, t128_queue_command, t128_abort, t128_reset, NULL, 	\
 	t128_biosparam, 						\
 	/* can queue */ CAN_QUEUE, /* id */ 7, SG_ALL,			\
-	/* cmd per lun */ CMD_PER_LUN , 0, 0}
+	/* cmd per lun */ CMD_PER_LUN , 0, 0, DISABLE_CLUSTERING}
 
 #else
 

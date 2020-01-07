@@ -36,7 +36,7 @@
 #ifndef PAS16_H
 #define PAS16_H
 
-#define PAS16_PUBLIC_RELEASE 1
+#define PAS16_PUBLIC_RELEASE 2
 
 #define PDEBUG_INIT	0x1
 #define PDEBUG_TRANSFER 0x2
@@ -114,9 +114,9 @@
 
 
 #ifndef ASM
-int pas16_abort(Scsi_Cmnd *, int);
-int pas16_biosparam(int, int, int*);
-int pas16_detect(int);
+int pas16_abort(Scsi_Cmnd *);
+int pas16_biosparam(Disk *, int, int*);
+int pas16_detect(Scsi_Host_Template *);
 const char *pas16_info(void);
 int pas16_queue_command(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
 int pas16_reset(Scsi_Cmnd *);
@@ -141,11 +141,12 @@ int pas16_reset(Scsi_Cmnd *);
 
 #ifdef HOSTS_C
 
-#define MV_PAS16 {"Pro Audio Spectrum-16 SCSI", pas16_detect, pas16_info,\
+#define MV_PAS16 {NULL, "Pro Audio Spectrum-16 SCSI", 			\
+	pas16_detect, NULL, pas16_info,					\
 	NULL, pas16_queue_command, pas16_abort, pas16_reset, NULL, 	\
 	pas16_biosparam, 						\
 	/* can queue */ CAN_QUEUE, /* id */ 7, SG_ALL,			\
-	/* cmd per lun */ CMD_PER_LUN , 0, 0}
+	/* cmd per lun */ CMD_PER_LUN , 0, 0, DISABLE_CLUSTERING}
 
 #else
 

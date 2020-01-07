@@ -46,9 +46,7 @@
  *	transfer rate if handshaking isn't working correctly.
  */
 
-#include <linux/config.h>
 
-#if defined(CONFIG_SCSI_SEAGATE) || defined(CONFIG_SCSI_FD_8xx) 
 #include <asm/io.h>
 #include <asm/system.h>
 #include <linux/signal.h>
@@ -272,17 +270,12 @@ static inline void borken_wait(void) {
 
 #endif /* def SLOW_HANDSHAKE */
 
-int seagate_st0x_detect (int hostnum)
+int seagate_st0x_detect (Scsi_Host_Template * tpnt)
 	{
+     struct Scsi_Host *instance;
 #ifndef OVERRIDE
 	int i,j;
 #endif 
-static struct sigaction seagate_sigaction = {
-	&seagate_reconnect_intr,
-	0,
-	SA_INTERRUPT,
-	NULL
-};
 
 /*
  *	First, we try for the manual override.
@@ -336,7 +329,7 @@ static struct sigaction seagate_sigaction = {
 #endif /* OVERIDE */
 	} /* (! controller_type) */
  
-	scsi_hosts[hostnum].this_id = (controller_type == SEAGATE) ? 7 : 6;
+	tpnt->this_id = (controller_type == SEAGATE) ? 7 : 6;
 
 	if (base_address)
 		{
@@ -349,8 +342,9 @@ static struct sigaction seagate_sigaction = {
  *	At all times, we will use IRQ 5.  Should also check for IRQ3 if we 
  * 	loose our first interrupt.
  */
-		hostno = hostnum;
-		if (irqaction((int) irq, &seagate_sigaction)) {
+		instance = scsi_register(tpnt, 0);
+		hostno = instance->host_no;
+		if (request_irq((int) irq, seagate_reconnect_intr, SA_INTERRUPT, "seagate")) {
 			printk("scsi%d : unable to allocate IRQ%d\n",
 				hostno, (int) irq);
 			return 0;
@@ -615,7 +609,7 @@ static int internal_command(unsigned char target, unsigned char lun, const void 
 	st0x_aborted = 0;
 
 #ifdef SLOW_HANDSHAKE
-	borken = (int) scsi_devices[SCint->index].borken;
+	borken = (int) SCint->device->borken;
 #endif
 
 #if (DEBUG & PRINT_COMMAND)
@@ -670,18 +664,20 @@ static int internal_command(unsigned char target, unsigned char lun, const void 
  *	target ID are asserted.  A valid initator ID is not on the bus
  *	until IO is asserted, so we must wait for that.
  */
-		
-		for (clock = jiffies + 10, temp = 0; (jiffies < clock) &&
-		     !(STATUS & STAT_IO););
-		
-		if (jiffies >= clock)
-			{
+		clock = jiffies + 10;
+		for (;;) {
+			temp = STATUS;
+			if ((temp & STAT_IO) && !(temp & STAT_BSY))
+				break;
+
+			if (jiffies > clock) {
 #if (DEBUG & PHASE_RESELECT)
-			printk("scsi%d : RESELECT timed out while waiting for IO .\n",
-				hostno);
+				printk("scsi%d : RESELECT timed out while waiting for IO .\n",
+					hostno);
 #endif
-			return (DID_BAD_INTR << 16);
+				return (DID_BAD_INTR << 16);
 			}
+		}
 
 /* 
  * 	After I/O is asserted by the target, we can read our ID and its
@@ -1546,14 +1542,11 @@ else {
 	return retcode (st0x_aborted);
 	}
 
-int seagate_st0x_abort (Scsi_Cmnd * SCpnt, int code)
+int seagate_st0x_abort (Scsi_Cmnd * SCpnt)
 	{
-	if (code)
-		st0x_aborted = code;
-	else
-		st0x_aborted = DID_ABORT;
-
-		return 0;
+	  st0x_aborted = DID_ABORT;
+	  
+	  return SCSI_ABORT_PENDING;
 	}
 
 /*
@@ -1590,38 +1583,31 @@ int seagate_st0x_reset (Scsi_Cmnd * SCpnt)
 #ifdef DEBUG
 	printk("SCSI bus reset.\n");
 #endif
-	if(SCpnt) SCpnt->flags |= NEEDS_JUMPSTART;
-	return 0;
+	return SCSI_RESET_WAKEUP;
 	}
-
-#ifdef CONFIG_BLK_DEV_SD
 
 #include <asm/segment.h>
 #include "sd.h"
 #include "scsi_ioctl.h"
 
-int seagate_st0x_biosparam(int size, int dev, int* ip) {
+int seagate_st0x_biosparam(Disk * disk, int dev, int* ip) {
   unsigned char buf[256 + sizeof(int) * 2], cmd[6], *data, *page;
   int *sizes, result, formatted_sectors, total_sectors;
   int cylinders, heads, sectors;
-
-  Scsi_Device *disk;
-
-  disk = rscsi_disks[MINOR(dev) >> 4].device;
 
 /*
  * Only SCSI-I CCS drives and later implement the necessary mode sense 
  * pages.  
  */
 
-  if (disk->scsi_level < 2) 
+  if (disk->device->scsi_level < 2) 
 	return -1;
 
   sizes = (int *) buf;
   data = (unsigned char *) (sizes + 2);
 
   cmd[0] = MODE_SENSE;
-  cmd[1] = (disk->lun << 5) & 0xe5;
+  cmd[1] = (disk->device->lun << 5) & 0xe5;
   cmd[2] = 0x04; /* Read page 4, rigid disk geometry page current values */
   cmd[3] = 0;
   cmd[4] = 255;
@@ -1637,7 +1623,7 @@ int seagate_st0x_biosparam(int size, int dev, int* ip) {
 
   memcpy (data, cmd, 6);
 
-  if (!(result = kernel_scsi_ioctl (disk, SCSI_IOCTL_SEND_COMMAND, (void *) buf))) {
+  if (!(result = kernel_scsi_ioctl (disk->device, SCSI_IOCTL_SEND_COMMAND, (void *) buf))) {
 /*
  * The mode page lies beyond the MODE SENSE header, with length 4, and 
  * the BLOCK DESCRIPTOR, with length header[3].
@@ -1650,7 +1636,7 @@ int seagate_st0x_biosparam(int size, int dev, int* ip) {
     cmd[2] = 0x03; /* Read page 3, format page current values */
     memcpy (data, cmd, 6);
 
-    if (!(result = kernel_scsi_ioctl (disk, SCSI_IOCTL_SEND_COMMAND, (void *) buf))) {
+    if (!(result = kernel_scsi_ioctl (disk->device, SCSI_IOCTL_SEND_COMMAND, (void *) buf))) {
       page = data + 4 + data[3];
       sectors = (page[10] << 8) | page[11];	
 
@@ -1705,7 +1691,3 @@ printk("scsi%d : heads = %d cylinders = %d sectors = %d total = %d formatted = %
     
   return result;
 }
-#endif /* CONFIG_BLK_DEV_SD */
-
-#endif	/* defined(CONFIG_SCSI_SEGATE) */
-

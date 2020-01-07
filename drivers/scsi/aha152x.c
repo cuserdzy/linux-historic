@@ -20,10 +20,19 @@
  * General Public License for more details.
  
  *
- * $Id: aha152x.c,v 1.0 1994/03/25 12:52:00 root Exp $
+ * $Id: aha152x.c,v 1.2 1994/07/03 12:56:36 root Exp $
  *
 
  * $Log: aha152x.c,v $
+ * Revision 1.2  1994/07/03  12:56:36  root
+ * - cleaned up debugging code
+ * - more tweaking on reset delays
+ * - updated abort/reset code (pretty untested...)
+ *
+ * Revision 1.1  1994/05/28  21:18:49  root
+ * - update for mid-level interface change (abort-reset)
+ * - delays after resets adjusted for some slow devices
+ *
  * Revision 1.0  1994/03/25  12:52:00  root
  * - Fixed "more data than expected" problem
  * - added new BIOS signatures
@@ -155,19 +164,18 @@
 
  Drew Eckhardt (drew@cs.colorado.edu)
 
- Eric Youngdale (eric@tantalus.nrl.navy.mil) 
+ Eric Youngdale (ericy@cais.com) 
 
  special thanks to Eric Youngdale for the free(!) supplying the
  documentation on the chip.
 
  **************************************************************************/
 
-#include "aha152x.h"
-
 #include <linux/sched.h>
 #include <asm/io.h>
 #include "../block/blk.h"
 #include "scsi.h"
+#include "sd.h" /* Reqd for biosparam definition */
 #include "hosts.h"
 #include "constants.h"
 #include <asm/system.h>
@@ -175,6 +183,8 @@
 #include <linux/string.h>
 #include <linux/wait.h>
 #include <linux/ioport.h>
+
+#include "aha152x.h"
 
 /* DEFINES */
 
@@ -493,16 +503,11 @@ static int aha152x_porttest(int port_base)
   return(i==16);
 }
 
-int aha152x_detect(int hostno)
+int aha152x_detect(Scsi_Host_Template * tpnt)
 {
   int                 i, j,  ok;
   aha152x_config      conf;
-  struct sigaction    sa;
   int                 interrupt_level;
-  
-#if defined(DEBUG_RACE)
-  enter_driver("detect");
-#endif
   
   if(setup_called)
     {
@@ -568,13 +573,8 @@ int aha152x_detect(int hostno)
                      (int) signatures[j].sig_length);
 
       if(!ok)
-        {
-#if defined(DEBUG_RACE)
-          leave_driver("(1) detect");
-#endif
-          printk("failed\n");
-          return 0;
-        }
+        return 0;
+
       printk("aha152x: BIOS test: passed, ");
 #else
       printk("aha152x: ");
@@ -588,9 +588,6 @@ int aha152x_detect(int hostno)
       if(i==PORT_COUNT)
         {
           printk("failed\n");
-#if defined(DEBUG_RACE)
-          leave_driver("(2) detect");
-#endif
           return 0;
         }
       else
@@ -627,12 +624,7 @@ int aha152x_detect(int hostno)
 
   printk("detection complete\n");
  
-  sa.sa_handler  = aha152x_intr;
-  sa.sa_flags    = SA_INTERRUPT;
-  sa.sa_mask     = 0;
-  sa.sa_restorer = NULL;
-  
-  ok = irqaction( interrupt_level, &sa);
+  ok = request_irq(interrupt_level, aha152x_intr, SA_INTERRUPT, "aha152x");
   
   if(ok<0)
     {
@@ -655,16 +647,16 @@ int aha152x_detect(int hostno)
     }
 
   SETPORT( SCSIID, this_host << 4 );
-  scsi_hosts[hostno].this_id=this_host;
+  tpnt->this_id=this_host;
   
   if(can_disconnect)
-    scsi_hosts[hostno].can_queue=AHA152X_MAXQUEUE;
+    tpnt->can_queue=AHA152X_MAXQUEUE;
 
   /* RESET OUT */
   SETBITS(SCSISEQ, SCSIRSTO );
-  do_pause(5);
+  do_pause(30);
   CLRBITS(SCSISEQ, SCSIRSTO );
-  do_pause(10);
+  do_pause(60);
 
   aha152x_reset(NULL);
 
@@ -676,10 +668,6 @@ int aha152x_detect(int hostno)
   /* not expecting any interrupts */
   SETPORT(SIMODE0, 0);
   SETPORT(SIMODE1, 0);
-
-#if defined(DEBUG_RACE)
-  leave_driver("(3) detect");
-#endif
 
   SETBITS( DMACNTRL0, INTEN);
   return 1;
@@ -765,6 +753,10 @@ int aha152x_queue( Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
     }
   sti();
 
+#if defined(DEBUG_RACE)
+  leave_driver("queue");
+#endif
+
   return 0;
 }
 
@@ -781,7 +773,7 @@ int aha152x_command( Scsi_Cmnd *SCpnt )
  *  Abort a queued command
  *  (commands that are on the bus can't be aborted easily)
  */
-int aha152x_abort( Scsi_Cmnd *SCpnt, int code )
+int aha152x_abort( Scsi_Cmnd *SCpnt)
 {
   Scsi_Cmnd *ptr, *prev;
 
@@ -791,7 +783,9 @@ int aha152x_abort( Scsi_Cmnd *SCpnt, int code )
   printk("aha152x: abort(), SCpnt=0x%08x, ", (unsigned int) SCpnt );
 #endif
 
+#if defined(DEBUG_ABORT)
   show_queues();
+#endif
 
   /* look for command in issue queue */
   for( ptr=issue_SC, prev=NULL;
@@ -809,16 +803,25 @@ int aha152x_abort( Scsi_Cmnd *SCpnt, int code )
       sti();
 
       ptr->host_scribble = NULL;
-      ptr->result = (code ? code : DID_ABORT ) << 16;
+      ptr->result = DID_ABORT << 16;
       ptr->done(ptr);
-      return 0;
+      return SCSI_ABORT_SUCCESS;
     }
 
-  /* Fail abortion, if we're on the bus */
   if (current_SC)
-    {
+    if( TESTLO(SSTAT1, BUSFREE) ) {
+       /* fail abortion, if current command is on the bus */
        sti();
-       return -1;
+       return SCSI_ABORT_BUSY;
+    }
+    else
+    { 
+      /* target entered bus free before COMMAND COMPLETE, nothing to abort */
+      sti();
+      current_SC->result = DID_ERROR << 16;
+      current_SC->done(current_SC);
+      current_SC = (Scsi_Cmnd *) NULL;
+      return SCSI_ABORT_SUCCESS;
     }
 
   /* look for command in disconnected queue */
@@ -836,7 +839,7 @@ int aha152x_abort( Scsi_Cmnd *SCpnt, int code )
       if(prev)
         prev->host_scribble = ptr->host_scribble;
       else
-        issue_SC = (Scsi_Cmnd *) ptr->host_scribble;
+        disconnected_SC = (Scsi_Cmnd *) ptr->host_scribble;
 
       /* set command current and initiate selection,
          let the interrupt routine take care of the abortion */
@@ -852,7 +855,7 @@ int aha152x_abort( Scsi_Cmnd *SCpnt, int code )
       SETBITS(SCSISEQ, ENSELO | ENAUTOATNO );
 
       SETBITS( DMACNTRL0, INTEN );
-      abort_result=0;
+      abort_result=SCSI_ABORT_SUCCESS;
       sti();
 
       /* sleep until the abortion is complete */
@@ -864,7 +867,7 @@ int aha152x_abort( Scsi_Cmnd *SCpnt, int code )
 
   /* command wasn't found */
   sti();
-  return 0;
+  return SCSI_ABORT_NOT_RUNNING;
 }
 
 /*
@@ -903,11 +906,11 @@ static void aha152x_reset_ports(void)
 
 /*
  *  Reset registers, reset a hanging bus and
- *  kill active and disconnected commands
+ *  kill active and disconnected commands for target w/o soft reset
  */
 int aha152x_reset(Scsi_Cmnd * __unused)
 {
-  Scsi_Cmnd *ptr;
+  Scsi_Cmnd *ptr, *prev, *next;
 
   aha152x_reset_ports();
 
@@ -920,9 +923,11 @@ int aha152x_reset(Scsi_Cmnd * __unused)
        printk("aha152x: reset(), bus not free: SCSI RESET OUT\n");
 #endif
 
+#if defined( DEBUG_RESET )
        show_queues();
+#endif
 
-       if(current_SC)
+       if(current_SC && !current_SC->device->soft_reset)
          {
            current_SC->host_scribble = NULL;
            current_SC->result = DID_RESET << 16;
@@ -930,35 +935,59 @@ int aha152x_reset(Scsi_Cmnd * __unused)
            current_SC=NULL;
          }
 
-       while(disconnected_SC)
-         {
-           ptr = disconnected_SC;
-           disconnected_SC = (Scsi_Cmnd *) ptr->host_scribble;
-           ptr->host_scribble = NULL;
-           ptr->result = DID_RESET << 16;
-           ptr->done(ptr);
-         }
+       cli();
+       prev=NULL; ptr=disconnected_SC;
+       while(ptr)
+	 {
+	   if(!ptr->device->soft_reset)
+	     {
+	       if(prev)
+		 prev->host_scribble = ptr->host_scribble;
+	       else
+		 disconnected_SC = (Scsi_Cmnd *) ptr->host_scribble;
+
+	       next = (Scsi_Cmnd *) ptr->host_scribble;
+  
+	       ptr->host_scribble = NULL;
+	       ptr->result        = DID_RESET << 16;
+	       ptr->done(ptr);
+  
+	       ptr = next; 
+	     }
+	   else
+	     {
+	       prev=ptr;
+	       ptr = (Scsi_Cmnd *) ptr->host_scribble;
+	     }
+	 }
+       sti();
+
+#if defined( DEBUG_RESET )
+       printk("commands on targets w/ soft-resets:\n");
+       show_queues();
+#endif
 
        /* RESET OUT */
        SETPORT(SCSISEQ, SCSIRSTO);
-       do_pause(5);
+       do_pause(30);
        SETPORT(SCSISEQ, 0);
-       do_pause(10);
+       do_pause(60);
 
-       SETPORT(SIMODE0, 0 );
+       SETPORT(SIMODE0, disconnected_SC ? ENSELDI : 0 );
        SETPORT(SIMODE1, issue_SC ? ENBUSFREE : 0);
 
        SETPORT( DMACNTRL0, INTEN );
     }
 
-  return 0;
+  return SCSI_RESET_SUCCESS;
 }
 
 /*
  * Return the "logical geometry"
  */
-int aha152x_biosparam( int size, int dev, int *info_array )
+int aha152x_biosparam(Scsi_Disk * disk, int dev, int *info_array )
 {
+  int size = disk->capacity;
 #if defined(DEBUG_BIOSPARAM)
   printk("aha152x_biosparam: dev=%x, size=%d, ", dev, size);
 #endif
@@ -1246,7 +1275,7 @@ void aha152x_intr( int irqno )
 
                 if(current_SC->SCp.phase & aborted)
                   {
-                    abort_result=1;
+                    abort_result=SCSI_ABORT_ERROR;
                     wake_up( &abortion_complete );
                   }
 
@@ -1304,7 +1333,7 @@ void aha152x_intr( int irqno )
 #if defined(DEBUG_ABORT)
               printk("(ABORT) selection timeout, ");
 #endif
-              abort_result=1;
+              abort_result=SCSI_ABORT_ERROR;
               wake_up( &abortion_complete );
             }
 
@@ -1390,7 +1419,7 @@ void aha152x_intr( int irqno )
         if(message==ABORT)
           {
             /* revive abort(); abort() enables interrupts */
-            abort_result=0;
+            abort_result=SCSI_ABORT_SUCCESS;
             wake_up( &abortion_complete );
 
             current_SC->SCp.phase = (current_SC->SCp.phase & ~(P_MASK<<16));

@@ -45,9 +45,9 @@ static inline struct task_struct * get_task(int pid)
 }
 
 /*
- * this routine will get a word off of the processes priviledged stack. 
+ * this routine will get a word off of the processes privileged stack. 
  * the offset is how far from the base addr as stored in the TSS.  
- * this routine assumes that all the priviledged stacks are in our
+ * this routine assumes that all the privileged stacks are in our
  * data space.
  */   
 static inline int get_stack_long(struct task_struct *task, int offset)
@@ -60,9 +60,9 @@ static inline int get_stack_long(struct task_struct *task, int offset)
 }
 
 /*
- * this routine will put a word on the processes priviledged stack. 
+ * this routine will put a word on the processes privileged stack. 
  * the offset is how far from the base addr as stored in the TSS.  
- * this routine assumes that all the priviledged stacks are in our
+ * this routine assumes that all the privileged stacks are in our
  * data space.
  */
 static inline int put_stack_long(struct task_struct *task, int offset,
@@ -81,24 +81,20 @@ static inline int put_stack_long(struct task_struct *task, int offset,
  * tables. NOTE! You should check that the long isn't on a page boundary,
  * and that it is in the task area before calling this: this routine does
  * no checking.
- *
- * NOTE2! This uses "tsk->tss.cr3" even though we know it's currently always
- * zero. This routine shouldn't have to change when we make a better mm.
  */
-static unsigned long get_long(struct task_struct * tsk,
-	unsigned long addr)
+static unsigned long get_long(struct vm_area_struct * vma, unsigned long addr)
 {
 	unsigned long page;
 
 repeat:
-	page = *PAGE_DIR_OFFSET(tsk->tss.cr3,addr);
+	page = *PAGE_DIR_OFFSET(vma->vm_task->tss.cr3, addr);
 	if (page & PAGE_PRESENT) {
 		page &= PAGE_MASK;
 		page += PAGE_PTR(addr);
 		page = *((unsigned long *) page);
 	}
 	if (!(page & PAGE_PRESENT)) {
-		do_no_page(0,addr,tsk,0);
+		do_no_page(vma, addr, 0);
 		goto repeat;
 	}
 /* this is a hack for non-kernel-mapped video buffers and similar */
@@ -118,14 +114,14 @@ repeat:
  * Now keeps R/W state of page so that a text page stays readonly
  * even if a debugger scribbles breakpoints into it.  -M.U-
  */
-static void put_long(struct task_struct * tsk, unsigned long addr,
+static void put_long(struct vm_area_struct * vma, unsigned long addr,
 	unsigned long data)
 {
 	unsigned long page, pte = 0;
 	int readonly = 0;
 
 repeat:
-	page = *PAGE_DIR_OFFSET(tsk->tss.cr3,addr);
+	page = *PAGE_DIR_OFFSET(vma->vm_task->tss.cr3, addr);
 	if (page & PAGE_PRESENT) {
 		page &= PAGE_MASK;
 		page += PAGE_PTR(addr);
@@ -133,13 +129,13 @@ repeat:
 		page = *((unsigned long *) page);
 	}
 	if (!(page & PAGE_PRESENT)) {
-		do_no_page(0 /* PAGE_RW */ ,addr,tsk,0);
+		do_no_page(vma, addr, 0 /* PAGE_RW */);
 		goto repeat;
 	}
 	if (!(page & PAGE_RW)) {
-		if(!(page & PAGE_COW))
+		if (!(page & PAGE_COW))
 			readonly = 1;
-		do_wp_page(PAGE_RW | PAGE_PRESENT,addr,tsk,0);
+		do_wp_page(vma, addr, PAGE_RW | PAGE_PRESENT);
 		goto repeat;
 	}
 /* this is a hack for non-kernel-mapped video buffers and similar */
@@ -150,10 +146,32 @@ repeat:
 	page &= PAGE_MASK;
 	page += addr & ~PAGE_MASK;
 	*(unsigned long *) page = data;
-	if(readonly) {
+	if (readonly) {
 		*(unsigned long *) pte &=~ (PAGE_RW|PAGE_COW);
 		invalidate();
 	} 
+}
+
+static struct vm_area_struct * find_vma(struct task_struct * tsk, unsigned long addr)
+{
+	struct vm_area_struct * vma;
+
+	addr &= PAGE_MASK;
+	for (vma = tsk->mm->mmap ; ; vma = vma->vm_next) {
+		if (!vma)
+			return NULL;
+		if (vma->vm_end > addr)
+			break;
+	}
+	if (vma->vm_start <= addr)
+		return vma;
+	if (!(vma->vm_flags & VM_GROWSDOWN))
+		return NULL;
+	if (vma->vm_end - addr > tsk->rlim[RLIMIT_STACK].rlim_cur)
+		return NULL;
+	vma->vm_offset -= vma->vm_start - addr;
+	vma->vm_start = addr;
+	return vma;
 }
 
 /*
@@ -163,13 +181,21 @@ repeat:
 static int read_long(struct task_struct * tsk, unsigned long addr,
 	unsigned long * result)
 {
-	unsigned long low,high;
+	struct vm_area_struct * vma = find_vma(tsk, addr);
 
-	if (addr > TASK_SIZE-sizeof(long))
+	if (!vma)
 		return -EIO;
 	if ((addr & ~PAGE_MASK) > PAGE_SIZE-sizeof(long)) {
-		low = get_long(tsk,addr & ~(sizeof(long)-1));
-		high = get_long(tsk,(addr+sizeof(long)) & ~(sizeof(long)-1));
+		unsigned long low,high;
+		struct vm_area_struct * vma_high = vma;
+
+		if (addr + sizeof(long) >= vma->vm_end) {
+			vma_high = vma->vm_next;
+			if (!vma_high || vma_high->vm_start != vma->vm_end)
+				return -EIO;
+		}
+		low = get_long(vma, addr & ~(sizeof(long)-1));
+		high = get_long(vma_high, (addr+sizeof(long)) & ~(sizeof(long)-1));
 		switch (addr & (sizeof(long)-1)) {
 			case 1:
 				low >>= 8;
@@ -186,7 +212,7 @@ static int read_long(struct task_struct * tsk, unsigned long addr,
 		}
 		*result = low;
 	} else
-		*result = get_long(tsk,addr);
+		*result = get_long(vma, addr);
 	return 0;
 }
 
@@ -197,13 +223,21 @@ static int read_long(struct task_struct * tsk, unsigned long addr,
 static int write_long(struct task_struct * tsk, unsigned long addr,
 	unsigned long data)
 {
-	unsigned long low,high;
+	struct vm_area_struct * vma = find_vma(tsk, addr);
 
-	if (addr > TASK_SIZE-sizeof(long))
+	if (!vma)
 		return -EIO;
 	if ((addr & ~PAGE_MASK) > PAGE_SIZE-sizeof(long)) {
-		low = get_long(tsk,addr & ~(sizeof(long)-1));
-		high = get_long(tsk,(addr+sizeof(long)) & ~(sizeof(long)-1));
+		unsigned long low,high;
+		struct vm_area_struct * vma_high = vma;
+
+		if (addr + sizeof(long) >= vma->vm_end) {
+			vma_high = vma->vm_next;
+			if (!vma_high || vma_high->vm_start != vma->vm_end)
+				return -EIO;
+		}
+		low = get_long(vma, addr & ~(sizeof(long)-1));
+		high = get_long(vma_high, (addr+sizeof(long)) & ~(sizeof(long)-1));
 		switch (addr & (sizeof(long)-1)) {
 			case 0: /* shouldn't happen, but safety first */
 				low = data;
@@ -227,10 +261,10 @@ static int write_long(struct task_struct * tsk, unsigned long addr,
 				high |= data >> 8;
 				break;
 		}
-		put_long(tsk,addr & ~(sizeof(long)-1),low);
-		put_long(tsk,(addr+sizeof(long)) & ~(sizeof(long)-1),high);
+		put_long(vma, addr & ~(sizeof(long)-1),low);
+		put_long(vma_high, (addr+sizeof(long)) & ~(sizeof(long)-1),high);
 	} else
-		put_long(tsk,addr,data);
+		put_long(vma, addr, data);
 	return 0;
 }
 
@@ -246,7 +280,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 		/* are we already being traced? */
 		if (current->flags & PF_PTRACED)
 			return -EPERM;
-		/* set the ptrace bit in the proccess flags. */
+		/* set the ptrace bit in the process flags. */
 		current->flags |= PF_PTRACED;
 		return 0;
 	}
@@ -257,8 +291,11 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 	if (request == PTRACE_ATTACH) {
 		if (child == current)
 			return -EPERM;
-		if ((!child->dumpable || (current->uid != child->euid) ||
-	 	    (current->gid != child->egid)) && !suser())
+		if ((!child->dumpable ||
+		    (current->uid != child->euid) ||
+		    (current->uid != child->uid) ||
+	 	    (current->gid != child->egid) ||
+	 	    (current->gid != child->gid)) && !suser())
 			return -EPERM;
 		/* the same process cannot be attached many times */
 		if (child->flags & PF_PTRACED)
@@ -282,7 +319,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 		return -ESRCH;
 
 	switch (request) {
-	/* when I and D space are seperate, these will need to be fixed. */
+	/* when I and D space are separate, these will need to be fixed. */
 		case PTRACE_PEEKTEXT: /* read word at location addr. */ 
 		case PTRACE_PEEKDATA: {
 			unsigned long tmp;
@@ -329,7 +366,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			return 0;
 		}
 
-      /* when I and D space are seperate, this will have to be fixed. */
+      /* when I and D space are separate, this will have to be fixed. */
 		case PTRACE_POKETEXT: /* write the word at location addr. */
 		case PTRACE_POKEDATA:
 			return write_long(child,addr,data);
@@ -339,7 +376,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			    addr > sizeof(struct user) - 3)
 				return -EIO;
 
-			addr = addr >> 2; /* temproary hack. */
+			addr = addr >> 2; /* temporary hack. */
 
 			if (addr == ORIG_EAX)
 				return -EIO;
@@ -410,7 +447,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 
 /*
  * make the child exit.  Best I can do is send it a sigkill. 
- * perhaps it should be put in the status that it want's to 
+ * perhaps it should be put in the status that it wants to 
  * exit.
  */
 		case PTRACE_KILL: {

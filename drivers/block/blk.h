@@ -21,8 +21,8 @@
 /*
  * Ok, this is an expanded form so that we can use the same
  * request for paging requests when that is implemented. In
- * paging, 'bh' is NULL, and 'waiting' is used to wait for
- * read/write completion.
+ * paging, 'bh' is NULL, and the semaphore is used to wait
+ * for read/write completion.
  */
 struct request {
 	int dev;		/* -1 if no request */
@@ -32,7 +32,7 @@ struct request {
 	unsigned long nr_sectors;
 	unsigned long current_nr_sectors;
 	char * buffer;
-	struct task_struct * waiting;
+	struct semaphore * sem;
 	struct buffer_head * bh;
 	struct buffer_head * bhtail;
 	struct request * next;
@@ -82,7 +82,9 @@ extern int * blksize_size[MAX_BLKDEV];
 extern unsigned long hd_init(unsigned long mem_start, unsigned long mem_end);
 extern unsigned long cdu31a_init(unsigned long mem_start, unsigned long mem_end);
 extern unsigned long mcd_init(unsigned long mem_start, unsigned long mem_end);
-extern int is_read_only(int dev);
+#ifdef CONFIG_SBPCD
+extern unsigned long sbpcd_init(unsigned long, unsigned long);
+#endif CONFIG_SBPCD
 extern void set_device_ro(int dev,int flag);
 
 extern void rd_load(void);
@@ -92,10 +94,10 @@ extern int ramdisk_size;
 extern unsigned long xd_init(unsigned long mem_start, unsigned long mem_end);
 
 #define RO_IOCTLS(dev,where) \
-  case BLKROSET: if (!suser()) return -EPERM; \
+  case BLKROSET: if (!suser()) return -EACCES; \
 		 set_device_ro((dev),get_fs_long((long *) (where))); return 0; \
   case BLKROGET: { int __err = verify_area(VERIFY_WRITE, (void *) (where), sizeof(long)); \
-		   if (!__err) put_fs_long(is_read_only(dev),(long *) (where)); return __err; }
+		   if (!__err) put_fs_long(0!=is_read_only(dev),(long *) (where)); return __err; }
 		 
 #ifdef MAJOR_NR
 
@@ -121,7 +123,7 @@ static void floppy_off(unsigned int nr);
 #define DEVICE_NAME "floppy"
 #define DEVICE_INTR do_floppy
 #define DEVICE_REQUEST do_fd_request
-#define DEVICE_NR(device) ((device) & 3)
+#define DEVICE_NR(device) ( ((device) & 3) | (((device) & 0x80 ) >> 5 ))
 #define DEVICE_ON(device) floppy_on(DEVICE_NR(device))
 #define DEVICE_OFF(device) floppy_off(DEVICE_NR(device))
 
@@ -191,8 +193,32 @@ static void floppy_off(unsigned int nr);
 
 #elif (MAJOR_NR == MATSUSHITA_CDROM_MAJOR)
 
-#define DEVICE_NAME "Matsushita CD-ROM"
+#define DEVICE_NAME "Matsushita CD-ROM controller #1"
 #define DEVICE_REQUEST do_sbpcd_request
+#define DEVICE_NR(device) (MINOR(device))
+#define DEVICE_ON(device)
+#define DEVICE_OFF(device)
+
+#elif (MAJOR_NR == MATSUSHITA_CDROM2_MAJOR)
+
+#define DEVICE_NAME "Matsushita CD-ROM controller #2"
+#define DEVICE_REQUEST do_sbpcd2_request
+#define DEVICE_NR(device) (MINOR(device))
+#define DEVICE_ON(device)
+#define DEVICE_OFF(device)
+
+#elif (MAJOR_NR == MATSUSHITA_CDROM3_MAJOR)
+
+#define DEVICE_NAME "Matsushita CD-ROM controller #3"
+#define DEVICE_REQUEST do_sbpcd3_request
+#define DEVICE_NR(device) (MINOR(device))
+#define DEVICE_ON(device)
+#define DEVICE_OFF(device)
+
+#elif (MAJOR_NR == MATSUSHITA_CDROM4_MAJOR)
+
+#define DEVICE_NAME "Matsushita CD-ROM controller #4"
+#define DEVICE_REQUEST do_sbpcd4_request
 #define DEVICE_NR(device) (MINOR(device))
 #define DEVICE_ON(device)
 #define DEVICE_OFF(device)
@@ -244,7 +270,6 @@ static void end_request(int uptodate)
 {
 	struct request * req;
 	struct buffer_head * bh;
-	struct task_struct * p;
 
 	req = CURRENT;
 	req->errors = 0;
@@ -261,7 +286,8 @@ static void end_request(int uptodate)
 	if ((bh = req->bh) != NULL) {
 		req->bh = bh->b_reqnext;
 		bh->b_reqnext = NULL;
-		bh->b_uptodate = uptodate;
+		bh->b_uptodate = uptodate;		
+		if (!uptodate) bh->b_req = 0; /* So no "Weird" errors */
 		unlock_buffer(bh);
 		if ((bh = req->bh) != NULL) {
 			req->current_nr_sectors = bh->b_size >> 9;
@@ -275,12 +301,8 @@ static void end_request(int uptodate)
 	}
 	DEVICE_OFF(req->dev);
 	CURRENT = req->next;
-	if ((p = req->waiting) != NULL) {
-		req->waiting = NULL;
-		p->state = TASK_RUNNING;
-		if (p->counter > current->counter)
-			need_resched = 1;
-	}
+	if (req->sem != NULL)
+		up(req->sem);
 	req->dev = -1;
 	wake_up(&wait_for_request);
 }

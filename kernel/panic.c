@@ -5,7 +5,7 @@
  */
 
 /*
- * This function is used through-out the kernel (includeinh mm and fs)
+ * This function is used through-out the kernel (including mm and fs)
  * to indicate a major problem.
  */
 #include <stdarg.h>
@@ -14,8 +14,6 @@
 #include <linux/sched.h>
 
 asmlinkage void sys_sync(void);	/* it's really int */
-
-extern int vsprintf(char * buf, const char * fmt, va_list args);
 
 NORET_TYPE void panic(const char * fmt, ...)
 {

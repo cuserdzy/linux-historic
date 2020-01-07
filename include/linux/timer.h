@@ -27,11 +27,9 @@
  *
  * COPRO_TIMER		387 timeout for buggy hardware..
  *
- * TAPE_QIC02_TIMER	timer for QIC-02 tape driver (it's not hardcoded)
+ * QIC02_TAPE_TIMER	timer for QIC-02 tape driver (it's not hardcoded)
  *
  * MCD_TIMER		Mitsumi CD-ROM Timer
- *
- * SBPCD_TIMER		SoundBlaster/Matsushita/Panasonic CD-ROM timer
  */
 
 #define BLANK_TIMER	0
@@ -45,12 +43,10 @@
 #define SOUND_TIMER	20
 #define COPRO_TIMER	21
 
-#define TAPE_QIC02_TIMER	22	/* hhb */
+#define QIC02_TAPE_TIMER	22	/* hhb */
 #define MCD_TIMER	23
 
 #define HD_TIMER2	24
-
-#define SBPCD_TIMER	25
 
 struct timer_struct {
 	unsigned long expires;
@@ -83,5 +79,11 @@ struct timer_list {
 
 extern void add_timer(struct timer_list * timer);
 extern int  del_timer(struct timer_list * timer);
+
+extern inline void init_timer(struct timer_list * timer)
+{
+	timer->next = NULL;
+	timer->prev = NULL;
+}
 
 #endif

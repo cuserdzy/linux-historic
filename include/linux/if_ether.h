@@ -3,7 +3,7 @@
  *		operating system.  INET is implemented using the  BSD Socket
  *		interface as the means of communication with the user level.
  *
- *		Global definitions for the Ethernet IEE 802.3 interface.
+ *		Global definitions for the Ethernet IEEE 802.3 interface.
  *
  * Version:	@(#)if_ether.h	1.0.1a	02/08/94
  *
@@ -40,6 +40,8 @@
 #define ETH_P_802_3	0x0001		/* Dummy type for 802.3 frames  */
 #define ETH_P_AX25	0x0002		/* Dummy protocol id for AX.25  */
 #define ETH_P_ALL	0x0003		/* Every packet (be careful!!!) */
+#define ETH_P_802_2	0x0004		/* 802.2 frames 		*/
+#define ETH_P_SNAP	0x0005		/* 802.2 SNAP frames  		*/
 
 /* This is an Ethernet frame header. */
 struct ethhdr {

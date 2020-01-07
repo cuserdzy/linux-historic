@@ -310,10 +310,10 @@ void ext2_free_blocks (struct super_block * sb, unsigned long block,
 		}
 	}
 	
-	bh2->b_dirt = 1;
-	sb->u.ext2_sb.s_sbh->b_dirt = 1;
+	mark_buffer_dirty(bh2, 1);
+	mark_buffer_dirty(sb->u.ext2_sb.s_sbh, 1);
 
-	bh->b_dirt = 1;
+	mark_buffer_dirty(bh, 1);
 	if (sb->s_flags & MS_SYNC) {
 		ll_rw_block (WRITE, 1, &bh);
 		wait_on_buffer (bh);
@@ -352,7 +352,7 @@ int ext2_new_block (struct super_block * sb, unsigned long goal,
 	}
 	lock_super (sb);
 	es = sb->u.ext2_sb.s_es;
-	if (es->s_free_blocks_count <= es->s_r_blocks_count && !suser()) {
+	if (es->s_free_blocks_count <= es->s_r_blocks_count && !fsuser()) {
 		unlock_super (sb);
 		return 0;
 	}
@@ -418,7 +418,7 @@ repeat:
 		 * the bitmap and then for any free bit.
 		 * 
 		 * Search first in the remainder of the current group; then,
-		 * cyclicly search throught the rest of the groups.
+		 * cyclicly search through the rest of the groups.
 		 */
 		p = ((char *) bh->b_data) + (j >> 3);
 		r = find_first_zero_byte (p, 
@@ -524,7 +524,7 @@ got_block:
 
 	j = tmp;
 
-	bh->b_dirt = 1;
+	mark_buffer_dirty(bh, 1);
 	if (sb->s_flags & MS_SYNC) {
 		ll_rw_block (WRITE, 1, &bh);
 		wait_on_buffer (bh);
@@ -544,16 +544,16 @@ got_block:
 	}
 	clear_block (bh->b_data, sb->s_blocksize);
 	bh->b_uptodate = 1;
-	bh->b_dirt = 1;
+	mark_buffer_dirty(bh, 1);
 	brelse (bh);
 
 	ext2_debug ("allocating block %d. "
 		    "Goal hits %d of %d.\n", j, goal_hits, goal_attempts);
 
 	gdp->bg_free_blocks_count--;
-	bh2->b_dirt = 1;
+	mark_buffer_dirty(bh2, 1);
 	es->s_free_blocks_count--;
-	sb->u.ext2_sb.s_sbh->b_dirt = 1;
+	mark_buffer_dirty(sb->u.ext2_sb.s_sbh, 1);
 	sb->s_dirt = 1;
 	unlock_super (sb);
 	return j;

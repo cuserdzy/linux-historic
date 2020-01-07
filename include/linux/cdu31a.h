@@ -118,7 +118,7 @@
 
 
 /*
- * The following are command paramters for the set drive parameter command
+ * The following are command parameters for the set drive parameter command
  */
 #define SONY_SD_DECODE_PARAM		0x00
 #define SONY_SD_INTERFACE_PARAM		0x01
@@ -135,6 +135,7 @@
 #define SONY_HWC_GET_LOAD_MECH(c)	(c.hw_config[0] & 0x03)
 #define SONY_HWC_EJECT(c)		(c.hw_config[0] & 0x04)
 #define SONY_HWC_LED_SUPPORT(c)		(c.hw_config[0] & 0x08)
+#define SONY_HWC_DOUBLE_SPEED(c)	(c.hw_config[0] & 0x10)
 #define SONY_HWC_GET_BUF_MEM_SIZE(c)	((c.hw_config[0] & 0xc0) >> 6)
 #define SONY_HWC_AUDIO_PLAYBACK(c)	(c.hw_config[1] & 0x01)
 #define SONY_HWC_ELECTRIC_VOLUME(c)	(c.hw_config[1] & 0x02)
@@ -283,7 +284,7 @@ struct s_sony_toc
 
 
 /*
- * The following are attention code for asyncronous events from the drive.
+ * The following are attention code for asynchronous events from the drive.
  */
 
 /* Standard attention group */

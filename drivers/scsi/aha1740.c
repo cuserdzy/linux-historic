@@ -31,6 +31,7 @@
 #include "../block/blk.h"
 #include "scsi.h"
 #include "hosts.h"
+#include "sd.h"
 
 #include "aha1740.h"
 
@@ -251,7 +252,6 @@ int aha1740_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
         if (bufflen != sizeof(SCpnt->sense_buffer))
 	{
 	    printk("Wrong buffer length supplied for request sense (%d)\n",bufflen);
-	    panic("aha1740.c");
         }
         SCpnt->result = 0;
         done(SCpnt); 
@@ -425,7 +425,7 @@ void aha1740_getconfig(void)
   irq_level = intab [ inb(INTDEF)&0x7 ];
 }
 
-int aha1740_detect(int hostnum)
+int aha1740_detect(Scsi_Host_Template * tpnt)
 {
     memset(&ecb, 0, sizeof(struct ecb));
     DEB(printk("aha1740_detect: \n"));
@@ -457,7 +457,7 @@ int aha1740_detect(int hostnum)
 
     DEB(printk("aha1740_detect: enable interrupt channel %d\n", irq_level));
 
-    if (request_irq(irq_level,aha1740_intr_handle))
+    if (request_irq(irq_level,aha1740_intr_handle, 0, "aha1740"))
     {
         printk("Unable to allocate IRQ for adaptec controller.\n");
         return 0;
@@ -474,10 +474,10 @@ but it hasn't happened yet, and doing aborts brings the Adaptec to its
 knees.  I cannot (at this moment in time) think of any reason to reset the
 card once it's running.  So there. */
 
-int aha1740_abort(Scsi_Cmnd * SCpnt, int i)
+int aha1740_abort(Scsi_Cmnd * SCpnt)
 {
     DEB(printk("aha1740_abort called\n"));
-    return 0;
+    return SCSI_ABORT_SNOOZE;
 }
 
 /* We do not implement a reset function here, but the upper level code assumes
@@ -487,12 +487,12 @@ int aha1740_abort(Scsi_Cmnd * SCpnt, int i)
 int aha1740_reset(Scsi_Cmnd * SCpnt)
 {
     DEB(printk("aha1740_reset called\n"));
-    if (SCpnt) SCpnt->flags |= NEEDS_JUMPSTART;
-    return 0;
+    return SCSI_RESET_PUNT;
 }
 
-int aha1740_biosparam(int size, int dev, int* ip)
+int aha1740_biosparam(Disk * disk, int dev, int* ip)
 {
+  int size = disk->capacity;
 DEB(printk("aha1740_biosparam\n"));
   ip[0] = 64;
   ip[1] = 32;

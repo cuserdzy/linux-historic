@@ -21,16 +21,12 @@ extern int scsi_ioctl (Scsi_Device *dev, int cmd, void *arg);
 static void sr_ioctl_done(Scsi_Cmnd * SCpnt)
 {
   struct request * req;
-  struct task_struct * p;
   
   req = &SCpnt->request;
   req->dev = 0xfffe; /* Busy, but indicate request done */
   
-  if ((p = req->waiting) != NULL) {
-    req->waiting = NULL;
-    p->state = TASK_RUNNING;
-    if (p->counter > current->counter)
-      need_resched = 1;
+  if (req->sem != NULL) {
+    up(req->sem);
   }
 }
 
@@ -43,15 +39,17 @@ static int do_ioctl(int target, unsigned char * sr_cmd, void * buffer, unsigned 
 	Scsi_Cmnd * SCpnt;
 	int result;
 
-	SCpnt = allocate_device(NULL, scsi_CDs[target].device->index, 1);
+	SCpnt = allocate_device(NULL, scsi_CDs[target].device, 1);
 	scsi_do_cmd(SCpnt,
 		    (void *) sr_cmd, buffer, buflength, sr_ioctl_done, 
 		    IOCTL_TIMEOUT, IOCTL_RETRIES);
 
 
 	if (SCpnt->request.dev != 0xfffe){
-	  SCpnt->request.waiting = current;
-	  current->state = TASK_UNINTERRUPTIBLE;
+	  struct semaphore sem = MUTEX_LOCKED;
+	  SCpnt->request.sem = &sem;
+	  down(&sem);
+	  /* Hmm.. Have to ask about this */
 	  while (SCpnt->request.dev != 0xfffe) schedule();
 	};
 
@@ -85,7 +83,7 @@ static int do_ioctl(int target, unsigned char * sr_cmd, void * buffer, unsigned 
 
 	result = SCpnt->result;
 	SCpnt->request.dev = -1; /* Deallocate */
-	wake_up(&scsi_devices[SCpnt->index].device_wait);
+	wake_up(&SCpnt->device->device_wait);
 	/* Wake up a process waiting for device*/
       	return result;
 }
@@ -98,7 +96,9 @@ int sr_ioctl(struct inode * inode, struct file * file, unsigned int cmd, unsigne
 	int result, target, err;
 
 	target = MINOR(dev);
-	if (target >= NR_SR) return -ENXIO;
+
+	if (target >= sr_template.nr_dev ||
+	    !scsi_CDs[target].device) return -ENXIO;
 
 	switch (cmd) 
 		{
@@ -385,6 +385,12 @@ int sr_ioctl(struct inode * inode, struct file * file, unsigned int cmd, unsigne
 		case CDROMREADMODE1:
 			return -EINVAL;
 
+		case BLKRASET:
+			if(!suser())  return -EACCES;
+			if(!inode->i_rdev) return -EINVAL;
+			if(arg > 0xff) return -EINVAL;
+			read_ahead[MAJOR(inode->i_rdev)] = arg;
+			return 0;
 		RO_IOCTLS(dev,arg);
 		default:
 			return scsi_ioctl(scsi_CDs[target].device,cmd,(void *) arg);

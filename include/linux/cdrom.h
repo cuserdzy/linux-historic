@@ -1,7 +1,8 @@
 /****************************************************************************************
  *											*
- * SCSI header library for linux							*
+ * general (not only SCSI) header library for linux CDROM drivers                       *
  * (C) 1992 David Giller rafetmad@oxy.edu						*
+ *     1994 Eberhard Moenkeberg emoenke@gwdg.de ("read audio" and some other stuff)	*
  *											*
  * <linux/cdrom.h> -- CD-ROM IOCTLs and structs		 				*
  *											*
@@ -9,6 +10,23 @@
 
 #ifndef	_LINUX_CDROM_H
 #define	_LINUX_CDROM_H
+
+/*
+ * some fix numbers
+ */
+#define CD_MINS                   74  /* max. minutes per CD             */
+#define CD_SECS                   60  /* seconds per minute              */
+#define CD_FRAMES                 75  /* frames per second               */
+#define CD_CHUNK_SIZE             24  /* lowest-level "data bytes piece" */
+#define CD_NUM_OF_CHUNKS          98  /* chunks per frame                */
+#define CD_FRAMESIZE            2048  /* bytes per frame, cooked mode    */
+#define CD_FRAMESIZE_RAW0       2336  /* bytes per frame, "raw" mode     */
+#define CD_FRAMESIZE_XA         2340  /* bytes per frame, "xa" mode      */
+#define CD_FRAMESIZE_RAW        2352  /* bytes per frame, "raw" mode     */
+#define CD_FRAMESIZE_SUB          96  /* subchannel data size            */
+#define CD_BLOCK_OFFSET          150  /* offset of first logical frame   */
+#define CD_XA_HEAD                12  /* header size of XA frame         */
+#define CD_XA_TAIL               280  /* tail size of XA frame           */
 
 /*
  *
@@ -223,9 +241,8 @@ struct cdrom_tocentry
 /*
  * CD-ROM address types (cdrom_tocentry.cdte_format)
  */
-
-#define	CDROM_LBA	0x01
-#define	CDROM_MSF	0x02
+#define	CDROM_LBA 0x01 /* "logical block": first frame is #0 */
+#define	CDROM_MSF 0x02 /* "minute-second-frame": binary, not bcd here! */
 
 /*
  * bit to tell whether track is data or audio
@@ -295,6 +312,28 @@ struct cdrom_read
 	int	cdread_buflen;
 	};
 
+/*
+ * preliminary extensions for transferring audio frames
+ * currently used by sbpcd.c
+ * (still may change if other drivers will use it, too):
+ */
+struct cdrom_read_audio
+	{
+	  union
+	    {
+	      struct 			
+		{
+		  u_char minute;
+		  u_char second;
+		  u_char frame;
+		} msf;
+	      int	lba;
+	    } addr; /* frame address */
+	  u_char addr_format; /* CDROM_LBA or CDROM_MSF */
+	  int nframes; /* number of 2352-byte-frames to read at once, limited by the drivers */
+	  u_char *buf; /* frame buffer (size: nframes*2352 bytes) */
+	};
+
 #ifdef FIVETWELVE
 #define	CDROM_MODE1_SIZE	512
 #else
@@ -309,7 +348,7 @@ struct cdrom_read
 #define	CDROMPAUSE		0x5301		/* pause			*/
 #define	CDROMRESUME		0x5302		/* resume			*/
 
-#define	CDROMPLAYMSF		0x5303		/* (stuct cdrom_msf)		*/
+#define	CDROMPLAYMSF		0x5303		/* (struct cdrom_msf)		*/
                                                 /* SCMD_PLAY_AUDIO_MSF		*/
 
 #define	CDROMPLAYTRKIND		0x5304		/* (struct cdrom_ti)		*/
@@ -326,15 +365,22 @@ struct cdrom_read
 #define	CDROMEJECT		0x5309		/* eject CD-ROM media		*/
 
 #define	CDROMVOLCTRL		0x530a		/* (struct cdrom_volctrl)	*/
-                                                /* vlume control		*/
+                                                /* volume control		*/
 
 #define	CDROMSUBCHNL		0x530b		/* (struct cdrom_subchnl)	*/
-                                                /* read sub-channel data 	*/
+                                                /* read Q sub-channel data 	*/
 
 #define	CDROMREADMODE2		0x530c		/* (struct cdrom_read)		*/
                                                 /* read type-2 data (not suppt)	*/
 
 #define	CDROMREADMODE1		0x530d		/* (struct cdrom_read)		*/
                                                 /* read type-1 data 		*/
+/*
+ * preliminary extension for transferring audio frames
+ * currently used by sbpcd.c
+ * (still may change if other drivers will use it, too):
+ */
+#define	CDROMREADAUDIO		0x530e		/* (struct cdrom_read_audio)	*/
 
 #endif  _LINUX_CDROM_H
+

@@ -40,11 +40,6 @@
 #undef EXT2FS_PRE_02B_COMPAT
 
 /*
- * Define DONT_USE_DCACHE to inhibit the directory cache
- */
-#define DONT_USE_DCACHE
-
-/*
  * Define EXT2_PREALLOCATE to preallocate data blocks for expanding files
  */
 #define EXT2_PREALLOCATE
@@ -238,7 +233,7 @@ struct ext2_inode {
 /*
  * File system states
  */
-#define	EXT2_VALID_FS			0x0001	/* Unmounted cleany */
+#define	EXT2_VALID_FS			0x0001	/* Unmounted cleanly */
 #define	EXT2_ERROR_FS			0x0002	/* Errors detected */
 
 /*
@@ -355,17 +350,6 @@ extern void ext2_check_blocks_bitmap (struct super_block *);
 /* bitmap.c */
 extern unsigned long ext2_count_free (struct buffer_head *, unsigned);
 
-#ifndef DONT_USE_DCACHE
-/* dcache.c */
-extern void ext2_dcache_invalidate (unsigned short);
-extern unsigned long ext2_dcache_lookup (unsigned short, unsigned long,
-					 const char *, int);
-extern void ext2_dcache_add (unsigned short, unsigned long, const char *,
-			     int, unsigned long);
-extern void ext2_dcache_remove (unsigned short, unsigned long, const char *,
-				int);
-#endif
-
 /* dir.c */
 extern int ext2_check_dir_entry (char *, struct inode *,
 				 struct ext2_dir_entry *, struct buffer_head *,
@@ -390,6 +374,7 @@ extern int ext2_bmap (struct inode *, int);
 extern struct buffer_head * ext2_getblk (struct inode *, long, int, int *);
 extern struct buffer_head * ext2_bread (struct inode *, int, int, int *);
 
+extern int ext2_getcluster (struct inode * inode, long block);
 extern void ext2_read_inode (struct inode *);
 extern void ext2_write_inode (struct inode *);
 extern void ext2_put_inode (struct inode *);

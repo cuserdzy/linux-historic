@@ -21,14 +21,14 @@ SUBOBJS     := $(foreach f,$(SUBDIRS),$f/$f.o)
 .c.s:
 	$(CC) $(CFLAGS) -S $<
 
-OBJS	=  Space.o ddi.o socket.o
+OBJS	=  socket.o protocols.o
 
-all:		subdirs net.o
+all:		net.o
 
 net.o:		$(OBJS) network.a
 		$(LD) -r -o net.o $(OBJS) network.a
 
-network.a:	$(SUBOBJS)
+network.a:	subdirs
 		rm -f $@
 		ar rc $@ $(SUBOBJS)
 		ranlib $@

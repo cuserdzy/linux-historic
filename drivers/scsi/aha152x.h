@@ -2,7 +2,7 @@
 #define _AHA152X_H
 
 /*
- * $Id: aha152x.h,v 1.0 1994/03/25 12:52:00 root Exp $
+ * $Id: aha152x.h,v 1.2 1994/07/03 13:01:47 root Exp $
  */
 
 #include "../block/blk.h"
@@ -10,23 +10,25 @@
 #if defined(__KERNEL__)
 #include <asm/io.h>
 
-int        aha152x_detect(int);
+int        aha152x_detect(Scsi_Host_Template *);
 const char *aha152x_info(void);
 int        aha152x_command(Scsi_Cmnd *);
 int        aha152x_queue(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
-int        aha152x_abort(Scsi_Cmnd *, int);
+int        aha152x_abort(Scsi_Cmnd *);
 int        aha152x_reset(Scsi_Cmnd *);
-int        aha152x_biosparam(int, int, int*);
+int        aha152x_biosparam(Disk *, int, int*);
 
 /* number of queueable commands
    (unless we support more than 1 cmd_per_lun this should do) */
 #define AHA152X_MAXQUEUE	7		
 
-#define AHA152X_REVID	"Adaptec 152x SCSI driver; $Revision: 1.0 $"
+#define AHA152X_REVID "Adaptec 152x SCSI driver; $Revision: 1.2 $"
 
 /* Initial value of Scsi_Host entry */
-#define AHA152X       { /* name */		AHA152X_REVID, \
+#define AHA152X       { /* next */		NULL,			    \
+			/* name */		AHA152X_REVID, 		    \
 			/* detect */		aha152x_detect,             \
+			/* release */		NULL,			    \
 			/* info */		aha152x_info,               \
 			/* command */		aha152x_command,            \
 			/* queuecommand */	aha152x_queue,              \
@@ -39,7 +41,8 @@ int        aha152x_biosparam(int, int, int*);
                         /* sg_tablesize */	SG_ALL,                     \
                         /* cmd_per_lun */	1,                          \
                         /* present */		0,                          \
-                        /* unchecked_isa_dma */	0 }
+                        /* unchecked_isa_dma */	0,			    \
+			/* use_clustering */	DISABLE_CLUSTERING }
 #endif
 
 

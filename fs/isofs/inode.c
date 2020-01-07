@@ -1,12 +1,11 @@
 /*
  *  linux/fs/isofs/inode.c
  * 
- *  (C) 1992  Eric Youngdale Modified for ISO9660 filesystem.
+ *  (C) 1992, 1993, 1994  Eric Youngdale Modified for ISO9660 filesystem.
  *
  *  (C) 1991  Linus Torvalds - minix filesystem
  */
 
-#include <linux/config.h>
 #include <linux/stat.h>
 #include <linux/sched.h>
 #include <linux/iso_fs.h>
@@ -20,19 +19,6 @@
 
 #include <asm/system.h>
 #include <asm/segment.h>
-
-#if defined(CONFIG_BLK_DEV_SR)
-extern int check_cdrom_media_change(int, int);
-#endif
-#if defined(CONFIG_CDU31A)
-extern int check_cdu31a_media_change(int, int);
-#endif
-#if defined(CONFIG_MCD)
-extern int check_mcd_media_change(int, int);
-#endif
-#if defined (CONFIG_SBPCD)
-extern int check_sbpcd_media_change(int, int);
-#endif CONFIG_SBPCD
 
 #ifdef LEAK_CHECK
 static int check_malloc = 0;
@@ -63,46 +49,59 @@ static struct super_operations isofs_sops = {
 	NULL
 };
 
+struct iso9660_options{
+  char map;
+  char rock;
+  char cruft;
+  unsigned char conversion;
+  unsigned int blocksize;
+  gid_t gid;
+  uid_t uid;
+};
 
-
-static int parse_options(char *options,char *map,char *conversion, char * rock, char * cruft, unsigned int * blocksize)
+static int parse_options(char *options, struct iso9660_options * popt)
 {
 	char *this_char,*value;
 
-	*map = 'n';
-	*rock = 'y';
-	*cruft = 'n';
-	*conversion = 'a';
-	*blocksize = 1024;
+	popt->map = 'n';
+	popt->rock = 'y';
+	popt->cruft = 'n';
+	popt->conversion = 'a';
+	popt->blocksize = 1024;
+	popt->gid = 0;
+	popt->uid = 0;
 	if (!options) return 1;
 	for (this_char = strtok(options,","); this_char; this_char = strtok(NULL,",")) {
 	        if (strncmp(this_char,"norock",6) == 0) {
-		  *rock = 'n';
+		  popt->rock = 'n';
 		  continue;
 		};
 	        if (strncmp(this_char,"cruft",5) == 0) {
-		  *cruft = 'y';
+		  popt->cruft = 'y';
 		  continue;
 		};
 		if ((value = strchr(this_char,'=')) != NULL)
 			*value++ = 0;
 		if (!strcmp(this_char,"map") && value) {
 			if (value[0] && !value[1] && strchr("on",*value))
-				*map = *value;
-			else if (!strcmp(value,"off")) *map = 'o';
-			else if (!strcmp(value,"normal")) *map = 'n';
+				popt->map = *value;
+			else if (!strcmp(value,"off")) popt->map = 'o';
+			else if (!strcmp(value,"normal")) popt->map = 'n';
 			else return 0;
 		}
 		else if (!strcmp(this_char,"conv") && value) {
 			if (value[0] && !value[1] && strchr("bta",*value))
-				*conversion = *value;
-			else if (!strcmp(value,"binary")) *conversion = 'b';
-			else if (!strcmp(value,"text")) *conversion = 't';
-			else if (!strcmp(value,"mtext")) *conversion = 'm';
-			else if (!strcmp(value,"auto")) *conversion = 'a';
+				popt->conversion = *value;
+			else if (!strcmp(value,"binary")) popt->conversion = 'b';
+			else if (!strcmp(value,"text")) popt->conversion = 't';
+			else if (!strcmp(value,"mtext")) popt->conversion = 'm';
+			else if (!strcmp(value,"auto")) popt->conversion = 'a';
 			else return 0;
 		}
-		else if (!strcmp(this_char,"block") && value) {
+		else if (value && 
+			 (!strcmp(this_char,"block") ||
+			  !strcmp(this_char,"uid") ||
+			  !strcmp(this_char,"gid"))) {
 		  char * vpnt = value;
 		  unsigned int ivalue;
 		  ivalue = 0;
@@ -112,8 +111,18 @@ static int parse_options(char *options,char *map,char *conversion, char * rock, 
 		    vpnt++;
 		  };
 		  if (*vpnt) return 0;
-		  if (ivalue != 1024 && ivalue != 2048) return 0;
-		  *blocksize = ivalue;
+		  switch(*this_char) {
+		  case 'b':
+		    if (ivalue != 1024 && ivalue != 2048) return 0;
+		    popt->blocksize = ivalue;
+		    break;
+		  case 'g':
+		    popt->uid = ivalue;
+		    break;
+		  case 'u':
+		    popt->gid = ivalue;
+		    break;
+		  }
 		}
 		else return 0;
 	}
@@ -125,7 +134,7 @@ struct super_block *isofs_read_super(struct super_block *s,void *data,
 {
 	struct buffer_head *bh;
 	int iso_blknum;
-	unsigned int blocksize, blocksize_bits;
+	unsigned int blocksize_bits;
 	int high_sierra;
 	int dev=s->s_dev;
 	struct iso_volume_descriptor *vdp;
@@ -136,29 +145,39 @@ struct super_block *isofs_read_super(struct super_block *s,void *data,
 
 	struct iso_directory_record *rootp;
 
-	char map, conversion, rock, cruft;
+	struct iso9660_options opt;
 
-	if (!parse_options((char *) data,&map,&conversion, &rock, &cruft, &blocksize)) {
+	if (!parse_options((char *) data,&opt)) {
 		s->s_dev = 0;
 		return NULL;
 	}
 
+#if 0
+	printk("map = %c\n", opt.map);
+	printk("rock = %c\n", opt.rock);
+	printk("cruft = %c\n", opt.cruft);
+	printk("conversion = %c\n", opt.conversion);
+	printk("blocksize = %d\n", opt.blocksize);
+	printk("gid = %d\n", opt.gid);
+	printk("uid = %d\n", opt.uid);
+#endif
+	
 	blocksize_bits = 0;
 	{
-	  int i = blocksize;
+	  int i = opt.blocksize;
 	  while (i != 1){
 	    blocksize_bits++;
 	    i >>=1;
 	  };
 	};
-	set_blocksize(dev, blocksize);
+	set_blocksize(dev, opt.blocksize);
 
 	lock_super(s);
 
 	s->u.isofs_sb.s_high_sierra = high_sierra = 0; /* default is iso9660 */
 
 	for (iso_blknum = 16; iso_blknum < 100; iso_blknum++) {
-		if (!(bh = bread(dev, iso_blknum << (ISOFS_BLOCK_BITS-blocksize_bits), blocksize))) {
+		if (!(bh = bread(dev, iso_blknum << (ISOFS_BLOCK_BITS-blocksize_bits), opt.blocksize))) {
 			s->s_dev=0;
 			printk("isofs_read_super: bread failed, dev 0x%x iso_blknum %d\n",
 			       dev, iso_blknum);
@@ -178,7 +197,7 @@ struct super_block *isofs_read_super(struct super_block *s,void *data,
 		
 		        s->u.isofs_sb.s_high_sierra = 1;
 			high_sierra = 1;
-		        rock = 'n';
+		        opt.rock = 'n';
 		        h_pri = (struct hs_primary_descriptor *)vdp;
 			break;
 		};
@@ -235,7 +254,7 @@ struct super_block *isofs_read_super(struct super_block *s,void *data,
 	   to allow suid.  (suid or devices will not show up unless we have
 	   Rock Ridge extensions) */
 	
-	s->s_flags = MS_RDONLY /* | MS_NODEV | MS_NOSUID */;
+	s->s_flags |= MS_RDONLY /* | MS_NODEV | MS_NOSUID */;
 	
 	if(s->u.isofs_sb.s_log_zone_size != (1 << ISOFS_BLOCK_BITS)) {
 		printk("1 <<Block bits != Block size\n");
@@ -256,11 +275,13 @@ struct super_block *isofs_read_super(struct super_block *s,void *data,
 	
 	s->s_dev = dev;
 	s->s_op = &isofs_sops;
-	s->u.isofs_sb.s_mapping = map;
-	s->u.isofs_sb.s_rock = (rock == 'y' ? 1 : 0);
-	s->u.isofs_sb.s_conversion = conversion;
-	s->u.isofs_sb.s_cruft = cruft;
-	s->s_blocksize = blocksize;
+	s->u.isofs_sb.s_mapping = opt.map;
+	s->u.isofs_sb.s_rock = (opt.rock == 'y' ? 1 : 0);
+	s->u.isofs_sb.s_conversion = opt.conversion;
+	s->u.isofs_sb.s_cruft = opt.cruft;
+	s->u.isofs_sb.s_uid = opt.uid;
+	s->u.isofs_sb.s_gid = opt.gid;
+	s->s_blocksize = opt.blocksize;
 	s->s_blocksize_bits = blocksize_bits;
 	s->s_mounted = iget(s, isonum_733 (rootp->extent) << ISOFS_BLOCK_BITS);
 	unlock_super(s);
@@ -270,35 +291,8 @@ struct super_block *isofs_read_super(struct super_block *s,void *data,
 		printk("get root inode failed\n");
 		return NULL;
 	}
-#if defined(CONFIG_BLK_DEV_SR) && defined(CONFIG_SCSI)
-	if (MAJOR(s->s_dev) == SCSI_CDROM_MAJOR) {
-		/* Check this one more time. */
-		if(check_cdrom_media_change(s->s_dev, 0))
-		  goto out;
-	}
-#endif
-#if defined(CONFIG_CDU31A)
-	if (MAJOR(s->s_dev) == CDU31A_CDROM_MAJOR) {
-		/* Check this one more time. */
-		if(check_cdu31a_media_change(s->s_dev, 0))
-		  goto out;
-	}
-#endif
-#if defined(CONFIG_MCD)
-	if (MAJOR(s->s_dev) == MITSUMI_CDROM_MAJOR) {
-		/* Check this one more time. */
-		if(check_mcd_media_change(s->s_dev, 0))
-		  goto out;
-	}
-#endif
-#if defined(CONFIG_SBPCD)
-	if (MAJOR(s->s_dev) == MATSUSHITA_CDROM_MAJOR) {
-		if (check_sbpcd_media_change(s->s_dev,0))
-		  goto out;
-	};
-#endif CONFIG_SBPCD
 
-	return s;
+	if(!check_disk_change(s->s_dev)) return s;
  out: /* Kick out for various error conditions */
 	brelse(bh);
 	s->s_dev = 0;
@@ -352,22 +346,26 @@ void isofs_read_inode(struct inode * inode)
 	high_sierra = inode->i_sb->u.isofs_sb.s_high_sierra;
 
 	if ((inode->i_ino & (bufsize - 1)) + *pnt > bufsize){
-		cpnt = kmalloc(1 << ISOFS_BLOCK_BITS, GFP_KERNEL);
+	        int frag1, offset;
+
+		offset = (inode->i_ino & (bufsize - 1));
+		frag1 = bufsize - offset;
+	        cpnt = kmalloc(*pnt,GFP_KERNEL);
 		if (cpnt == NULL) {
-			printk(KERN_INFO "NoMem ISO inode %d\n",inode->i_ino);
+			printk(KERN_INFO "NoMem ISO inode %lu\n",inode->i_ino);
 			brelse(bh);
 			goto fail;
 		}
-		memcpy(cpnt, bh->b_data, bufsize);
+		memcpy(cpnt, bh->b_data + offset, frag1);
 		brelse(bh);
 		if (!(bh = bread(inode->i_dev,++block, bufsize))) {
-			kfree_s(cpnt, 1 << ISOFS_BLOCK_BITS);
+			kfree(cpnt);
 			printk("unable to read i-node block");
 			goto fail;
 		}
-		memcpy((char *)cpnt + bufsize, bh->b_data, bufsize);
-		pnt = ((unsigned char *) cpnt
-		       + (inode->i_ino & (bufsize - 1)));
+		offset += *pnt - bufsize;
+		memcpy((char *)cpnt+frag1, bh->b_data, offset);
+		pnt = ((unsigned char *) cpnt);
 		raw_inode = ((struct iso_directory_record *) pnt);
 	}
 
@@ -376,8 +374,11 @@ void isofs_read_inode(struct inode * inode)
 	
 	if (raw_inode->flags[-high_sierra] & 2) {
 		inode->i_mode = S_IRUGO | S_IXUGO | S_IFDIR;
-		inode->i_nlink = 2; /* There are always at least 2.  It is
-				       hard to figure out what is correct*/
+		inode->i_nlink = 1; /* Set to 1.  We know there are 2, but
+				       the find utility tries to optimize
+				       if it is 2, and it screws up.  It is
+				       easier to give 1 which tells find to
+				       do it the hard way. */
 	} else {
 		inode->i_mode = S_IRUGO; /* Everybody gets to read the file. */
 		inode->i_nlink = 1;
@@ -389,8 +390,8 @@ void isofs_read_inode(struct inode * inode)
 		if(i == raw_inode->name_len[0] || raw_inode->name[i] == ';') 
 			inode->i_mode |= S_IXUGO; /* execute permission */
 	}
-	inode->i_uid = 0;
-	inode->i_gid = 0;
+	inode->i_uid = inode->i_sb->u.isofs_sb.s_uid;
+	inode->i_gid = inode->i_sb->u.isofs_sb.s_gid;
 	inode->i_size = isonum_733 (raw_inode->size);
 
 	/* There are defective discs out there - we do this to protect
@@ -416,15 +417,6 @@ void isofs_read_inode(struct inode * inode)
 		inode->i_size = 0;
 	}
 
-#ifdef DEBUG
-	/* I have no idea what extended attributes are used for, so
-	   we will flag it for now */
-	if(raw_inode->ext_attr_length[0] != 0){
-		printk("Extended attributes present for ISO file (%ld).\n",
-		       inode->i_ino);
-	}
-#endif
-	
 	/* I have no idea what file_unit_size is used for, so
 	   we will flag it for now */
 	if(raw_inode->file_unit_size[0] != 0){
@@ -446,7 +438,9 @@ void isofs_read_inode(struct inode * inode)
 	inode->i_mtime = inode->i_atime = inode->i_ctime = 
 	  iso_date(raw_inode->date, high_sierra);
 
-	inode->u.isofs_i.i_first_extent = isonum_733 (raw_inode->extent) << 
+	inode->u.isofs_i.i_first_extent = 
+	  (isonum_733 (raw_inode->extent) + 
+	   isonum_711 (raw_inode->ext_attr_length)) << 
 		(ISOFS_BLOCK_BITS - ISOFS_BUFFER_BITS(inode));
 	
 	inode->u.isofs_i.i_backlink = 0xffffffff; /* Will be used for previous directory */
@@ -477,6 +471,15 @@ void isofs_read_inode(struct inode * inode)
 	brelse(bh);
 	
 	inode->i_op = NULL;
+
+	/* A volume number of 0 is nonsense.  Disable checking if we see
+	   this */
+	if (inode->i_sb->u.isofs_sb.s_cruft == 'n' && 
+	    isonum_723 (raw_inode->volume_sequence_number) == 0) {
+	  printk("Warning: defective cdrom.  Enabling \"cruft\" mount option.\n");
+	  inode->i_sb->u.isofs_sb.s_cruft = 'y';
+	}
+
 	if (inode->i_sb->u.isofs_sb.s_cruft != 'y' && 
 	    isonum_723 (raw_inode->volume_sequence_number) != 1) {
 		printk("Multi volume CD somehow got mounted.\n");
@@ -495,7 +498,7 @@ void isofs_read_inode(struct inode * inode)
 	    init_fifo(inode);
 	}
 	if (cpnt) {
-		kfree_s (cpnt, 1 << ISOFS_BLOCK_BITS);
+		kfree (cpnt);
 		cpnt = NULL;
 	}
 	return;
@@ -507,7 +510,7 @@ void isofs_read_inode(struct inode * inode)
 	inode->i_size = 0;
 	inode->i_nlink = 1;
 	inode->i_uid = inode->i_gid = 0;
-	inode->i_mode = S_IFREG;  /*Regular file, noone gets to read*/
+	inode->i_mode = S_IFREG;  /*Regular file, no one gets to read*/
 	inode->i_op = NULL;
 	return;
 }
@@ -516,7 +519,7 @@ void isofs_read_inode(struct inode * inode)
    a particular directory.  When control passes through a routine that
    has access to the parent information, it fills it into the inode structure,
    but sometimes the inode gets flushed out of the queue, and someone
-   remmembers the number.  When they try to open up again, we have lost
+   remembers the number.  When they try to open up again, we have lost
    the information.  The '..' entry on the disc points to the data area
    for a particular inode, so we can follow these links back up, but since
    we do not know the inode number, we do not actually know how large the
@@ -540,6 +543,7 @@ int isofs_lookup_grandparent(struct inode * parent, int extent)
 	int old_offset;
 	void * cpnt = NULL;
 	int result;
+	int directory_size;
 	struct buffer_head * bh;
 	struct iso_directory_record * de;
 	
@@ -568,6 +572,7 @@ int isofs_lookup_grandparent(struct inode * parent, int extent)
 		if (de->name_len[0] == 1 && de->name[0] == 1) 
 		{
 			parent_dir = find_rock_ridge_relocation(de, parent);
+			directory_size = isonum_733 (de->size);
 			brelse(bh);
 			break;
 		}
@@ -575,9 +580,7 @@ int isofs_lookup_grandparent(struct inode * parent, int extent)
 #ifdef DEBUG
 	printk("Parent dir:%x\n",parent_dir);
 #endif
-	/* Now we know the extent where the parent dir starts on.  We have no
-	   idea how long it is, so we just start reading until we either find
-	   it or we find some kind of unreasonable circumstance. */
+	/* Now we know the extent where the parent dir starts on. */
 	
 	result = -1;
 
@@ -600,7 +603,10 @@ int isofs_lookup_grandparent(struct inode * parent, int extent)
 			brelse(bh);
 			offset = 0;
 			block++;
-			if(block & 1) return -1;
+			directory_size -= bufsize;
+			if(directory_size < 0) return -1;
+			if((block & 1) && (ISOFS_BLOCK_BITS - bufbits))
+			  return -1;
 			if (!block
 			    || !(bh = bread(parent->i_dev,block, bufsize)))
 				return -1;
@@ -616,19 +622,21 @@ int isofs_lookup_grandparent(struct inode * parent, int extent)
 
 		if (offset >= bufsize)
 		{
-			if((block & 1) != 0) return -1;
-			cpnt = kmalloc(1<<ISOFS_BLOCK_BITS,GFP_KERNEL);
-			memcpy(cpnt, bh->b_data, bufsize);
-			de = (struct iso_directory_record *)
-				((char *)cpnt + old_offset);
+ 		        unsigned int frag1;
+ 			frag1 = bufsize - old_offset;
+ 			cpnt = kmalloc(*((unsigned char *) de),GFP_KERNEL);
+ 			memcpy(cpnt, bh->b_data + old_offset, frag1);
+ 			de = (struct iso_directory_record *) ((char *)cpnt);
 			brelse(bh);
 			offset -= bufsize;
+ 			directory_size -= bufsize;
+			if(directory_size < 0) return -1;
 			block++;
-			if (!(bh = bread(parent->i_dev,block,bufsize))) {
-			        kfree_s(cpnt, 1 << ISOFS_BLOCK_BITS);
+			if(!(bh = bread(parent->i_dev,block,bufsize))) {
+ 			        kfree(cpnt);
 				return -1;
 			};
-			memcpy((char *)cpnt+bufsize, bh->b_data, bufsize);
+ 			memcpy((char *)cpnt+frag1, bh->b_data, offset);
 		}
 		
 		if (find_rock_ridge_relocation(de, parent) == extent){
@@ -637,7 +645,7 @@ int isofs_lookup_grandparent(struct inode * parent, int extent)
 		}
 		
 		if (cpnt) {
-			kfree_s(cpnt, 1 << ISOFS_BLOCK_BITS);
+			kfree(cpnt);
 			cpnt = NULL;
 		}
 	}
@@ -647,7 +655,7 @@ int isofs_lookup_grandparent(struct inode * parent, int extent)
 
  out:
 	if (cpnt) {
-	        kfree_s(cpnt, 1 << ISOFS_BLOCK_BITS);
+	        kfree(cpnt);
 		cpnt = NULL;
 	}
 	brelse(bh);

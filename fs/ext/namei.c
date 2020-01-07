@@ -55,7 +55,7 @@
  */
 static int ext_match(int len,const char * name,struct ext_dir_entry * de)
 {
-	register int same __asm__("ax");
+	register int same;
 
 	if (!de || !de->inode || len > EXT_NAME_LEN)
 		return 0;
@@ -64,7 +64,8 @@ static int ext_match(int len,const char * name,struct ext_dir_entry * de)
 		return 1;
 	if (len < EXT_NAME_LEN && len != de->name_len)
 		return 0;
-	__asm__("cld\n\t"
+	__asm__ __volatile__(
+		"cld\n\t"
 		"repe ; cmpsb\n\t"
 		"setz %%al"
 		:"=a" (same)
@@ -249,7 +250,7 @@ printk ("ext_add_entry: skipping to next block\n");
 #if 0
 					dir->i_ctime = CURRENT_TIME;
 #endif
-					bh->b_dirt = 1;
+					mark_buffer_dirty(bh, 1);
 				}
 				brelse (bh);
 				bh = NULL;
@@ -296,7 +297,7 @@ printk ("ext_add_entry : creating next block\n");
 			de->name_len = namelen;
 			for (i=0; i < namelen ; i++)
 				de->name[i] = name[i];
-			bh->b_dirt = 1;
+			mark_buffer_dirty(bh, 1);
 			*res_dir = de;
 			return bh;
 		}
@@ -334,7 +335,7 @@ int ext_create(struct inode * dir,const char * name, int len, int mode,
 		return -ENOSPC;
 	}
 	de->inode = inode->i_ino;
-	bh->b_dirt = 1;
+	mark_buffer_dirty(bh, 1);
 	brelse(bh);
 	iput(dir);
 	*result = inode;
@@ -360,7 +361,7 @@ int ext_mknod(struct inode * dir, const char * name, int len, int mode, int rdev
 		iput(dir);
 		return -ENOSPC;
 	}
-	inode->i_uid = current->euid;
+	inode->i_uid = current->fsuid;
 	inode->i_mode = mode;
 	inode->i_op = NULL;
 	if (S_ISREG(inode->i_mode))
@@ -393,7 +394,7 @@ int ext_mknod(struct inode * dir, const char * name, int len, int mode, int rdev
 		return -ENOSPC;
 	}
 	de->inode = inode->i_ino;
-	bh->b_dirt = 1;
+	mark_buffer_dirty(bh, 1);
 	brelse(bh);
 	iput(dir);
 	iput(inode);
@@ -445,9 +446,9 @@ int ext_mkdir(struct inode * dir, const char * name, int len, int mode)
 	de->name_len=2;
 	strcpy(de->name,"..");
 	inode->i_nlink = 2;
-	dir_block->b_dirt = 1;
+	mark_buffer_dirty(dir_block, 1);
 	brelse(dir_block);
-	inode->i_mode = S_IFDIR | (mode & 0777 & ~current->umask);
+	inode->i_mode = S_IFDIR | (mode & 0777 & ~current->fs->umask);
 	if (dir->i_mode & S_ISGID)
 		inode->i_mode |= S_ISGID;
 	inode->i_dirt = 1;
@@ -459,7 +460,7 @@ int ext_mkdir(struct inode * dir, const char * name, int len, int mode)
 		return -ENOSPC;
 	}
 	de->inode = inode->i_ino;
-	bh->b_dirt = 1;
+	mark_buffer_dirty(bh, 1);
 	dir->i_nlink++;
 	dir->i_dirt = 1;
 	iput(dir);
@@ -543,8 +544,9 @@ int ext_rmdir(struct inode * dir, const char * name, int len)
 	retval = -EPERM;
 	if (!(inode = iget(dir->i_sb, de->inode)))
 		goto end_rmdir;
-	if ((dir->i_mode & S_ISVTX) && current->euid &&
-	   inode->i_uid != current->euid)
+        if ((dir->i_mode & S_ISVTX) && !fsuser() &&
+            current->fsuid != inode->i_uid &&
+            current->fsuid != dir->i_uid)
 		goto end_rmdir;
 	if (inode->i_dev != dir->i_dev)
 		goto end_rmdir;
@@ -567,7 +569,7 @@ int ext_rmdir(struct inode * dir, const char * name, int len)
 	de->inode = 0;
 	de->name_len = 0;
 	ext_merge_entries (de, pde, nde);
-	bh->b_dirt = 1;
+	mark_buffer_dirty(bh, 1);
 	inode->i_nlink=0;
 	inode->i_dirt=1;
 	dir->i_nlink--;
@@ -596,9 +598,9 @@ int ext_unlink(struct inode * dir, const char * name, int len)
 	if (!(inode = iget(dir->i_sb, de->inode)))
 		goto end_unlink;
 	retval = -EPERM;
-	if ((dir->i_mode & S_ISVTX) && !suser() &&
-	    current->euid != inode->i_uid &&
-	    current->euid != dir->i_uid)
+	if ((dir->i_mode & S_ISVTX) && !fsuser() &&
+	    current->fsuid != inode->i_uid &&
+	    current->fsuid != dir->i_uid)
 		goto end_unlink;
 	if (S_ISDIR(inode->i_mode))
 		goto end_unlink;
@@ -610,7 +612,7 @@ int ext_unlink(struct inode * dir, const char * name, int len)
 	de->inode = 0;
 	de->name_len = 0;
 	ext_merge_entries (de, pde, nde);
-	bh->b_dirt = 1;
+	mark_buffer_dirty(bh, 1);
 	inode->i_nlink--;
 	inode->i_dirt = 1;
 	inode->i_ctime = CURRENT_TIME;
@@ -650,7 +652,7 @@ int ext_symlink(struct inode * dir, const char * name, int len, const char * sym
 	while (i < 1023 && (c = *(symname++)))
 		name_block->b_data[i++] = c;
 	name_block->b_data[i] = 0;
-	name_block->b_dirt = 1;
+	mark_buffer_dirty(name_block, 1);
 	brelse(name_block);
 	inode->i_size = i;
 	inode->i_dirt = 1;
@@ -672,7 +674,7 @@ int ext_symlink(struct inode * dir, const char * name, int len, const char * sym
 		return -ENOSPC;
 	}
 	de->inode = inode->i_ino;
-	bh->b_dirt = 1;
+	mark_buffer_dirty(bh, 1);
 	brelse(bh);
 	iput(dir);
 	iput(inode);
@@ -708,7 +710,7 @@ int ext_link(struct inode * oldinode, struct inode * dir, const char * name, int
 		return -ENOSPC;
 	}
 	de->inode = oldinode->i_ino;
-	bh->b_dirt = 1;
+	mark_buffer_dirty(bh, 1);
 	brelse(bh);
 	iput(dir);
 	oldinode->i_nlink++;
@@ -789,8 +791,8 @@ start_up:
 		goto end_rename;
 	retval = -EPERM;
 	if ((old_dir->i_mode & S_ISVTX) && 
-	    current->euid != old_inode->i_uid &&
-	    current->euid != old_dir->i_uid && !suser())
+	    current->fsuid != old_inode->i_uid &&
+	    current->fsuid != old_dir->i_uid && !fsuser())
 		goto end_rename;
 	new_bh = ext_find_entry(new_dir,new_name,new_len,&new_de,NULL,NULL);
 	if (new_bh) {
@@ -810,8 +812,8 @@ start_up:
 	}
 	retval = -EPERM;
 	if (new_inode && (new_dir->i_mode & S_ISVTX) && 
-	    current->euid != new_inode->i_uid &&
-	    current->euid != new_dir->i_uid && !suser())
+	    current->fsuid != new_inode->i_uid &&
+	    current->fsuid != new_dir->i_uid && !fsuser())
 		goto end_rename;
 	if (S_ISDIR(old_inode->i_mode)) {
 		retval = -EEXIST;
@@ -851,11 +853,11 @@ start_up:
 		new_inode->i_nlink--;
 		new_inode->i_dirt = 1;
 	}
-	old_bh->b_dirt = 1;
-	new_bh->b_dirt = 1;
+	mark_buffer_dirty(old_bh, 1);
+	mark_buffer_dirty(new_bh, 1);
 	if (dir_bh) {
 		PARENT_INO(dir_bh->b_data) = new_dir->i_ino;
-		dir_bh->b_dirt = 1;
+		mark_buffer_dirty(dir_bh, 1);
 		old_dir->i_nlink--;
 		new_dir->i_nlink++;
 		old_dir->i_dirt = 1;

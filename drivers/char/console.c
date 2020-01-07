@@ -35,6 +35,9 @@
  * Code to check for different video-cards mostly by Galen Hunt,
  * <g-hunt@ee.utah.edu>
  *
+ * Code for xterm like mouse click reporting by Peter Orbaek 20-Jul-94
+ * <poe@daimi.aau.dk>
+ *
  */
 
 #define CAN_LOAD_EGA_FONTS    /* undefine if the user must not do this */
@@ -48,30 +51,45 @@
 
 #include <linux/sched.h>
 #include <linux/timer.h>
+#include <linux/interrupt.h>
 #include <linux/tty.h>
+#include <linux/tty_flip.h>
 #include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/kd.h>
+#include <linux/major.h>
 
 #include <asm/io.h>
 #include <asm/system.h>
 #include <asm/segment.h>
+#include <asm/bitops.h>
 
 #include "kbd_kern.h"
 #include "vt_kern.h"
+
+#ifndef MIN
+#define MIN(a,b)	((a) < (b) ? (a) : (b))
+#endif
+
+struct tty_driver console_driver;
+static int console_refcount;
+static struct tty_struct *console_table[NR_CONSOLES];
+static struct termios *console_termios[NR_CONSOLES];
+static struct termios *console_termios_locked[NR_CONSOLES];
 
 #ifdef CONFIG_SELECTION
 #include <linux/ctype.h>
 
 /* Routines for selection control. */
-int set_selection(const int arg);
+int set_selection(const int arg, struct tty_struct *tty);
 int paste_selection(struct tty_struct *tty);
 static void clear_selection(void);
+static void highlight_pointer(const int currcons, const int where);
 
 /* Variables for selection control. */
-#define SEL_BUFFER_SIZE TTY_BUF_SIZE
+#define SEL_BUFFER_SIZE 4096
 static int sel_cons;
 static int sel_start = -1;
 static int sel_end;
@@ -119,6 +137,8 @@ static struct {
 	/* mode flags */
 	unsigned long	vc_charset	: 1;	/* Character set G0 / G1 */
 	unsigned long	vc_s_charset	: 1;	/* Saved character set */
+	unsigned long	vc_disp_ctrl	: 1;	/* Display chars < 32? */
+	unsigned long	vc_toggle_meta	: 1;	/* Toggle high bit? */
 	unsigned long	vc_decscnm	: 1;	/* Screen Mode */
 	unsigned long	vc_decom	: 1;	/* Origin Mode */
 	unsigned long	vc_decawm	: 1;	/* Autowrap Mode */
@@ -136,6 +156,7 @@ static struct {
 	/* misc */
 	unsigned long	vc_ques		: 1;
 	unsigned long	vc_need_wrap	: 1;
+	unsigned long	vc_report_mouse : 2;
 	unsigned long	vc_tab_stop[5];		/* Tab stops. 160 columns. */
 	unsigned char * vc_translate;
 	unsigned char *	vc_G0_charset;
@@ -156,7 +177,7 @@ static int console_blanked = 0;
 #define bottom		(vc_cons[currcons].vc_bottom)
 #define x		(vc_cons[currcons].vc_x)
 #define y		(vc_cons[currcons].vc_y)
-#define state		(vc_cons[currcons].vc_state)
+#define vc_state		(vc_cons[currcons].vc_state)
 #define npar		(vc_cons[currcons].vc_npar)
 #define par		(vc_cons[currcons].vc_par)
 #define ques		(vc_cons[currcons].vc_ques)
@@ -171,12 +192,15 @@ static int console_blanked = 0;
 #define video_mem_start	(vc_cons[currcons].vc_video_mem_start)
 #define video_mem_end	(vc_cons[currcons].vc_video_mem_end)
 #define video_erase_char (vc_cons[currcons].vc_video_erase_char)	
+#define disp_ctrl	(vc_cons[currcons].vc_disp_ctrl)
+#define toggle_meta	(vc_cons[currcons].vc_toggle_meta)
 #define decscnm		(vc_cons[currcons].vc_decscnm)
 #define decom		(vc_cons[currcons].vc_decom)
 #define decawm		(vc_cons[currcons].vc_decawm)
 #define deccm		(vc_cons[currcons].vc_deccm)
 #define decim		(vc_cons[currcons].vc_decim)
 #define need_wrap	(vc_cons[currcons].vc_need_wrap)
+#define report_mouse	(vc_cons[currcons].vc_report_mouse)
 #define color		(vc_cons[currcons].vc_color)
 #define s_color		(vc_cons[currcons].vc_s_color)
 #define def_color	(vc_cons[currcons].vc_def_color)
@@ -605,6 +629,27 @@ static void csi_K(int currcons, int vpar)
 	need_wrap = 0;
 }
 
+static void csi_X(int currcons, int vpar)
+{
+	long count;
+	long start;
+
+	if (!vpar)
+	        vpar++;
+
+	start=pos;
+	count=(vpar > video_num_columns-x) ? (video_num_columns-x) : vpar;
+
+	__asm__("cld\n\t"
+		"rep\n\t"
+		"stosw\n\t"
+		: /* no output */
+		:"c" (count),
+		"D" (start),"a" (video_erase_char)
+		:"cx","di");
+	need_wrap = 0;
+}
+
 /*
  *  I hope this works. The monochrome part is untested.
  */
@@ -668,6 +713,33 @@ static void csi_m(int currcons)
 			case 7:
 				reverse = 1;
 				break;
+			case 10: /* ANSI X3.64-1979 (SCO-ish?)
+				  * Select primary font, don't display
+				  * control chars if defined, don't set
+				  * bit 8 on output.
+				  */
+				translate = (charset == 0
+						? G0_charset
+						: G1_charset);
+				disp_ctrl = 0;
+				toggle_meta = 0;
+				break;
+			case 11: /* ANSI X3.64-1979 (SCO-ish?)
+				  * Select first alternate font, let's
+				  * chars < 32 be displayed as ROM chars.
+				  */
+				translate = NULL_TRANS;
+				disp_ctrl = 1;
+				toggle_meta = 0;
+				break;
+			case 12: /* ANSI X3.64-1979 (SCO-ish?)
+				  * Select second alternate font, toggle
+				  * high bit before displaying as ROM char.
+				  */
+				translate = NULL_TRANS;
+				disp_ctrl = 1;
+				toggle_meta = 1;
+				break;
 			case 21:
 			case 22:
 				intensity = 1;
@@ -681,8 +753,21 @@ static void csi_m(int currcons)
 			case 27:
 				reverse = 0;
 				break;
-			case 39:
+			case 38: /* ANSI X3.64-1979 (SCO-ish?)
+				  * Enables underscore, white foreground
+				  * with white underscore (Linux - use
+				  * default foreground).
+				  */
 				color = (def_color & 0x0f) | background;
+				underline = 1;
+				break;
+			case 39: /* ANSI X3.64-1979 (SCO-ish?)
+				  * Disable underline option.
+				  * Reset colour to default? It did this
+				  * before...
+				  */
+				color = (def_color & 0x0f) | background;
+				underline = 0;
 				break;
 			case 49:
 				color = (def_color & 0xf0) | foreground;
@@ -699,49 +784,43 @@ static void csi_m(int currcons)
 	update_attr(currcons);
 }
 
-static void respond_string(char * p, int currcons, struct tty_struct * tty)
+static void respond_string(char * p, struct tty_struct * tty)
 {
 	while (*p) {
-		put_tty_queue(*p, &tty->read_q);
+		tty_insert_flip_char(tty, *p, 0);
 		p++;
 	}
-	TTY_READ_FLUSH(tty);
-}
-
-static void respond_num(unsigned int n, int currcons, struct tty_struct * tty)
-{
-	char buff[3];
-	int i = 0;
-
-	do {
-		buff[i++] = (n%10)+'0';
-		n /= 10;
-	} while(n && i < 3);	/* We'll take no chances */
-	while (i--) {
-		put_tty_queue(buff[i], &tty->read_q);
-	}
-	/* caller must flush */
+	tty_schedule_flip(tty);
 }
 
 static void cursor_report(int currcons, struct tty_struct * tty)
 {
-	put_tty_queue('\033', &tty->read_q);
-	put_tty_queue('[', &tty->read_q);
-	respond_num(y + (decom ? top+1 : 1), currcons, tty);
-	put_tty_queue(';', &tty->read_q);
-	respond_num(x+1, currcons, tty);
-	put_tty_queue('R', &tty->read_q);
-	TTY_READ_FLUSH(tty);
+	char buf[40];
+
+	sprintf(buf, "\033[%ld;%ldR", y + (decom ? top+1 : 1), x+1);
+	respond_string(buf, tty);
 }
+
+#ifdef CONFIG_SELECTION
+static void mouse_report(int currcons, struct tty_struct * tty,
+			 int butt, int mrx, int mry)
+{
+	char buf[8];
+
+	sprintf(buf, "\033[M%c%c%c", (char)(' ' + butt), (char)('!' + mrx),
+		(char)('!' + mry));
+	respond_string(buf, tty);
+}
+#endif
 
 static inline void status_report(int currcons, struct tty_struct * tty)
 {
-	respond_string("\033[0n", currcons, tty);	/* Terminal ok */
+	respond_string("\033[0n", tty);	/* Terminal ok */
 }
 
 static inline void respond_ID(int currcons, struct tty_struct * tty)
 {
-	respond_string(VT102ID, currcons, tty);
+	respond_string(VT102ID, tty);
 }
 
 static void invert_screen(int currcons) {
@@ -791,9 +870,15 @@ static void set_mode(int currcons, int on_off)
 				else
 					clr_kbd(decarm);
 				break;
+			case 9:
+				report_mouse = on_off ? 1 : 0;
+				break;
 			case 25:		/* Cursor on/off */
 				deccm = on_off;
 				set_cursor(currcons);
+				break;
+			case 1000:
+				report_mouse = on_off ? 2 : 0;
 				break;
 		} else switch(par[i]) {		/* ANSI modes set/reset */
 			case 4:			/* Insert Mode on/off */
@@ -953,13 +1038,17 @@ static void reset_terminal(int currcons, int do_clear)
 {
 	top		= 0;
 	bottom		= video_num_lines;
-	state		= ESnormal;
+	vc_state		= ESnormal;
 	ques		= 0;
 	translate	= NORM_TRANS;
 	G0_charset	= NORM_TRANS;
 	G1_charset	= GRAF_TRANS;
 	charset		= 0;
 	need_wrap	= 0;
+	report_mouse	= 0;
+
+	disp_ctrl	= 0;
+	toggle_meta	= 0;
 
 	decscnm		= 0;
 	decom		= 0;
@@ -991,25 +1080,50 @@ static void reset_terminal(int currcons, int do_clear)
 	}
 }
 
-void con_write(struct tty_struct * tty)
+/*
+ * Turn the Scroll-Lock LED on when the tty is stopped (with a ^S)
+ */
+static void con_stop(struct tty_struct *tty)
 {
-	int c;
-	unsigned int currcons;
+	set_vc_kbd_led(kbd_table + fg_console, VC_SCROLLOCK);
+	set_leds();
+}
 
-	currcons = tty->line - 1;
+/*
+ * Turn the Scroll-Lock LED off when the console is started (with a ^Q)
+ */
+static void con_start(struct tty_struct *tty)
+{
+	clr_vc_kbd_led(kbd_table + fg_console, VC_SCROLLOCK);
+	set_leds();
+}
+
+static int con_write(struct tty_struct * tty, int from_user,
+		     unsigned char *buf, int count)
+{
+	int c, n = 0;
+	unsigned int currcons;
+	struct vt_struct *vt = (struct vt_struct *)tty->driver_data;
+
+	currcons = vt->vc_num;
 	if (currcons >= NR_CONSOLES) {
-		printk("con_write: illegal tty (%d)\n", currcons);
-		return;
+		printk("con_write: illegal vc index (%d)\n", currcons);
+		return 0;
 	}
 #ifdef CONFIG_SELECTION
-	/* clear the selection as soon as any characters are to be written
-	   out on the console holding the selection. */
-	if (!EMPTY(&tty->write_q) && currcons == sel_cons)
+	/* clear the selection */
+	if (currcons == sel_cons)
 		clear_selection();
 #endif /* CONFIG_SELECTION */
 	disable_bh(KEYBOARD_BH);
-	while (!tty->stopped &&	(c = get_tty_queue(&tty->write_q)) >= 0) {
-		if (state == ESnormal && translate[c]) {
+	while (!tty->stopped &&	count) {
+		c = from_user ? get_fs_byte(buf) : *buf;
+		buf++; n++; count--;
+		if (vc_state == ESnormal
+		&& (c >= 32 || (disp_ctrl && (c&0x7f) != 27))
+		&& (toggle_meta ? translate[c|0x80] : translate[c])) {
+			if (toggle_meta)
+				c |= 0x80;
 			if (need_wrap) {
 				cr(currcons);
 				lf(currcons);
@@ -1063,24 +1177,24 @@ void con_write(struct tty_struct * tty)
 				translate = G0_charset;
 				continue;
 			case 24: case 26:
-				state = ESnormal;
+				vc_state = ESnormal;
 				continue;
 			case 27:
-				state = ESesc;
+				vc_state = ESesc;
 				continue;
 			case 127:
 				del(currcons);
 				continue;
 			case 128+27:
-				state = ESsquare;
+				vc_state = ESsquare;
 				continue;
 		}
-		switch(state) {
+		switch(vc_state) {
 			case ESesc:
-				state = ESnormal;
+				vc_state = ESnormal;
 				switch (c) {
 				  case '[':
-					state = ESsquare;
+					vc_state = ESsquare;
 					continue;
 				  case 'E':
 					cr(currcons);
@@ -1105,13 +1219,13 @@ void con_write(struct tty_struct * tty)
 					restore_cur(currcons);
 					continue;
 				  case '(':
-					state = ESsetG0;
+					vc_state = ESsetG0;
 					continue;
 				  case ')':
-					state = ESsetG1;
+					vc_state = ESsetG1;
 					continue;
 				  case '#':
-					state = EShash;
+					vc_state = EShash;
 					continue;
 				  case 'c':
 					reset_terminal(currcons,1);
@@ -1128,9 +1242,9 @@ void con_write(struct tty_struct * tty)
 				for(npar = 0 ; npar < NPAR ; npar++)
 					par[npar] = 0;
 				npar = 0;
-				state = ESgetpars;
+				vc_state = ESgetpars;
 				if (c == '[') { /* Function key */
-					state=ESfunckey;
+					vc_state=ESfunckey;
 					continue;
 				}
 				ques = (c=='?');
@@ -1144,9 +1258,9 @@ void con_write(struct tty_struct * tty)
 					par[npar] *= 10;
 					par[npar] += c-'0';
 					continue;
-				} else state=ESgotpars;
+				} else vc_state=ESgotpars;
 			case ESgotpars:
-				state = ESnormal;
+				vc_state = ESnormal;
 				switch(c) {
 					case 'h':
 						set_mode(currcons,1);
@@ -1256,6 +1370,9 @@ void con_write(struct tty_struct * tty)
 					case 'u':
 						restore_cur(currcons);
 						continue;
+					case 'X':
+						csi_X(currcons, par[0]);
+						continue;
 					case '@':
 						csi_at(currcons,par[0]);
 						continue;
@@ -1265,10 +1382,10 @@ void con_write(struct tty_struct * tty)
 				}
 				continue;
 			case ESfunckey:
-				state = ESnormal;
+				vc_state = ESnormal;
 				continue;
 			case EShash:
-				state = ESnormal;
+				vc_state = ESnormal;
 				if (c == '8') {
 					/* DEC screen alignment test. kludge :-) */
 					video_erase_char =
@@ -1289,7 +1406,7 @@ void con_write(struct tty_struct * tty)
 					G0_charset = USER_TRANS;
 				if (charset == 0)
 					translate = G0_charset;
-				state = ESnormal;
+				vc_state = ESnormal;
 				continue;
 			case ESsetG1:
 				if (c == '0')
@@ -1302,22 +1419,32 @@ void con_write(struct tty_struct * tty)
 					G1_charset = USER_TRANS;
 				if (charset == 1)
 					translate = G1_charset;
-				state = ESnormal;
+				vc_state = ESnormal;
 				continue;
 			default:
-				state = ESnormal;
+				vc_state = ESnormal;
 		}
 	}
 	if (vcmode != KD_GRAPHICS)
 		set_cursor(currcons);
 	enable_bh(KEYBOARD_BH);
-	if (LEFT(&tty->write_q) > WAKEUP_CHARS)
-		wake_up_interruptible(&tty->write_q.proc_list);
+	return n;
 }
 
-void do_keyboard_interrupt(void)
+static int con_write_room(struct tty_struct *tty)
 {
-	TTY_READ_FLUSH(TTY_TABLE(0));
+	if (tty->stopped)
+		return 0;
+	return 4096;		/* No limit, really; we're not buffering */
+}
+
+static int con_chars_in_buffer(struct tty_struct *tty)
+{
+	return 0;		/* we're not buffering */
+}
+
+void poke_blanked_console(void)
+{
 	timer_active &= ~(1<<BLANK_TIMER);
 	if (vt_cons[fg_console].vc_mode == KD_GRAPHICS)
 		return;
@@ -1378,11 +1505,27 @@ void console_print(const char * b)
 }
 
 /*
+ * con_throttle and con_unthrottle are only used for
+ * paste_selection(), which has to stuff in a large number of
+ * characters...
+ */
+static void con_throttle(struct tty_struct *tty)
+{
+}
+
+static void con_unthrottle(struct tty_struct *tty)
+{
+	struct vt_struct *vt = (struct vt_struct *) tty->driver_data;
+
+	wake_up_interruptible(&vt->paste_wait);
+}
+
+/*
  *  long con_init(long);
  *
- * This routine initalizes console interrupts, and does nothing
+ * This routine initializes console interrupts, and does nothing
  * else. If you want the screen to clear, call tty_write with
- * the appropriate escape-sequece.
+ * the appropriate escape-sequence.
  *
  * Reads the information preserved by setup.s to determine the current display
  * type and sets everything accordingly.
@@ -1395,6 +1538,34 @@ long con_init(long kmem_start)
 	int orig_x = ORIG_X;
 	int orig_y = ORIG_Y;
 
+	memset(&console_driver, 0, sizeof(struct tty_driver));
+	console_driver.magic = TTY_DRIVER_MAGIC;
+	console_driver.name = "tty";
+	console_driver.name_base = 1;
+	console_driver.major = TTY_MAJOR;
+	console_driver.minor_start = 1;
+	console_driver.num = NR_CONSOLES;
+	console_driver.type = TTY_DRIVER_TYPE_CONSOLE;
+	console_driver.init_termios = tty_std_termios;
+	console_driver.flags = TTY_DRIVER_REAL_RAW;
+	console_driver.refcount = &console_refcount;
+	console_driver.table = console_table;
+	console_driver.termios = console_termios;
+	console_driver.termios_locked = console_termios_locked;
+
+	console_driver.open = con_open;
+	console_driver.write = con_write;
+	console_driver.write_room = con_write_room;
+	console_driver.chars_in_buffer = con_chars_in_buffer;
+	console_driver.ioctl = vt_ioctl;
+	console_driver.stop = con_stop;
+	console_driver.start = con_start;
+	console_driver.throttle = con_throttle;
+	console_driver.unthrottle = con_unthrottle;
+	
+	if (tty_register_driver(&console_driver))
+		panic("Couldn't register console driver\n");
+	
 	vc_scrmembuf = (unsigned short *) kmem_start;
 	video_num_columns = ORIG_VIDEO_COLS;
 	video_size_row = video_num_columns * 2;
@@ -1466,6 +1637,7 @@ long con_init(long kmem_start)
 		def_color	= 0x07;   /* white */
 		ulcolor		= 0x0f;   /* bold white */
 		halfcolor	= 0x08;   /* grey */
+		vt_cons[currcons].paste_wait = 0;
 		reset_terminal(currcons, currcons);
 	}
 	currcons = fg_console = 0;
@@ -1580,6 +1752,9 @@ void update_screen(int new_console)
 		return;
 	lock = 1;
 	kbdsave(new_console);
+#ifdef CONFIG_SELECTION
+	highlight_pointer(fg_console,-1);
+#endif /* CONFIG_SELECTION */
 	get_scrmem(fg_console); 
 	fg_console = new_console;
 	set_scrmem(fg_console); 
@@ -1613,15 +1788,24 @@ int do_screendump(int arg)
 }
 
 /*
- * All we do is set the write and ioctl subroutines; later on maybe we'll
- * dynamically allocate the console screen memory.
+ * Later on maybe we'll dynamically allocate the console screen
+ * memory.
  */
 int con_open(struct tty_struct *tty, struct file * filp)
 {
-	tty->write = con_write;
-	tty->ioctl = vt_ioctl;
-	if (tty->line > NR_CONSOLES)
+	int	idx;
+
+	idx = MINOR(tty->device) - tty->driver.minor_start;
+	
+	if (idx > NR_CONSOLES)
 		return -ENODEV;
+	vt_cons[idx].vc_num = idx;
+	tty->driver_data = &vt_cons[idx];
+	
+	if (!tty->winsize.ws_row && !tty->winsize.ws_col) {
+		tty->winsize.ws_row = video_num_lines;
+		tty->winsize.ws_col = video_num_columns;
+	}
 	return 0;
 }
 
@@ -1646,8 +1830,49 @@ static void highlight(const int currcons, const int s, const int e)
 		*p = (*p & 0x88) | ((*p << 4) & 0x70) | ((*p >> 4) & 0x07);
 }
 
-/* is c in range [a-zA-Z0-9_]? */
-static inline int inword(const char c) { return (isalnum(c) || c == '_'); }
+/* use complementary color to show the pointer */
+static void highlight_pointer(const int currcons, const int where)
+{
+        unsigned char *p;
+	static unsigned char *prev=NULL;
+
+	if (where==-1) /* remove the pointer */
+	{
+                if (prev)
+		{
+			*prev ^= 0x77;
+			prev=NULL;
+		}
+        }
+	else
+	{
+	        p = (unsigned char *)origin - hwscroll_offset + where + 1;
+		*p ^= 0x77;
+		if (prev) *prev ^= 0x77; /* remove the previous one */
+		prev=p;
+	}
+}
+
+
+/*
+ * This function uses a 128-bit look up table
+ */
+static unsigned long inwordLut[4]={
+  0x00000000, /* control chars     */
+  0x03FF0000, /* digits            */
+  0x87FFFFFE, /* uppercase and '_' */
+  0x07FFFFFE  /* lowercase         */
+};
+static inline int inword(const char c) {
+   return ( inwordLut[(c>>5)&3] >> (c&0x1F) ) & 1;
+}
+
+/* set inwordLut contents. Invoked by ioctl(). */
+int sel_loadlut(const int arg)
+{
+    memcpy_fromfs(inwordLut,(unsigned long *)(arg+4),16);
+    return 0;
+}
 
 /* does screen address p correspond to character at LH/RH edge of screen? */
 static inline int atedge(const int p)
@@ -1661,8 +1886,16 @@ static inline short limit(const int v, const int l, const int u)
 	return (v < l) ? l : ((v > u) ? u : v);
 }
 
+/* invoked via ioctl(TIOCLINUX) */
+int mouse_reporting(void)
+{
+	int currcons = fg_console;
+
+	return report_mouse;
+}
+
 /* set the current selection. Invoked by ioctl(). */
-int set_selection(const int arg)
+int set_selection(const int arg, struct tty_struct *tty)
 {
 	unsigned short *args, xs, ys, xe, ye;
 	int currcons = fg_console;
@@ -1686,6 +1919,11 @@ int set_selection(const int arg)
 	ps = ys * video_size_row + (xs << 1);
 	pe = ye * video_size_row + (xe << 1);
 
+	if (report_mouse && (sel_mode & 16)) {
+		mouse_report(currcons, tty, sel_mode & 15, xs, ys);
+		return 0;
+	}
+
 	if (ps > pe)	/* make sel_start <= sel_end */
 	{
 		int tmp = ps;
@@ -1696,7 +1934,6 @@ int set_selection(const int arg)
 	switch (sel_mode)
 	{
 		case 0:	/* character-by-character selection */
-		default:
 			new_sel_start = ps;
 			new_sel_end = pe;
 			break;
@@ -1727,6 +1964,17 @@ int set_selection(const int arg)
 			new_sel_end = pe + video_size_row
 				    - pe % video_size_row - 2;
 			break;
+                case 3: /* pointer highlight */
+		        if (sel_cons != currcons)
+        		{
+				highlight_pointer(sel_cons,-1);
+        	        	clear_selection();
+                		sel_cons = currcons;
+        		}
+			highlight_pointer(sel_cons,pe);
+			return 0; /* nothing more */
+	        default:
+			return -EINVAL;
 	}
 	/* select to end of line if on trailing space */
 	if (new_sel_end > new_sel_start &&
@@ -1801,16 +2049,28 @@ int set_selection(const int arg)
    tty associated with the current console. Invoked by ioctl(). */
 int paste_selection(struct tty_struct *tty)
 {
-	char *bp = sel_buffer;
-
-	if (! *bp)
+	struct wait_queue wait = { current, NULL };
+	char	*bp = sel_buffer;
+	int	c, l;
+	struct vt_struct *vt = (struct vt_struct *) tty->driver_data;
+	
+	if (!sel_buffer[0])
 		return 0;
 	unblank_screen();
-	while (*bp) {
-		put_tty_queue(*bp, &tty->read_q);
-		bp++;
-		TTY_READ_FLUSH(tty);
+	c = strlen(sel_buffer);
+	current->state = TASK_INTERRUPTIBLE;
+	add_wait_queue(&vt->paste_wait, &wait);
+	while (c) {
+		if (test_bit(TTY_THROTTLED, &tty->flags)) {
+			schedule();
+			continue;
+		}
+		l = MIN(c, tty->ldisc.receive_room(tty));
+		tty->ldisc.receive_buf(tty, bp, 0, l);
+		c -= l;
+		bp += l;
 	}
+	current->state = TASK_RUNNING;
 	return 0;
 }
 
@@ -1818,6 +2078,7 @@ int paste_selection(struct tty_struct *tty)
    the selection. */
 static void clear_selection()
 {
+        highlight_pointer(sel_cons, -1); /* hide the pointer */
 	if (sel_start != -1)
 	{
 		highlight(sel_cons, sel_start, sel_end);
@@ -1894,7 +2155,7 @@ static int set_get_font(char * arg, int set)
 			put_fs_byte(*(charmap+i), arg+i);
 
 	cli();
-	outb_p( 0x00, seq_port_reg );   /* Frist, the sequencer */
+	outb_p( 0x00, seq_port_reg );   /* First, the sequencer */
 	outb_p( 0x01, seq_port_val );   /* Synchronous reset */
 	outb_p( 0x02, seq_port_reg );
 	outb_p( 0x03, seq_port_val );   /* CPU writes to maps 0 and 1 */

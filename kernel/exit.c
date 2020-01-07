@@ -52,6 +52,11 @@ int send_sig(unsigned long sig,struct task_struct * p,int priv)
 		return -EPERM;
 	if (!sig)
 		return 0;
+	/*
+	 * Forget it if the process is already zombie'd.
+	 */
+	if (p->state == TASK_ZOMBIE)
+		return 0;
 	if ((sig == SIGKILL) || (sig == SIGCONT)) {
 		if (p->state == TASK_STOPPED)
 			p->state = TASK_RUNNING;
@@ -116,7 +121,7 @@ int bad_task_ptr(struct task_struct *p)
 }
 	
 /*
- * This routine scans the pid tree and make sure the rep invarient still
+ * This routine scans the pid tree and makes sure the rep invariant still
  * holds.  Used for debugging only, since it's very slow....
  *
  * It looks a lot scarier than it really is.... we're doing nothing more
@@ -193,7 +198,7 @@ void audit_ptree(void)
 
 /*
  * This checks not only the pgrp, but falls back on the pid if no
- * satisfactory prgp is found. I dunno - gdb doesn't work correctly
+ * satisfactory pgrp is found. I dunno - gdb doesn't work correctly
  * without this...
  */
 int session_of_pgrp(int pgrp)
@@ -350,10 +355,56 @@ static void forget_original_parent(struct task_struct * father)
 	}
 }
 
+static void exit_mm(void)
+{
+	struct vm_area_struct * mpnt;
+
+	mpnt = current->mm->mmap;
+	current->mm->mmap = NULL;
+	while (mpnt) {
+		struct vm_area_struct * next = mpnt->vm_next;
+		if (mpnt->vm_ops && mpnt->vm_ops->close)
+			mpnt->vm_ops->close(mpnt);
+		if (mpnt->vm_inode)
+			iput(mpnt->vm_inode);
+		kfree(mpnt);
+		mpnt = next;
+	}
+
+	/* forget local segments */
+	__asm__ __volatile__("mov %w0,%%fs ; mov %w0,%%gs ; lldt %w0"
+		: /* no outputs */
+		: "r" (0));
+	current->tss.ldt = 0;
+	if (current->ldt) {
+		void * ldt = current->ldt;
+		current->ldt = NULL;
+		vfree(ldt);
+	}
+
+	free_page_tables(current);
+}
+
+static void exit_files(void)
+{
+	int i;
+
+	for (i=0 ; i<NR_OPEN ; i++)
+		if (current->files->fd[i])
+			sys_close(i);
+}
+
+static void exit_fs(void)
+{
+	iput(current->fs->pwd);
+	current->fs->pwd = NULL;
+	iput(current->fs->root);
+	current->fs->root = NULL;
+}
+
 NORET_TYPE void do_exit(long code)
 {
 	struct task_struct *p;
-	int i;
 
 	if (intr_count) {
 		printk("Aiee, killing interrupt handler\n");
@@ -364,43 +415,10 @@ fake_volatile:
 		sem_exit();
 	if (current->shm)
 		shm_exit();
-	free_page_tables(current);
-	for (i=0 ; i<NR_OPEN ; i++)
-		if (current->filp[i])
-			sys_close(i);
+	exit_mm();
+	exit_files();
+	exit_fs();
 	forget_original_parent(current);
-	iput(current->pwd);
-	current->pwd = NULL;
-	iput(current->root);
-	current->root = NULL;
-	iput(current->executable);
-	current->executable = NULL;
-	/* Release all of the old mmap stuff. */
-	
-	{
-		struct vm_area_struct * mpnt, *mpnt1;
-		mpnt = current->mmap;
-		current->mmap = NULL;
-		while (mpnt) {
-			mpnt1 = mpnt->vm_next;
-			if (mpnt->vm_ops && mpnt->vm_ops->close)
-				mpnt->vm_ops->close(mpnt);
-			kfree(mpnt);
-			mpnt = mpnt1;
-		}
-	}
-
-	if (current->ldt) {
-		vfree(current->ldt);
-		current->ldt = NULL;
-		for (i=1 ; i<NR_TASKS ; i++) {
-			if (task[i] == current) {
-				set_ldt_desc(gdt+(i<<1)+FIRST_LDT_ENTRY, &default_ldt, 1);
-				load_ldt(i);
-			}
-		}
-	}
-
 	/* 
 	 * Check to see if any process groups have become orphaned
 	 * as a result of our exiting, and if they have any stopped
@@ -461,10 +479,14 @@ fake_volatile:
 		last_task_used_math = NULL;
 	current->state = TASK_ZOMBIE;
 	current->exit_code = code;
-	current->rss = 0;
+	current->mm->rss = 0;
 #ifdef DEBUG_PROC_TREE
 	audit_ptree();
 #endif
+	if (current->exec_domain && current->exec_domain->use_count)
+		(*current->exec_domain->use_count)--;
+	if (current->binfmt && current->binfmt->use_count)
+		(*current->binfmt->use_count)--;
 	schedule();
 /*
  * In order to get rid of the "volatile function does return" message
@@ -533,8 +555,8 @@ repeat:
 			case TASK_ZOMBIE:
 				current->cutime += p->utime + p->cutime;
 				current->cstime += p->stime + p->cstime;
-				current->cmin_flt += p->min_flt + p->cmin_flt;
-				current->cmaj_flt += p->maj_flt + p->cmaj_flt;
+				current->mm->cmin_flt += p->mm->min_flt + p->mm->cmin_flt;
+				current->mm->cmaj_flt += p->mm->maj_flt + p->mm->cmaj_flt;
 				if (ru != NULL)
 					getrusage(p, RUSAGE_BOTH, ru);
 				flag = p->pid;

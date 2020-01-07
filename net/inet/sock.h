@@ -34,7 +34,7 @@
 #include <linux/ip.h>		/* struct options */
 #include <linux/tcp.h>		/* struct tcphdr */
 
-#include "skbuff.h"		/* struct sk_buff */
+#include <linux/skbuff.h>	/* struct sk_buff */
 #include "protocol.h"		/* struct inet_protocol */
 #ifdef CONFIG_AX25
 #include "ax25.h"
@@ -89,15 +89,14 @@ struct sock {
   int				proc;
   struct sock			*next;
   struct sock			*pair;
-  struct sk_buff		*volatile send_tail;
-  struct sk_buff		*volatile send_head;
-  struct sk_buff		*volatile back_log;
+  struct sk_buff		* volatile send_head;
+  struct sk_buff		* volatile send_tail;
+  struct sk_buff_head		back_log;
   struct sk_buff		*partial;
   struct timer_list		partial_timer;
   long				retransmits;
-  struct sk_buff		*volatile wback,
-				*volatile wfront,
-				*volatile rqueue;
+  struct sk_buff_head		write_queue,
+				receive_queue;
   struct proto			*prot;
   struct wait_queue		**sleep;
   unsigned long			daddr;
@@ -110,6 +109,7 @@ struct sock {
   volatile unsigned short	mss;       /* current eff. mss - can change */
   volatile unsigned short	user_mss;  /* mss requested by user in ioctl */
   volatile unsigned short	max_window;
+  unsigned long 		window_clamp;
   unsigned short		num;
   volatile unsigned short	cong_window;
   volatile unsigned short	cong_count;
@@ -133,6 +133,7 @@ struct sock {
   unsigned short		rcvbuf;
   unsigned short		sndbuf;
   unsigned short		type;
+  unsigned char			localroute;	/* Route locally only */
 #ifdef CONFIG_IPX
   ipx_address			ipx_source_addr,ipx_dest_addr;
   unsigned short		ipx_type;
@@ -148,6 +149,8 @@ struct sock {
   char				ax25_retxqi;
   char				ax25_rrtimer;
   char				ax25_timer;
+  unsigned char			ax25_n2;
+  unsigned short		ax25_t1,ax25_t3;
   ax25_digi			*ax25_digipeat;
 #endif  
 /* IP 'private area' or will be eventually */
@@ -158,6 +161,7 @@ struct sock {
   /* This part is used for the timeout functions (timer.c). */
   int				timeout;	/* What are we waiting for? */
   struct timer_list		timer;
+  struct timeval		stamp;
 
   /* identd */
   struct socket			*socket;
@@ -177,9 +181,9 @@ struct proto {
   struct sk_buff *	(*rmalloc)(struct sock *sk,
 				    unsigned long size, int force,
 				    int priority);
-  void			(*wfree)(struct sock *sk, void *mem,
+  void			(*wfree)(struct sock *sk, struct sk_buff *skb,
 				 unsigned long size);
-  void			(*rfree)(struct sock *sk, void *mem,
+  void			(*rfree)(struct sock *sk, struct sk_buff *skb,
 				 unsigned long size);
   unsigned long		(*rspace)(struct sock *sk);
   unsigned long		(*wspace)(struct sock *sk);
@@ -259,9 +263,9 @@ extern struct sk_buff		*sock_wmalloc(struct sock *sk,
 extern struct sk_buff		*sock_rmalloc(struct sock *sk,
 					      unsigned long size, int force,
 					      int priority);
-extern void			sock_wfree(struct sock *sk, void *mem,
+extern void			sock_wfree(struct sock *sk, struct sk_buff *skb,
 					   unsigned long size);
-extern void			sock_rfree(struct sock *sk, void *mem,
+extern void			sock_rfree(struct sock *sk, struct sk_buff *skb,
 					   unsigned long size);
 extern unsigned long		sock_rspace(struct sock *sk);
 extern unsigned long		sock_wspace(struct sock *sk);

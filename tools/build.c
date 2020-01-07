@@ -7,8 +7,8 @@
 /*
  * This file builds a disk-image from three different files:
  *
- * - bootsect: max 510 bytes of 8086 machine code, loads the rest
- * - setup: max 4 sectors of 8086 machine code, sets up system parm
+ * - bootsect: exactly 512 bytes of 8086 machine code, loads the rest
+ * - setup: 8086 machine code, sets up system parm
  * - system: 80386 code for actual system
  *
  * It does some checking that all files are of the correct type, and
@@ -32,7 +32,9 @@
 #include <linux/a.out.h>
 
 #define MINIX_HEADER 32
-#define GCC_HEADER 1024
+
+#define N_MAGIC_OFFSET 1024
+static int GCC_HEADER = sizeof(struct exec);
 
 #define SYS_SIZE DEF_SYSSIZE
 
@@ -90,6 +92,7 @@ int main(int argc, char ** argv)
 	struct exec *ex = (struct exec *)buf;
 	char major_root, minor_root;
 	struct stat sb;
+	unsigned char setup_sectors;
 
 	if ((argc < 4) || (argc > 5))
 		usage();
@@ -169,14 +172,15 @@ int main(int argc, char ** argv)
 	if (c != 0)
 		die("read-error on 'setup'");
 	close (id);
-	if (i > SETUP_SECTS*512)
-		die("Setup exceeds " STRINGIFY(SETUP_SECTS)
-			" sectors - rewrite build/boot/setup");
+	setup_sectors = (unsigned char)((i + 511) / 512);
+	/* for compatibility with LILO */
+	if (setup_sectors < SETUP_SECTS)
+		setup_sectors = SETUP_SECTS;
 	fprintf(stderr,"Setup is %d bytes.\n",i);
 	for (c=0 ; c<sizeof(buf) ; c++)
 		buf[c] = '\0';
-	while (i<SETUP_SECTS*512) {
-		c = SETUP_SECTS*512-i;
+	while (i < setup_sectors * 512) {
+		c = setup_sectors * 512 - i;
 		if (c > sizeof(buf))
 			c = sizeof(buf);
 		if (write(1,buf,c) != c)
@@ -188,7 +192,10 @@ int main(int argc, char ** argv)
 		die("Unable to open 'system'");
 	if (read(id,buf,GCC_HEADER) != GCC_HEADER)
 		die("Unable to read header of 'system'");
-	if (N_MAGIC(*ex) != ZMAGIC)
+	if (N_MAGIC(*ex) == ZMAGIC) {
+		GCC_HEADER = N_MAGIC_OFFSET;
+		lseek(id, GCC_HEADER, SEEK_SET);
+	} else if (N_MAGIC(*ex) != QMAGIC)
 		die("Non-GCC header of 'system'");
 	fprintf(stderr,"System is %d kB (%d kB code, %d kB data and %d kB bss)\n",
 		(ex->a_text+ex->a_data+ex->a_bss)/1024,
@@ -217,6 +224,10 @@ int main(int argc, char ** argv)
 		sz -= l;
 	}
 	close(id);
+	if (lseek(1, 497, 0) == 497) {
+		if (write(1, &setup_sectors, 1) != 1)
+			die("Write of setup sectors failed");
+	}
 	if (lseek(1,500,0) == 500) {
 		buf[0] = (sys_size & 0xff);
 		buf[1] = ((sys_size >> 8) & 0xff);

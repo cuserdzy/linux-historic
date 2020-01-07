@@ -1,7 +1,7 @@
 /*
  *  linux/fs/isofs/rock.c
  *
- *  (C) 1992  Eric Youngdale
+ *  (C) 1992, 1993  Eric Youngdale
  *
  *  Rock Ridge Extensions to iso9660
  */
@@ -32,7 +32,7 @@
       if(rr->u.SP.magic[1] != 0xef) FAIL;
 
 /* We define a series of macros because each function must do exactly the
-   same thing in certain places.  We use the macros to ensure that everyting
+   same thing in certain places.  We use the macros to ensure that everything
    is done correctly */
 
 #define CONTINUE_DECLS \
@@ -65,23 +65,28 @@
       offset &= 1023; \
       if(offset + cont_size >= 1024) { \
 	  bh = bread(DEV->i_dev, block++, ISOFS_BUFFER_SIZE(DEV)); \
-	  memcpy(buffer, bh->b_data + offset, 1024 - offset); \
-          brelse(bh); \
-	  offset1 = 1024 - offset; \
-	  offset = 0; \
+	  if(!bh) {printk("Unable to read continuation Rock Ridge record\n"); \
+		     kfree(buffer); \
+		     buffer = NULL; } else { \
+	    memcpy(buffer, bh->b_data + offset, 1024 - offset); \
+            brelse(bh); \
+	    offset1 = 1024 - offset; \
+	    offset = 0;} \
       }  \
     };     \
-    bh = bread(DEV->i_dev, block, ISOFS_BUFFER_SIZE(DEV)); \
-    if(bh){       \
-      memcpy(buffer + offset1, bh->b_data + offset, cont_size - offset1); \
-      brelse(bh); \
-      chr = (unsigned char *) buffer; \
-      len = cont_size; \
-      cont_extent = 0; \
-      cont_size = 0; \
-      cont_offset = 0; \
-      goto LABEL; \
-    };    \
+    if(buffer) { \
+      bh = bread(DEV->i_dev, block, ISOFS_BUFFER_SIZE(DEV)); \
+      if(bh){       \
+        memcpy(buffer + offset1, bh->b_data + offset, cont_size - offset1); \
+        brelse(bh); \
+        chr = (unsigned char *) buffer; \
+        len = cont_size; \
+        cont_extent = 0; \
+        cont_size = 0; \
+        cont_offset = 0; \
+        goto LABEL; \
+      };    \
+    } \
     printk("Unable to read rock-ridge attributes\n");    \
   }}
 
@@ -414,16 +419,22 @@ char * get_rock_ridge_symlink(struct inode * inode)
   raw_inode = ((struct iso_directory_record *) pnt);
   
   if ((inode->i_ino & (bufsize - 1)) + *pnt > bufsize){
-    cpnt = kmalloc(1 << ISOFS_BLOCK_BITS, GFP_KERNEL);
-    memcpy(cpnt, bh->b_data, bufsize);
+    int frag1, offset;
+    
+    offset = (inode->i_ino & (bufsize - 1));
+    frag1 = bufsize - offset;
+    cpnt = kmalloc(*pnt,GFP_KERNEL);
+    if(!cpnt) return NULL;
+    memcpy(cpnt, bh->b_data + offset, frag1);
     brelse(bh);
     if (!(bh = bread(inode->i_dev,++block, bufsize))) {
-      kfree_s(cpnt, 1 << ISOFS_BLOCK_BITS);
+      kfree(cpnt);
       printk("unable to read i-node block");
       return NULL;
     };
-    memcpy((char *)cpnt+bufsize, bh->b_data, bufsize);
-    pnt = ((unsigned char *) cpnt) + (inode->i_ino & (bufsize - 1));
+    offset += *pnt - bufsize;
+    memcpy((char *)cpnt+frag1, bh->b_data, offset);
+    pnt = ((unsigned char *) cpnt);
     raw_inode = ((struct iso_directory_record *) pnt);
   };
   

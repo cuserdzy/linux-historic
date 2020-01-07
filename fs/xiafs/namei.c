@@ -221,7 +221,7 @@ static struct buffer_head * xiafs_add_entry(struct inode * dir,
 		memcpy(de->d_name, name, namelen);
 		de->d_name[namelen]=0;
 		de->d_name_len=namelen;
-		bh->b_dirt = 1;
+		mark_buffer_dirty(bh, 1);
 		*res_dir = de;
 		if (res_pre)
 		    *res_pre = de_pre;
@@ -268,7 +268,7 @@ int xiafs_create(struct inode * dir, const char * name, int len, int mode,
 	return -ENOSPC;
     }
     de->d_ino = inode->i_ino;
-    bh->b_dirt = 1;
+    mark_buffer_dirty(bh, 1);
     brelse(bh);
     iput(dir);
     *result = inode;
@@ -294,7 +294,7 @@ int xiafs_mknod(struct inode *dir, const char *name, int len, int mode, int rdev
         iput(dir);
 	return -ENOSPC;
     }
-    inode->i_uid = current->euid;
+    inode->i_uid = current->fsuid;
     inode->i_mode = mode;
     inode->i_op = NULL;
     if (S_ISREG(inode->i_mode))
@@ -325,7 +325,7 @@ int xiafs_mknod(struct inode *dir, const char *name, int len, int mode, int rdev
 	return -ENOSPC;
     }
     de->d_ino = inode->i_ino;
-    bh->b_dirt = 1;
+    mark_buffer_dirty(bh, 1);
     brelse(bh);
     iput(dir);
     iput(inode);
@@ -375,9 +375,9 @@ int xiafs_mkdir(struct inode * dir, const char * name, int len, int mode)
     de->d_name_len=2;
     de->d_rec_len=XIAFS_ZSIZE(dir->i_sb)-12;
     inode->i_nlink = 2;
-    dir_block->b_dirt = 1;
+    mark_buffer_dirty(dir_block, 1);
     brelse(dir_block);
-    inode->i_mode = S_IFDIR | (mode & S_IRWXUGO & ~current->umask);
+    inode->i_mode = S_IFDIR | (mode & S_IRWXUGO & ~current->fs->umask);
     if (dir->i_mode & S_ISGID)
         inode->i_mode |= S_ISGID;
     inode->i_dirt = 1;
@@ -389,7 +389,7 @@ int xiafs_mkdir(struct inode * dir, const char * name, int len, int mode)
 	return -ENOSPC;
     }
     de->d_ino = inode->i_ino;
-    bh->b_dirt = 1;
+    mark_buffer_dirty(bh, 1);
     dir->i_nlink++;
     dir->i_dirt = 1;
     iput(dir);
@@ -496,8 +496,9 @@ int xiafs_rmdir(struct inode * dir, const char * name, int len)
     retval = -EPERM;
     if (!(inode = iget(dir->i_sb, de->d_ino)))
         goto end_rmdir;
-    if ((dir->i_mode & S_ISVTX) && current->euid &&
-	    inode->i_uid != current->euid)
+    if ((dir->i_mode & S_ISVTX) && !fsuser() &&
+            current->fsuid != inode->i_uid &&
+            current->fsuid != dir->i_uid)
         goto end_rmdir;
     if (inode->i_dev != dir->i_dev)
         goto end_rmdir;
@@ -518,7 +519,7 @@ int xiafs_rmdir(struct inode * dir, const char * name, int len)
     if (inode->i_nlink != 2)
         printk("XIA-FS: empty directory has nlink!=2 (%s %d)\n", WHERE_ERR);
     xiafs_rm_entry(de, de_pre);
-    bh->b_dirt = 1;
+    mark_buffer_dirty(bh, 1);
     inode->i_nlink=0;
     inode->i_dirt=1;
     dir->i_nlink--;
@@ -557,16 +558,16 @@ repeat:
 	schedule();
 	goto repeat;
     }
-    if ((dir->i_mode & S_ISVTX) && !suser() &&
-	    current->euid != inode->i_uid &&
-	    current->euid != dir->i_uid)
+    if ((dir->i_mode & S_ISVTX) && !fsuser() &&
+	    current->fsuid != inode->i_uid &&
+	    current->fsuid != dir->i_uid)
         goto end_unlink;
     if (!inode->i_nlink) {
         printk("XIA-FS: Deleting nonexistent file (%s %d)\n", WHERE_ERR);
 	inode->i_nlink=1;
     }
     xiafs_rm_entry(de, de_pre);
-    bh->b_dirt = 1;
+    mark_buffer_dirty(bh, 1);
     inode->i_ctime = dir->i_ctime = dir->i_mtime = CURRENT_TIME;
     dir->i_dirt = 1;
     inode->i_nlink--;
@@ -611,7 +612,7 @@ int xiafs_symlink(struct inode * dir, const char * name,
     for (i = 0; i < BLOCK_SIZE-1 && (c=*symname++); i++)
         name_block->b_data[i] = c;
     name_block->b_data[i] = 0;
-    name_block->b_dirt = 1;
+    mark_buffer_dirty(name_block, 1);
     brelse(name_block);
     inode->i_size = i;
     inode->i_dirt = 1;
@@ -624,7 +625,7 @@ int xiafs_symlink(struct inode * dir, const char * name,
 	return -ENOSPC;
     }
     de->d_ino = inode->i_ino;
-    bh->b_dirt = 1;
+    mark_buffer_dirty(bh, 1);
     brelse(bh);
     iput(dir);
     iput(inode);
@@ -661,7 +662,7 @@ int xiafs_link(struct inode * oldinode, struct inode * dir,
 	return -ENOSPC;
     }
     de->d_ino = oldinode->i_ino;
-    bh->b_dirt = 1;
+    mark_buffer_dirty(bh, 1);
     brelse(bh);
     iput(dir);
     oldinode->i_nlink++;
@@ -729,8 +730,8 @@ try_again:
         goto end_rename;
     retval = -EPERM;
     if ((old_dir->i_mode & S_ISVTX) && 
-	    current->euid != old_inode->i_uid &&
-	    current->euid != old_dir->i_uid && !suser())
+	    current->fsuid != old_inode->i_uid &&
+	    current->fsuid != old_dir->i_uid && !fsuser())
         goto end_rename;
     new_bh = xiafs_find_entry(new_dir, new_name, new_len, &new_de, NULL);
     if (new_bh) {
@@ -750,8 +751,8 @@ try_again:
     }
     retval = -EPERM;
     if (new_inode && (new_dir->i_mode & S_ISVTX) && 
-	    current->euid != new_inode->i_uid &&
- 	    current->euid != new_dir->i_uid && !suser())
+	    current->fsuid != new_inode->i_uid &&
+ 	    current->fsuid != new_dir->i_uid && !fsuser())
         goto end_rename;
     if (S_ISDIR(old_inode->i_mode)) {
         retval = -EEXIST;
@@ -798,11 +799,11 @@ try_again:
         new_inode->i_nlink--;
 	new_inode->i_dirt = 1;
     }
-    old_bh->b_dirt = 1;
-    new_bh->b_dirt = 1;
+    mark_buffer_dirty(old_bh, 1);
+    mark_buffer_dirty(new_bh, 1);
     if (dir_bh) {
         PARENT_INO(dir_bh->b_data) = new_dir->i_ino;
-	dir_bh->b_dirt = 1;
+	mark_buffer_dirty(dir_bh, 1);
 	old_dir->i_nlink--;
 	new_dir->i_nlink++;
 	old_dir->i_dirt = 1;

@@ -22,15 +22,7 @@
 
 #define NFS_READDIR_CACHE_SIZE		64
 
-/*
- * WARNING!  The I/O buffer size cannot be bigger than about 3900 for now.
- * It needs to fit inside a 4096-byte page and leave room for the RPC and
- * NFS headers.  But it ought to at least be a multiple of 512 and probably
- * should be a power of 2.  I don't think Linux TCP/IP can handle more than
- * about 1800 yet.
- */
-
-#define NFS_MAX_FILE_IO_BUFFER_SIZE	(7*512)
+#define NFS_MAX_FILE_IO_BUFFER_SIZE	16384
 #define NFS_DEF_FILE_IO_BUFFER_SIZE	1024
 
 /*
@@ -42,7 +34,7 @@
 
 /*
  * Size of the lookup cache in units of number of entries cached.
- * It is better not to make this too large although the optimimum
+ * It is better not to make this too large although the optimum
  * depends on a usage and environment.
  */
 
@@ -52,6 +44,8 @@
 
 #define NFS_SERVER(inode)		(&(inode)->i_sb->u.nfs_sb.s_server)
 #define NFS_FH(inode)			(&(inode)->u.nfs_i.fhandle)
+
+#ifdef __KERNEL__
 
 /* linux/fs/nfs/proc.c */
 
@@ -118,7 +112,8 @@ extern struct inode_operations nfs_symlink_inode_operations;
 
 /* linux/fs/nfs/mmap.c */
 
-extern int nfs_mmap(struct inode * inode, struct file * file,
-               unsigned long addr, size_t len, int prot, unsigned long off);
+extern int nfs_mmap(struct inode * inode, struct file * file, struct vm_area_struct * vma);
+
+#endif /* __KERNEL__ */
 
 #endif

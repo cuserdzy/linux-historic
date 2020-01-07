@@ -76,6 +76,7 @@
 #define MODE_SELECT_10		0x55
 #define MODE_SENSE_10		0x5a
 
+extern volatile int in_scan_scsis;
 extern const unsigned char scsi_command_size[8];
 #define COMMAND_SIZE(opcode) scsi_command_size[((opcode) >> 5) & 7]
 
@@ -85,6 +86,10 @@ extern const unsigned char scsi_command_size[8];
 
 #define COMMAND_COMPLETE	0x00
 #define EXTENDED_MESSAGE	0x01
+#define 	EXTENDED_MODIFY_DATA_POINTER	0x00
+#define 	EXTENDED_SDTR			0x01
+#define 	EXTENDED_EXTENDED_IDENTIFY	0x02	/* SCSI-I only */
+#define 	EXTENDED_WDTR			0x03
 #define SAVE_POINTERS		0x02
 #define RESTORE_POINTERS 	0x03
 #define DISCONNECT		0x04
@@ -96,6 +101,9 @@ extern const unsigned char scsi_command_size[8];
 #define LINKED_CMD_COMPLETE	0x0a
 #define LINKED_FLG_CMD_COMPLETE	0x0b
 #define BUS_DEVICE_RESET	0x0c
+
+#define INITIATE_RECOVERY	0x0f			/* SCSI-II only */
+#define RELEASE_RECOVERY	0x10			/* SCSI-II only */
 
 #define SIMPLE_QUEUE_TAG	0x20
 #define HEAD_OF_QUEUE_TAG	0x21
@@ -258,10 +266,14 @@ extern const unsigned char scsi_command_size[8];
 */
 
 typedef struct scsi_device {
-	unsigned char id, lun, index;
+        struct scsi_device * next; /* Used for linked list */
+	unsigned char id, lun;
+	int attached;          /* # of high level drivers attached to this */
 	int access_count;	/* Count of open channels/mounts */
 	struct wait_queue * device_wait;  /* Used to wait if device is busy */
 	struct Scsi_Host * host;
+	void (*scsi_request_fn)(void); /* Used to jumpstart things after an ioctl */
+	void *hostdata;                   /* available to low-level driver */
 	char type;
 	char scsi_level;
 	unsigned writeable:1;
@@ -275,7 +287,11 @@ typedef struct scsi_device {
 	unsigned tagged_supported:1; /* Supports SCSI-II tagged queing */
 	unsigned tagged_queue:1;   /*SCSI-II tagged queing enabled */
 	unsigned disconnect:1;     /* can disconnect */
+	unsigned soft_reset:1;		/* Uses soft reset option */
 	unsigned char current_tag; /* current tag */
+	unsigned sync:1;	/* Negotiate for sync transfers */
+	unsigned char sync_min_period;	/* Not less than this period */
+	unsigned char sync_max_offset;  /* Not greater than this offset */
 } Scsi_Device;
 /*
 	Use these to separate status msg and our bytes
@@ -295,7 +311,6 @@ typedef struct scsi_device {
 	These are the SCSI devices available on the system.
 */
 
-extern int NR_SCSI_DEVICES;
 extern Scsi_Device * scsi_devices;
 /*
 	Initializes all SCSI devices.  This scans all scsi busses.
@@ -307,10 +322,76 @@ struct scatterlist {
      char *  address; /* Location data is to be transferred to */
      char * alt_address; /* Location of actual if address is a 
 			    dma indirect buffer.  NULL otherwise */
-     unsigned short length;
+     unsigned int length;
      };
 
 #define ISA_DMA_THRESHOLD (0x00ffffff)
+#define CONTIGUOUS_BUFFERS(X,Y) ((X->b_data+X->b_size) == Y->b_data)
+
+
+/*
+ * These are the return codes for the abort and reset functions.  The mid-level
+ * code uses these to decide what to do next.  Each of the low level abort
+ * and reset functions must correctly indicate what it has done.
+ */
+
+/* We did not do anything.  Wait
+   some more for this command to complete, and if this does not work, try
+   something more serious. */ 
+#define SCSI_ABORT_SNOOZE 0
+
+/* This means that we were able to abort the command.  We have already
+   called the mid-level done function, and do not expect an interrupt that will
+   lead to another call to the mid-level done function for this command */
+#define SCSI_ABORT_SUCCESS 1
+
+/* We called for an abort of this command, and we should get an interrupt 
+   when this succeeds.  Thus we should not restore the timer for this
+   command in the mid-level abort function. */
+#define SCSI_ABORT_PENDING 2
+
+/* Unable to abort - command is currently on the bus.  Grin and bear it. */
+#define SCSI_ABORT_BUSY 3
+
+/* The command is not active in the low level code. Command probably
+   finished. */
+#define SCSI_ABORT_NOT_RUNNING 4
+
+/* Something went wrong.  The low level driver will indicate the correct
+ error condition when it calls scsi_done, so the mid-level abort function
+ can simply wait until this comes through */
+#define SCSI_ABORT_ERROR 5
+
+/* We do not know how to reset the bus, or we do not want to.  Bummer.
+   Anyway, just wait a little more for the command in question, and hope that
+   it eventually finishes.  If it never finishes, the SCSI device could
+   hang, so use this with caution. */
+#define SCSI_RESET_SNOOZE 0
+
+/* We do not know how to reset the bus, or we do not want to.  Bummer.
+   We have given up on this ever completing.  The mid-level code will
+   request sense information to decide how to proceed from here. */
+#define SCSI_RESET_PUNT 1
+
+/* This means that we were able to reset the bus.  We have restarted all of
+   the commands that should be restarted, and we should be able to continue
+   on normally from here.  We do not expect any interrupts that will return
+   DID_RESET to any of the other commands in the host_queue, and the mid-level
+   code does not need to do anything special to keep the commands alive. */
+#define SCSI_RESET_SUCCESS 2
+
+/* We called for an reset of this bus, and we should get an interrupt 
+   when this succeeds.  Each command should get it's own status
+   passed up to scsi_done, but this has not happened yet. */
+#define SCSI_RESET_PENDING 3
+
+/* We did a reset, but do not expect an interrupt to signal DID_RESET.
+   This tells the upper level code to request the sense info, and this
+   should keep the command alive. */
+#define SCSI_RESET_WAKEUP 4
+
+/* Something went wrong, and we do not know how to fix it. */
+#define SCSI_RESET_ERROR 5
 
 void *   scsi_malloc(unsigned int);
 int      scsi_free(void *, unsigned int);
@@ -337,7 +418,8 @@ typedef struct scsi_pointer {
 
 typedef struct scsi_cmnd {
 	struct Scsi_Host * host;
-	unsigned char target, lun,  index;
+	Scsi_Device * device;
+	unsigned char target, lun;
 	struct scsi_cmnd *next, *prev;	
 
 /* These elements define the operation we are about to perform */
@@ -352,6 +434,8 @@ typedef struct scsi_cmnd {
 				       sense info */
 	unsigned short use_sg;  /* Number of pieces of scatter-gather */
 	unsigned short sglist_len;  /* size of malloc'd scatter-gather list */
+	unsigned short abort_reason;  /* If the mid-level code requests an
+					 abort, this is the reason. */
 	unsigned bufflen;     /* Size of data buffer */
 	void *buffer;   /* Data buffer */
 
@@ -389,7 +473,6 @@ typedef struct scsi_cmnd {
 	/* Low-level done function - can be used by low-level driver to point
 	 to completion function.  Not used by mid/upper level code. */
 	void (*scsi_done)(struct scsi_cmnd *);  
-
 	void (*done)(struct scsi_cmnd *);  /* Mid-level done function */
 
 /* The following fields can be written to by the host specific code. 
@@ -408,6 +491,7 @@ typedef struct scsi_cmnd {
 	int result;                   /* Status code from lower level driver */
 
 	unsigned char tag;		/* SCSI-II queued command tag */
+	unsigned long pid;		/* Process ID, starts at 0 */
 	} Scsi_Cmnd;		 
 
 /*
@@ -423,36 +507,18 @@ extern void scsi_do_cmd (Scsi_Cmnd *, const void *cmnd ,
                   int timeout, int retries);
 
 
-extern Scsi_Cmnd * allocate_device(struct request **, int, int);
+extern Scsi_Cmnd * allocate_device(struct request **, Scsi_Device *, int);
 
-extern Scsi_Cmnd * request_queueable(struct request *, int);
-
+extern Scsi_Cmnd * request_queueable(struct request *, Scsi_Device *);
 extern int scsi_reset (Scsi_Cmnd *);
 
 extern int max_scsi_hosts;
-extern int MAX_SD, NR_SD, MAX_ST, NR_ST, MAX_SR, NR_SR, NR_SG, MAX_SG;
-extern unsigned long sd_init(unsigned long, unsigned long);
-extern unsigned long sd_init1(unsigned long, unsigned long);
-extern void sd_attach(Scsi_Device *);
-
-extern unsigned long sr_init(unsigned long, unsigned long);
-extern unsigned long sr_init1(unsigned long, unsigned long);
-extern void sr_attach(Scsi_Device *);
-
-extern unsigned long st_init(unsigned long, unsigned long);
-extern unsigned long st_init1(unsigned long, unsigned long);
-extern void st_attach(Scsi_Device *);
-
-extern unsigned long sg_init(unsigned long, unsigned long);
-extern unsigned long sg_init1(unsigned long, unsigned long);
-extern void sg_attach(Scsi_Device *);
 
 #if defined(MAJOR_NR) && (MAJOR_NR != SCSI_TAPE_MAJOR)
 static void end_scsi_request(Scsi_Cmnd * SCpnt, int uptodate, int sectors)
 {
 	struct request * req;
 	struct buffer_head * bh;
-	struct task_struct * p;
 
 	req = &SCpnt->request;
 	req->errors = 0;
@@ -484,14 +550,11 @@ static void end_scsi_request(Scsi_Cmnd * SCpnt, int uptodate, int sectors)
 	  return;
 	};
 	DEVICE_OFF(req->dev);
-	if ((p = req->waiting) != NULL) {
-		req->waiting = NULL;
-		p->state = TASK_RUNNING;
-		if (p->counter > current->counter)
-			need_resched = 1;
+	if (req->sem != NULL) {
+		up(req->sem);
 	}
 	req->dev = -1;
-	wake_up(&scsi_devices[SCpnt->index].device_wait);
+	wake_up(&SCpnt->device->device_wait);
 	return;
 }
 
@@ -516,7 +579,7 @@ static void end_scsi_request(Scsi_Cmnd * SCpnt, int uptodate, int sectors)
 
 #define SCSI_SLEEP(QUEUE, CONDITION) {				\
 	if (CONDITION) {					\
-                struct wait_queue wait = { current, NULL};      \
+		struct wait_queue wait = { current, NULL};	\
 		add_wait_queue(QUEUE, &wait);			\
 sleep_repeat:							\
 		current->state = TASK_UNINTERRUPTIBLE;		\

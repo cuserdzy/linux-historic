@@ -67,17 +67,30 @@
  *
  * 2.  With command line overrides - pas16=port,irq may be 
  *     used on the LILO command line to override the defaults.
- *     NOTE:  untested.
  *
  * 3.  With the PAS16_OVERRIDE compile time define.  This is 
  *     specified as an array of address, irq tupples.  Ie, for
  *     one board at the default 0x388 address, IRQ10, I could say 
  *     -DPAS16_OVERRIDE={{0x388, 10}}
- *     NOTE:  Also untested.
+ *     NOTE:  Untested.
  *	
  *     Note that if the override methods are used, place holders must
  *     be specified for other boards in the system.
- * 
+ *
+ *
+ * Configuration notes :
+ *   The current driver does not support interrupt sharing with the
+ *   sound portion of the card.  If you use the same irq for the
+ *   scsi port and sound you will have problems.  Either use
+ *   a different irq for the scsi port or don't use interrupts
+ *   for the scsi port.
+ *
+ *   If you have problems with your card not being recognized, use
+ *   the LILO command line override.  Try to get it recognized without
+ *   interrupts.  Ie, for a board at the default 0x388 base port,
+ *   boot: linux pas16=0x388,255
+ *
+ *     (255 is the IRQ_NONE constant in NCR5380.h)
  */
  
 #include <asm/system.h>
@@ -91,7 +104,7 @@
 #define AUTOPROBE_IRQ
 #include "NCR5380.h"
 #include "constants.h"
-
+#include "sd.h"
 
 
 int scsi_irq_translate[] =
@@ -174,12 +187,14 @@ void	enable_board( int  board_num,  unsigned short port )
  *
  * Inputs : port - base address of the board,
  *	    irq - irq to assign to the SCSI port
+ *	    force_irq - set it even if it conflicts with sound driver
  *
  */
 
-void	init_board( unsigned short io_port, int irq )
+void	init_board( unsigned short io_port, int irq, int force_irq )
 {
 	unsigned int	tmp;
+	unsigned int	pas_irq_code;
 
         /* Initialize the SCSI part of the board */
 
@@ -192,12 +207,25 @@ void	init_board( unsigned short io_port, int irq )
 	/* Set the SCSI interrupt pointer without mucking up the sound
 	 * interrupt pointer in the same byte.
 	 */
+	pas_irq_code = ( irq < 16 ) ? scsi_irq_translate[irq] : 0;
 	tmp = inb( io_port + IO_CONFIG_3 );
-	tmp = (  tmp & 0x0f ) | ( scsi_irq_translate[irq] << 4 );
-	outb( tmp, io_port + IO_CONFIG_3 );
 
-	/* Set up the drive parameters and enable 5380 interrupts */
-	outb( 0x6d, io_port + SYS_CONFIG_4 );
+	if( (( tmp & 0x0f ) == pas_irq_code) && pas_irq_code > 0 
+	    && !force_irq )
+	{
+	    printk( "pas16: WARNING: Can't use same irq as sound "
+		    "driver -- interrupts diabled\n" );
+	    /* Set up the drive parameters, disable 5380 interrupts */
+	    outb( 0x4d, io_port + SYS_CONFIG_4 );
+	}
+	else
+	{
+	    tmp = (  tmp & 0x0f ) | ( pas_irq_code << 4 );
+	    outb( tmp, io_port + IO_CONFIG_3 );
+
+	    /* Set up the drive parameters and enable 5380 interrupts */
+	    outb( 0x6d, io_port + SYS_CONFIG_4 );
+	}
 }
 
 
@@ -275,22 +303,20 @@ void pas16_setup(char *str, int *ints) {
 	}
 }
 
-static struct sigaction pas16_sigaction =  { pas16_intr, 0, SA_INTERRUPT , NULL };
-
 /* 
- * Function : int pas16_detect(int hostno)
+ * Function : int pas16_detect(Scsi_Host_Template * tpnt)
  *
  * Purpose : detects and initializes PAS16 controllers
  *	that were autoprobed, overriden on the LILO command line, 
  *	or specified at compile time.
  *
- * Inputs : hostno - id of this SCSI adapter.
+ * Inputs : tpnt - template for this SCSI adapter.
  * 
  * Returns : 1 if a host adapter was found, 0 if not.
  *
  */
 
-int pas16_detect(int hostno) {
+int pas16_detect(Scsi_Host_Template * tpnt) {
     static int current_override = 0;
     static unsigned short current_base = 0;
     struct Scsi_Host *instance;
@@ -304,35 +330,35 @@ int pas16_detect(int hostno) {
 	{
 	    io_port = overrides[current_override].io_port;
 	    enable_board( current_override, io_port );
-	    init_board( io_port, overrides[current_override].irq );
+	    init_board( io_port, overrides[current_override].irq, 1 );
 	}
 	else
 	    for (; !io_port && (current_base < NO_BASES); ++current_base) {
 #if (PDEBUG & PDEBUG_INIT)
-    printk("scsi%d : probing io_port %04x\n", hostno, (unsigned int) bases[current_base].io_port);
+    printk("scsi-pas16 : probing io_port %04x\n", (unsigned int) bases[current_base].io_port);
 #endif
 	        if ( !bases[current_base].noauto &&
 		     pas16_hw_detect( current_base ) ){
 		        io_port = bases[current_base].io_port;
-			init_board( io_port, default_irqs[ current_base ] ); 
+			init_board( io_port, default_irqs[ current_base ], 0 ); 
 #if (PDEBUG & PDEBUG_INIT)
-		        printk("scsi%d : detected board.\n", hostno);
+		        printk("scsi-pas16 : detected board.\n");
 #endif
 		}
     }
 
 
 #if defined(PDEBUG) && (PDEBUG & PDEBUG_INIT)
-	printk("scsi%d : io_port = %04x\n", hostno, (unsigned int) io_port);
+	printk("scsi-pas16 : io_port = %04x\n", (unsigned int) io_port);
 #endif
 
 	if (!io_port)
 	    break;
 
-	instance = scsi_register (hostno, sizeof(struct NCR5380_hostdata));
+	instance = scsi_register (tpnt, sizeof(struct NCR5380_hostdata));
 	instance->io_port = io_port;
 
-	NCR5380_init(instance);
+	NCR5380_init(instance, 0);
 
 	if (overrides[current_override].irq != IRQ_AUTO)
 	    instance->irq = overrides[current_override].irq;
@@ -340,19 +366,21 @@ int pas16_detect(int hostno) {
 	    instance->irq = NCR5380_probe_irq(instance, PAS16_IRQS);
 
 	if (instance->irq != IRQ_NONE) 
-	    if (irqaction (instance->irq, &pas16_sigaction)) {
+	    if (request_irq(instance->irq, pas16_intr, SA_INTERRUPT, "pas16")) {
 		printk("scsi%d : IRQ%d not free, interrupts disabled\n", 
-		    hostno, instance->irq);
+		    instance->host_no, instance->irq);
 		instance->irq = IRQ_NONE;
 	    } 
 
 	if (instance->irq == IRQ_NONE) {
-	    printk("scsi%d : interrupts not enabled. for better interactive performance,\n", hostno);
-	    printk("scsi%d : please jumper the board for a free IRQ.\n", hostno);
+	    printk("scsi%d : interrupts not enabled. for better interactive performance,\n", instance->host_no);
+	    printk("scsi%d : please jumper the board for a free IRQ.\n", instance->host_no);
+            /* Disable 5380 interrupts, leave drive params the same */
+            outb( 0x4d, io_port + SYS_CONFIG_4 );
 	}
 
 #if defined(PDEBUG) && (PDEBUG & PDEBUG_INIT)
-	printk("scsi%d : irq = %d\n", hostno, instance->irq);
+	printk("scsi%d : irq = %d\n", instance->host_no, instance->irq);
 #endif
 
 	printk("scsi%d : at 0x%04x", instance->host_no, (int) 
@@ -368,13 +396,12 @@ int pas16_detect(int hostno) {
 
 	++current_override;
 	++count;
-	++hostno;
     }
     return count;
 }
 
 /*
- * Function : int pas16_biosparam(int size, int dev, int *ip)
+ * Function : int pas16_biosparam(Disk *disk, int dev, int *ip)
  *
  * Purpose : Generates a BIOS / DOS compatable H-C-S mapping for 
  *	the specified device / size.
@@ -393,8 +420,9 @@ int pas16_detect(int hostno) {
  * and matching the H_C_S coordinates to what DOS uses.
  */
 
-int pas16_biosparam(int size, int dev, int * ip)
+int pas16_biosparam(Disk * disk, int dev, int * ip)
 {
+  int size = disk->capacity;
   ip[0] = 64;
   ip[1] = 32;
   ip[2] = size >> 11;

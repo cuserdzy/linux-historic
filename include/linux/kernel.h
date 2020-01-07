@@ -7,6 +7,7 @@
 
 #ifdef __KERNEL__
 
+#include <stdarg.h>
 #include <linux/linkage.h>
 
 #define INT_MAX		((int)(~0U>>1))
@@ -40,14 +41,15 @@ NORET_TYPE void panic(const char * fmt, ...)
 	__attribute__ ((NORET_AND format (printf, 1, 2)));
 NORET_TYPE void do_exit(long error_code)
 	ATTRIB_NORET;
-unsigned long simple_strtoul(const char *,char **,unsigned int);
-int sprintf(char * buf, const char * fmt, ...);
+extern unsigned long simple_strtoul(const char *,char **,unsigned int);
+extern int sprintf(char * buf, const char * fmt, ...);
+extern int vsprintf(char *buf, const char *, va_list);
 
-int session_of_pgrp(int pgrp);
+extern int session_of_pgrp(int pgrp);
 
-int kill_proc(int pid, int sig, int priv);
-int kill_pg(int pgrp, int sig, int priv);
-int kill_sl(int sess, int sig, int priv);
+extern int kill_proc(int pid, int sig, int priv);
+extern int kill_pg(int pgrp, int sig, int priv);
+extern int kill_sl(int sess, int sig, int priv);
 
 asmlinkage int printk(const char * fmt, ...)
 	__attribute__ ((format (printf, 1, 2)));
@@ -58,9 +60,14 @@ asmlinkage int printk(const char * fmt, ...)
  * BSD-style accounting where the process is flagged if it uses root
  * privs).  The implication of this is that you should do normal
  * permissions checks first, and check suser() last.
+ *
+ * "suser()" checks against the effective user id, while "fsuser()"
+ * is used for file permission checking and checks against the fsuid..
  */
 #define suser() (current->euid == 0)
+#define fsuser() (current->fsuid == 0)
 
+extern int splx (int new_ipl);
 #endif /* __KERNEL__ */
 
 #define SI_LOAD_SHIFT	16

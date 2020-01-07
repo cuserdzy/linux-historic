@@ -116,7 +116,7 @@
 #define AUTOPROBE_IRQ
 #include "NCR5380.h"
 #include "constants.h"
-
+#include "sd.h"
 
 
 
@@ -178,22 +178,20 @@ void t128_setup(char *str, int *ints) {
 	}
 }
 
-static struct sigaction t128_sigaction =  { t128_intr, 0, SA_INTERRUPT , NULL };
-
 /* 
- * Function : int t128_detect(int hostno)
+ * Function : int t128_detect(Scsi_Host_Template * tpnt)
  *
  * Purpose : detects and initializes T128,T128F, or T228 controllers
  *	that were autoprobed, overriden on the LILO command line, 
  *	or specified at compile time.
  *
- * Inputs : hostno - id of this SCSI adapter.
+ * Inputs : tpnt - template for this SCSI adapter.
  * 
  * Returns : 1 if a host adapter was found, 0 if not.
  *
  */
 
-int t128_detect(int hostno) {
+int t128_detect(Scsi_Host_Template * tpnt) {
     static int current_override = 0, current_base = 0;
     struct Scsi_Host *instance;
     unsigned char *base;
@@ -207,7 +205,7 @@ int t128_detect(int hostno) {
 	else 
 	    for (; !base && (current_base < NO_BASES); ++current_base) {
 #if (TDEBUG & TDEBUG_INIT)
-    printk("scsi%d : probing address %08x\n", hostno, (unsigned int) bases[current_base].address);
+    printk("scsi : probing address %08x\n", (unsigned int) bases[current_base].address);
 #endif
 		for (sig = 0; sig < NO_SIGNATURES; ++sig) 
 		    if (!bases[current_base].noauto && !memcmp 
@@ -215,23 +213,23 @@ int t128_detect(int hostno) {
 			signatures[sig].string, strlen(signatures[sig].string))) {
 			base = bases[current_base].address;
 #if (TDEBUG & TDEBUG_INIT)
-			printk("scsi%d : detected board.\n", hostno);
+			printk("scsi-t128 : detected board.\n");
 #endif
 			break;
 		    }
 	    }
 
 #if defined(TDEBUG) && (TDEBUG & TDEBUG_INIT)
-	printk("scsi%d : base = %08x\n", hostno, (unsigned int) base);
+	printk("scsi-t128 : base = %08x\n", (unsigned int) base);
 #endif
 
 	if (!base)
 	    break;
 
-	instance = scsi_register (hostno, sizeof(struct NCR5380_hostdata));
+	instance = scsi_register (tpnt, sizeof(struct NCR5380_hostdata));
 	instance->base = base;
 
-	NCR5380_init(instance);
+	NCR5380_init(instance, 0);
 
 	if (overrides[current_override].irq != IRQ_AUTO)
 	    instance->irq = overrides[current_override].irq;
@@ -239,19 +237,19 @@ int t128_detect(int hostno) {
 	    instance->irq = NCR5380_probe_irq(instance, T128_IRQS);
 
 	if (instance->irq != IRQ_NONE) 
-	    if (irqaction (instance->irq, &t128_sigaction)) {
+	    if (request_irq(instance->irq, t128_intr, SA_INTERRUPT, "t128")) {
 		printk("scsi%d : IRQ%d not free, interrupts disabled\n", 
-		    hostno, instance->irq);
+		    instance->host_no, instance->irq);
 		instance->irq = IRQ_NONE;
 	    } 
 
 	if (instance->irq == IRQ_NONE) {
-	    printk("scsi%d : interrupts not enabled. for better interactive performance,\n", hostno);
-	    printk("scsi%d : please jumper the board for a free IRQ.\n", hostno);
+	    printk("scsi%d : interrupts not enabled. for better interactive performance,\n", instance->host_no);
+	    printk("scsi%d : please jumper the board for a free IRQ.\n", instance->host_no);
 	}
 
 #if defined(TDEBUG) && (TDEBUG & TDEBUG_INIT)
-	printk("scsi%d : irq = %d\n", hostno, instance->irq);
+	printk("scsi%d : irq = %d\n", instance->host_no, instance->irq);
 #endif
 
 	printk("scsi%d : at 0x%08x", instance->host_no, (int) 
@@ -267,13 +265,12 @@ int t128_detect(int hostno) {
 
 	++current_override;
 	++count;
-	++hostno;
     }
     return count;
 }
 
 /*
- * Function : int t128_biosparam(int size, int dev, int *ip)
+ * Function : int t128_biosparam(Disk * disk, int dev, int *ip)
  *
  * Purpose : Generates a BIOS / DOS compatable H-C-S mapping for 
  *	the specified device / size.
@@ -292,8 +289,9 @@ int t128_detect(int hostno) {
  * and matching the H_C_S coordinates to what DOS uses.
  */
 
-int t128_biosparam(int size, int dev, int * ip)
+int t128_biosparam(Disk * disk, int dev, int * ip)
 {
+  int size = disk->capacity;
   ip[0] = 64;
   ip[1] = 32;
   ip[2] = size >> 11;
@@ -319,10 +317,16 @@ static inline int NCR5380_pread (struct Scsi_Host *instance, unsigned char *dst,
 	T_DATA_REG_OFFSET), *d = dst;
     register i = len;
 
-    while (!(instance->base[T_STATUS_REG_OFFSET]) & T_ST_RDY);
 
-    for (; i; --i) 
+#if 0
+    for (; i; --i) {
+	while (!(instance->base[T_STATUS_REG_OFFSET]) & T_ST_RDY);
+#else
+    while (!(instance->base[T_STATUS_REG_OFFSET]) & T_ST_RDY);
+    for (; i; --i) {
+#endif
 	*d++ = *reg;
+    }
 
     if (*(instance->base + T_STATUS_REG_OFFSET) & T_ST_TIM) {
 	unsigned char tmp;
@@ -331,7 +335,7 @@ static inline int NCR5380_pread (struct Scsi_Host *instance, unsigned char *dst,
 	tmp = *foo;
 	*foo = tmp | T_CR_CT;
 	*foo = tmp;
-	printk("scsi%d : watchdog timer fired in NCR5480_pread()\n",
+	printk("scsi%d : watchdog timer fired in NCR5380_pread()\n",
 	    instance->host_no);
 	return -1;
     } else
@@ -357,9 +361,15 @@ static inline int NCR5380_pwrite (struct Scsi_Host *instance, unsigned char *src
 	T_DATA_REG_OFFSET), *s = src;
     register i = len;
 
+#if 0
+    for (; i; --i) {
+	while (!(instance->base[T_STATUS_REG_OFFSET]) & T_ST_RDY);
+#else
     while (!(instance->base[T_STATUS_REG_OFFSET]) & T_ST_RDY);
-    for (; i; --i)
+    for (; i; --i) {
+#endif
 	*reg = *s++;
+    }
 
     if (*(instance->base + T_STATUS_REG_OFFSET) & T_ST_TIM) {
 	unsigned char tmp;
@@ -368,7 +378,7 @@ static inline int NCR5380_pwrite (struct Scsi_Host *instance, unsigned char *src
 	tmp = *foo;
 	*foo = tmp | T_CR_CT;
 	*foo = tmp;
-	printk("scsi%d : watchdog timer fired in NCR5480_pwrite()\n",
+	printk("scsi%d : watchdog timer fired in NCR5380_pwrite()\n",
 	    instance->host_no);
 	return -1;
     } else 

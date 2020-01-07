@@ -55,9 +55,6 @@
  * $Log: generic_NCR5380.c,v $
  */
 
-#include <linux/config.h>
-#if defined(CONFIG_SCSI_GENERIC_NCR5380)
-/* Standard option */
 #define AUTOPROBE_IRQ
 
 #include <asm/system.h>
@@ -107,22 +104,19 @@ void generic_NCR5380_setup(char *str, int *ints) {
 	}
 }
 
-static struct sigaction sa =  { generic_NCR5380_intr, 0, 
-    SA_INTERRUPT , NULL };
-
 /* 
- * Function : int generic_NCR5380_detect(int hostno)
+ * Function : int generic_NCR5380_detect(Scsi_Host_Templace * tpnt)
  *
  * Purpose : initializes generic NCR5380 driver based on the 
  *	command line / compile time port and irq definitions.
  *
- * Inputs : hostno - id of this SCSI adapter.
+ * Inputs : tpnt - template for this SCSI adapter.
  * 
  * Returns : 1 if a host adapter was found, 0 if not.
  *
  */
 
-int generic_NCR5380_detect(int hostno) {
+int generic_NCR5380_detect(Scsi_Host_Template * tpnt) {
     static int current_override = 0;
     int count;
     struct Scsi_Host *instance;
@@ -131,10 +125,10 @@ int generic_NCR5380_detect(int hostno) {
 	if (!(overrides[current_override].port))
 	    continue;
 
-	instance = scsi_register (hostno, sizeof(struct NCR5380_hostdata));
+	instance = scsi_register (tpnt, sizeof(struct NCR5380_hostdata));
 	instance->io_port = overrides[current_override].port;
 
-	NCR5380_init(instance);
+	NCR5380_init(instance, 0);
 
 	if (overrides[current_override].irq != IRQ_AUTO)
 	    instance->irq = overrides[current_override].irq;
@@ -142,15 +136,15 @@ int generic_NCR5380_detect(int hostno) {
 	    instance->irq = NCR5380_probe_irq(instance, 0xffff);
 
 	if (instance->irq != IRQ_NONE) 
-	    if (irqaction (instance->irq, &sa)) {
+	    if (request_irq(instance->irq, generic_NCR5380_intr, SA_INTERRUPT, "NCR5380")) {
 		printk("scsi%d : IRQ%d not free, interrupts disabled\n", 
-		    hostno, instance->irq);
+		    instance->host_no, instance->irq);
 		instance->irq = IRQ_NONE;
 	    } 
 
 	if (instance->irq == IRQ_NONE) {
-	    printk("scsi%d : interrupts not enabled. for better interactive performance,\n", hostno);
-	    printk("scsi%d : please jumper the board for a free IRQ.\n", hostno);
+	    printk("scsi%d : interrupts not enabled. for better interactive performance,\n", instance->host_no);
+	    printk("scsi%d : please jumper the board for a free IRQ.\n", instance->host_no);
 	}
 
 	printk("scsi%d : at port %d", instance->host_no, instance->io_port);
@@ -175,5 +169,3 @@ const char * generic_NCR5380_info (void) {
 }
 
 #include "NCR5380.c"
-
-#endif /* defined(CONFIG_SCSI_GENERIC_NCR5380) */

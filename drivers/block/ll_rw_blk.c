@@ -19,10 +19,6 @@
 
 #include "blk.h"
 
-#ifdef CONFIG_SBPCD
-extern u_long sbpcd_init(u_long, u_long);
-#endif CONFIG_SBPCD
-
 /*
  * The request-struct contains all necessary data
  * to load a nr of sectors into memory
@@ -129,6 +125,7 @@ int is_read_only(int dev)
 
 	major = MAJOR(dev);
 	minor = MINOR(dev);
+	if ( major == FLOPPY_MAJOR && floppy_is_wp( minor) ) return 1;
 	if (major < 0 || major >= MAX_BLKDEV) return 0;
 	return ro_bits[major][minor >> 5] & (1 << (minor & 31));
 }
@@ -156,7 +153,7 @@ static void add_request(struct blk_dev_struct * dev, struct request * req)
 	req->next = NULL;
 	cli();
 	if (req->bh)
-		req->bh->b_dirt = 0;
+		mark_buffer_clean(req->bh);
 	if (!(tmp = dev->current_request)) {
 		dev->current_request = req;
 		(dev->request_fn)();
@@ -205,6 +202,7 @@ static void make_request(int major,int rw, struct buffer_head * bh)
 	if (blk_size[major])
 		if (blk_size[major][MINOR(bh->b_dev)] < (sector + count)>>1) {
 			bh->b_dirt = bh->b_uptodate = 0;
+			bh->b_req = 0;
 			return;
 		}
 	lock_buffer(bh);
@@ -229,6 +227,7 @@ repeat:
  * to add links to the top entry for scsi devices.
  */
 	if ((major == HD_MAJOR
+	     || major == FLOPPY_MAJOR
 	     || major == SCSI_DISK_MAJOR
 	     || major == SCSI_CDROM_MAJOR)
 	    && (req = blk_dev[major].current_request))
@@ -237,31 +236,31 @@ repeat:
 			req = req->next;
 		while (req) {
 			if (req->dev == bh->b_dev &&
-			    !req->waiting &&
+			    !req->sem &&
 			    req->cmd == rw &&
 			    req->sector + req->nr_sectors == sector &&
-			    req->nr_sectors < 254)
+			    req->nr_sectors < 244)
 			{
 				req->bhtail->b_reqnext = bh;
 				req->bhtail = bh;
 				req->nr_sectors += count;
-				bh->b_dirt = 0;
+				mark_buffer_clean(bh);
 				sti();
 				return;
 			}
 
 			if (req->dev == bh->b_dev &&
-			    !req->waiting &&
+			    !req->sem &&
 			    req->cmd == rw &&
 			    req->sector - count == sector &&
-			    req->nr_sectors < 254)
+			    req->nr_sectors < 244)
 			{
 			    	req->nr_sectors += count;
 			    	bh->b_reqnext = req->bh;
 			    	req->buffer = bh->b_data;
 			    	req->current_nr_sectors = count;
 			    	req->sector = sector;
-			    	bh->b_dirt = 0;
+				mark_buffer_clean(bh);
 			    	req->bh = bh;
 			    	sti();
 			    	return;
@@ -296,7 +295,7 @@ repeat:
 	req->nr_sectors = count;
 	req->current_nr_sectors = count;
 	req->buffer = bh->b_data;
-	req->waiting = NULL;
+	req->sem = NULL;
 	req->bh = bh;
 	req->bhtail = bh;
 	req->next = NULL;
@@ -307,6 +306,7 @@ void ll_rw_page(int rw, int dev, int page, char * buffer)
 {
 	struct request * req;
 	unsigned int major = MAJOR(dev);
+	struct semaphore sem = MUTEX_LOCKED;
 
 	if (major >= MAX_BLKDEV || !(blk_dev[major].request_fn)) {
 		printk("Trying to read nonexistent block-device %04x (%d)\n",dev,page*8);
@@ -328,12 +328,11 @@ void ll_rw_page(int rw, int dev, int page, char * buffer)
 	req->nr_sectors = 8;
 	req->current_nr_sectors = 8;
 	req->buffer = buffer;
-	req->waiting = current;
+	req->sem = &sem;
 	req->bh = NULL;
 	req->next = NULL;
-	current->state = TASK_SWAPPING;
 	add_request(major+blk_dev,req);
-	schedule();
+	down(&sem);
 }
 
 /* This function can be used to request a number of buffers from a block
@@ -374,7 +373,7 @@ void ll_rw_block(int rw, int nr, struct buffer_head * bh[])
 			correct_size = i;
 	}
 
-	/* Verify requested block sizees.  */
+	/* Verify requested block sizes.  */
 	for (i = 0; i < nr; i++) {
 		if (bh[i] && bh[i]->b_size != correct_size) {
 			printk(
@@ -435,6 +434,7 @@ void ll_rw_swap_file(int rw, int dev, unsigned int *b, int nb, char *buf)
 	int buffersize;
 	struct request * req;
 	unsigned int major = MAJOR(dev);
+	struct semaphore sem = MUTEX_LOCKED;
 
 	if (major >= MAX_BLKDEV || !(blk_dev[major].request_fn)) {
 		printk("ll_rw_swap_file: trying to swap nonexistent block-device\n");
@@ -463,12 +463,11 @@ void ll_rw_swap_file(int rw, int dev, unsigned int *b, int nb, char *buf)
 		req->nr_sectors = buffersize >> 9;
 		req->current_nr_sectors = buffersize >> 9;
 		req->buffer = buf;
-		req->waiting = current;
+		req->sem = &sem;
 		req->bh = NULL;
 		req->next = NULL;
-		current->state = TASK_UNINTERRUPTIBLE;
 		add_request(major+blk_dev,req);
-		schedule();
+		down(&sem);
 	}
 }
 

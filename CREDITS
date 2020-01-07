@@ -34,7 +34,7 @@ S: 76297 Stutensee
 S: Germany
 
 N: Donald Becker
-E: becker@super.org
+E: becker@cesdis.gsfc.nasa.gov
 D: General low-level networking hacker
 D: Most of the ethercard drivers
 D: Original author of the NFS server
@@ -53,7 +53,6 @@ S: The Netherlands
 
 N: Hennus Bergman
 E: hennus@sky.nl.mugnet.org  [My uucp-fed Linux box at home]
-E: csg279@wing.rug.nl        [Alternate address]
 D: Author and maintainer of the QIC-02 tape driver
 S: The Netherlands
 
@@ -107,6 +106,7 @@ S: Bellevue WA 98007
 S: USA
 
 N: Alan Cox
+E: A.Cox@swansea.ac.uk
 E: iiitac@pyr.swan.ac.uk
 E: gw4pts@gw4pts.ampr.org
 E: GW4PTS@GB7SWN (packet radio)
@@ -129,7 +129,7 @@ D: Second extended file system co-designer
 
 N: Thomas Dunbar
 E: tdunbar@vtaix.cc.vt.edu
-D: TeX & METAFONT hacking/maintainence
+D: TeX & METAFONT hacking/maintenance
 S: Dean, Graduate School
 S: Virginia Tech
 S: Blacksburg, Virginia 24061
@@ -185,6 +185,14 @@ S: Australia
 N: Ralf Flaxa
 E: rfflaxa@immd4.informatik.uni-erlangen.de
 D: The Linux Support Team Erlangen
+
+N: Lawrence Foard
+E: entropy@world.std.com
+D: Floppy track reading, fs code
+S: Suite #108 
+S: 217 Park Ave.
+S: Worcester Ma 01609
+S: USA
 
 N: Nigel Gamble
 E: nigel%gamble.uucp@gate.net
@@ -351,6 +359,13 @@ S: 249 Nichols Avenue
 S: Syracuse, New York 13206
 S: USA
 
+N: Dirk Melchers
+E: dirk@merlin.nbg.sub.org
+D: 8 bit XT hard disk driver for OMTI5520
+S: Branderweg 4
+S: D-91058 Erlangen
+S: Germany
+
 N: Craig Metz
 E: cmetz@tjhsst.edu
 D: Some of PAS 16 mixer & PCM support
@@ -403,6 +418,14 @@ S: Dragonvagen 1 A 13
 S: FIN-00330 Helsingfors
 S: Finland
 
+N: David C. Niemi
+E: niemidc@slma.com
+D: FSSTND, The XFree86 Project
+D: DMA memory support, floppy driver
+S: 2364 Old Trail Drive
+S: Reston, Virginia 22091
+S: USA
+
 N: Kai Petzke
 E: wpp@marie.physik.tu-berlin.de
 D: Driver for Laser Magnetic Storage CD-ROM
@@ -432,9 +455,23 @@ S: Gaildorfer Str. 27
 S: 7000 Stuttgart 50
 S: Germany
 
+N: Stephen Rothwell
+E: sfr@pdact.pd.necisa.oz.au
+D: Boot/setup/build work for setup > 2K
+S: 59 Bugden Ave
+S: Gowrie ACT 2904
+S: Australia
+
 N: Robert Sanders
 E: gt8134b@prism.gatech.edu
 D: Dosemu
+
+N: Hannu Savolainen
+E: hannu@voxware.pp.fi
+D: Kernel sound drivers
+S: Pallaksentie 4 A 2
+S: 00970 Helsinki
+S: Finland
 
 N: Peter De Schrijver
 E: stud11@cc4.kuleuven.ac.be
@@ -531,6 +568,14 @@ S: Obere Heerbergstrasse 17
 S: 97078 Wuerzburg
 S: Germany
 
+N: Patrick Volkerding
+E: volkerdi@ftp.cdrom.com
+D: Produced the Slackware distribution, updated the SVGAlib
+D: patches for ghostscript, worked on color 'ls', etc.
+S: 301 15th Street S.
+S: Moorhead, MN 56560
+S: USA 
+
 N: Juergen Weigert
 E: jnweiger@immd4.informatik.uni-erlangen.de
 D: The Linux Support Team Erlangen
@@ -543,7 +588,7 @@ D: HOWTO coordinator and writer
 D: Maintainer of sunsite.unc.edu Linux doc archives
 D: Moderator, comp.os.linux.announce
 S: 205 Gray Street NE
-S: Wilson, North Caroilina 27893 
+S: Wilson, North Carolina 27893 
 S: USA
 
 
@@ -599,9 +644,10 @@ S: New York, New York 10025
 S: USA
 
 N: Eric Youngdale
+E: ericy@cais.com
 E: eric@tantalus.nrl.navy.mil
 D: General kernel hacker
-D: SCSI iso9660 and ELF
+D: SCSI, iso9660, ELF, ibcs2, clustering in buffer cache, generalized mmap.
 S: 17 Canterbury Square #101
 S: Alexandria, Virginia 22304
 S: USA

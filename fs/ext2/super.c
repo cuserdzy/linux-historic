@@ -25,8 +25,6 @@
 #include <linux/string.h>
 #include <linux/locks.h>
 
-extern int vsprintf (char *, const char *, va_list);
-
 void ext2_error (struct super_block * sb, const char * function,
 		 const char * fmt, ...)
 {
@@ -36,7 +34,7 @@ void ext2_error (struct super_block * sb, const char * function,
 	if (!(sb->s_flags & MS_RDONLY)) {
 		sb->u.ext2_sb.s_mount_state |= EXT2_ERROR_FS;
 		sb->u.ext2_sb.s_es->s_state |= EXT2_ERROR_FS;
-		sb->u.ext2_sb.s_sbh->b_dirt = 1;
+		mark_buffer_dirty(sb->u.ext2_sb.s_sbh, 1);
 		sb->s_dirt = 1;
 	}
 	va_start (args, fmt);
@@ -66,7 +64,7 @@ NORET_TYPE void ext2_panic (struct super_block * sb, const char * function,
 	if (!(sb->s_flags & MS_RDONLY)) {
 		sb->u.ext2_sb.s_mount_state |= EXT2_ERROR_FS;
 		sb->u.ext2_sb.s_es->s_state |= EXT2_ERROR_FS;
-		sb->u.ext2_sb.s_sbh->b_dirt = 1;
+		mark_buffer_dirty(sb->u.ext2_sb.s_sbh, 1);
 		sb->s_dirt = 1;
 	}
 	va_start (args, fmt);
@@ -96,11 +94,8 @@ void ext2_put_super (struct super_block * sb)
 	lock_super (sb);
 	if (!(sb->s_flags & MS_RDONLY)) {
 		sb->u.ext2_sb.s_es->s_state = sb->u.ext2_sb.s_mount_state;
-		sb->u.ext2_sb.s_sbh->b_dirt = 1;
+		mark_buffer_dirty(sb->u.ext2_sb.s_sbh, 1);
 	}
-#ifndef DONT_USE_DCACHE
-	ext2_dcache_invalidate (sb->s_dev);
-#endif
 	sb->s_dev = 0;
 	for (i = 0; i < EXT2_MAX_GROUP_DESC; i++)
 		if (sb->u.ext2_sb.s_group_desc[i])
@@ -159,10 +154,10 @@ static int convert_pre_02b_fs (struct super_block * sb,
 		gdp[i].bg_free_blocks_count = old_group_desc[i].bg_free_blocks_count;
 		gdp[i].bg_free_inodes_count = old_group_desc[i].bg_free_inodes_count;
 	}
-	bh2->b_dirt = 1;
+	mark_buffer_dirty(bh2, 1);
 	brelse (bh2);
 	es->s_magic = EXT2_SUPER_MAGIC;
-	bh->b_dirt = 1;
+	mark_buffer_dirty(bh, 1);
 	sb->s_magic = EXT2_SUPER_MAGIC;
 	return 1;
 }
@@ -287,7 +282,7 @@ static void ext2_setup_super (struct super_block * sb,
 			es->s_max_mnt_count = EXT2_DFL_MAX_MNT_COUNT;
 		es->s_mnt_count++;
 		es->s_mtime = CURRENT_TIME;
-		sb->u.ext2_sb.s_sbh->b_dirt = 1;
+		mark_buffer_dirty(sb->u.ext2_sb.s_sbh, 1);
 		sb->s_dirt = 1;
 		if (test_opt (sb, DEBUG))
 			printk ("[EXT II FS %s, %s, bs=%lu, fs=%lu, gc=%lu, "
@@ -321,7 +316,7 @@ static int ext2_check_descriptors (struct super_block * sb)
 		if (gdp->bg_block_bitmap < block ||
 		    gdp->bg_block_bitmap >= block + EXT2_BLOCKS_PER_GROUP(sb))
 		{
-			ext2_error (sb, "ext2_check_desciptors",
+			ext2_error (sb, "ext2_check_descriptors",
 				    "Block bitmap for group %d"
 				    " not in group (block %lu)!",
 				    i, gdp->bg_block_bitmap);
@@ -330,7 +325,7 @@ static int ext2_check_descriptors (struct super_block * sb)
 		if (gdp->bg_inode_bitmap < block ||
 		    gdp->bg_inode_bitmap >= block + EXT2_BLOCKS_PER_GROUP(sb))
 		{
-			ext2_error (sb, "ext2_check_desciptors",
+			ext2_error (sb, "ext2_check_descriptors",
 				    "Inode bitmap for group %d"
 				    " not in group (block %lu)!",
 				    i, gdp->bg_inode_bitmap);
@@ -340,7 +335,7 @@ static int ext2_check_descriptors (struct super_block * sb)
 		    gdp->bg_inode_table + sb->u.ext2_sb.s_itb_per_group >=
 		    block + EXT2_BLOCKS_PER_GROUP(sb))
 		{
-			ext2_error (sb, "ext2_check_desciptors",
+			ext2_error (sb, "ext2_check_descriptors",
 				    "Inode table for group %d"
 				    " not in group (block %lu)!",
 				    i, gdp->bg_inode_table);
@@ -410,8 +405,8 @@ struct super_block * ext2_read_super (struct super_block * sb, void * data,
 
 		brelse (bh);
 		set_blocksize (dev, sb->s_blocksize);
-		logic_sb_block = sb_block / sb->s_blocksize;
-		offset = sb_block % sb->s_blocksize;
+		logic_sb_block = (sb_block*BLOCK_SIZE) / sb->s_blocksize;
+		offset = (sb_block*BLOCK_SIZE) % sb->s_blocksize;
 		bh = bread (dev, logic_sb_block, sb->s_blocksize);
 		if(!bh)
 			return NULL;
@@ -570,7 +565,7 @@ struct super_block * ext2_read_super (struct super_block * sb, void * data,
 #ifdef EXT2FS_PRE_02B_COMPAT
 	if (fs_converted) {
 		for (i = 0; i < bh_count; i++)
-			sb->u.ext2_sb.s_group_desc[i]->b_dirt = 1;
+			mark_buffer_dirty(sb->u.ext2_sb.s_group_desc[i], 1);
 		sb->s_dirt = 1;
 	}
 #endif
@@ -582,7 +577,7 @@ static void ext2_commit_super (struct super_block * sb,
 			       struct ext2_super_block * es)
 {
 	es->s_wtime = CURRENT_TIME;
-	sb->u.ext2_sb.s_sbh->b_dirt = 1;
+	mark_buffer_dirty(sb->u.ext2_sb.s_sbh, 1);
 	sb->s_dirt = 0;
 }
 
@@ -639,7 +634,7 @@ int ext2_remount (struct super_block * sb, int * flags, char * data)
 		 */
 		es->s_state = sb->u.ext2_sb.s_mount_state;
 		es->s_mtime = CURRENT_TIME;
-		sb->u.ext2_sb.s_sbh->b_dirt = 1;
+		mark_buffer_dirty(sb->u.ext2_sb.s_sbh, 1);
 		sb->s_dirt = 1;
 		ext2_commit_super (sb, es);
 	}

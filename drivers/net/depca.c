@@ -1,25 +1,37 @@
-/*  depca.c: A DIGITAL DEPCA ethernet driver for linux.
+/*  depca.c: A DIGITAL DEPCA  & EtherWORKS ethernet driver for linux.
 
     Written 1994 by David C. Davies.
 
-    Copyright 1994 David C. Davies and United States Government as
-    represented by the Director, National Security Agency.  This software
-    may be used and distributed according to the terms of the GNU Public
-    License, incorporated herein by reference.
+
+                      Copyright 1994 David C. Davies
+		                   and 
+			 United States Government
+	 (as represented by the Director, National Security Agency).  
+
+
+    This software may be used and distributed according to the terms of
+    the GNU Public License, incorporated herein by reference.
 
     This driver is written for the Digital Equipment Corporation series
-    of DEPCA ethernet cards:
+    of DEPCA and EtherWORKS ethernet cards:
 
-    	DE100 DEPCA
-	DE200 DEPCA Turbo
-	DE202 DEPCA Turbo (TP BNC)
-	DE210 DEPCA
+        DEPCA       (the original)
+    	DE100
+	DE200 Turbo
+	DE201 Turbo
+	DE202 Turbo (TP BNC)
+	DE210
+	DE422       (EISA)
 
-    The driver has been tested on DE100 and DE20x cards in a relatively busy 
-    network.
+    The  driver has been tested on DE100, DE200 and DE202 cards  in  a
+    relatively busy network. The DE422 has been tested a little.
 
-    The author may be reached as davies@wanton.enet.dec.com or
-    Digital Equipment Corporation, 146 Main Street, Maynard MA 01754.
+    This  driver will NOT work   for the DE203,  DE204  and DE205 series  of
+    cards,  since they have  a  new custom ASIC in   place of the AMD  LANCE
+    chip. 
+
+    The author may be reached as davies@wanton.lkg.dec.com or
+    Digital Equipment Corporation, 550 King Street, Littleton MA 01460.
 
     =========================================================================
     The driver was based on the 'lance.c' driver from Donald Becker which is
@@ -49,49 +61,81 @@
     the   filter bit   positions  correctly.  Hash   filtering  is  not  yet
     implemented in the current driver set.
 
-    The  DE200 series boards have   on-board 64kB RAM  for  use as a  shared
-    memory network buffer. Only  the DE100 cards  make  use of a  2kB buffer
-    mode  which has not  been implemented in  this driver (only the 32kB and
-    64kB modes are supported).
+    The original DEPCA  card requires that the  ethernet ROM address counter
+    be enabled to count and has an 8 bit NICSR.  The ROM counter enabling is
+    only  done when a  0x08 is read as the  first address octet (to minimise
+    the chances  of writing over some  other hardware's  I/O register).  The
+    NICSR accesses   have been changed  to  byte accesses  for all the cards
+    supported by this driver, since there is only one  useful bit in the MSB
+    (remote boot timeout) and it  is not used.  Also, there  is a maximum of
+    only 48kB network  RAM for this  card.  My thanks  to Torbjorn Lindh for
+    help debugging all this (and holding my feet to  the fire until I got it
+    right).
 
-    At the  most only 2 DEPCA  cards can be supported  because there is only
-    provision for two I/O base addresses on the cards (0x300 and 0x200). The
-    base  address is  'autoprobed' by  looking  for  the self  test PROM and
-    detecting the  card name.  The shared memory  base address is decoded by
-    'autoprobing' the Ethernet PROM address information. The second DEPCA is
-    detected and information placed  in the base_addr  variable of the  next
-    device  structure   (which is created    if  necessary),  thus  enabling
-    ethif_probe initialization for the device.
+    The DE200  series  boards have  on-board 64kB  RAM for  use  as a shared
+    memory network  buffer. Only the DE100  cards make use  of a  2kB buffer
+    mode which has not  been implemented in  this driver (only the 32kB  and
+    64kB modes are supported [16kB/48kB for the original DEPCA]).
+
+    At the most only 2 DEPCA cards can  be supported on  the ISA bus because
+    there is only provision  for two I/O base addresses  on each card (0x300
+    and 0x200). The I/O address is detected by searching for a byte sequence
+    in the Ethernet station address PROM at the expected I/O address for the
+    Ethernet  PROM.   The shared memory  base   address  is 'autoprobed'  by
+    looking  for the self  test PROM  and detecting the  card name.   When a
+    second  DEPCA is  detected,  information  is   placed in the   base_addr
+    variable of the  next device structure (which  is created if necessary),
+    thus  enabling ethif_probe  initialization  for the device.  More than 2
+    EISA cards can  be  supported, but  care will  be  needed assigning  the
+    shared memory to ensure that each slot has the  correct IRQ, I/O address
+    and shared memory address assigned.
 
     ************************************************************************
 
-    NOTE: If you are using two  DEPCAs, it is important  that you assign the
-    base memory addresses  correctly.  The driver  autoprobes I/O 0x300 then
-    0x200.  The base memory  address for the  first device must be less than
-    that of the second so that the auto probe will  correctly assign the I/O
-    and  memory addresses on  the same card.  I can't  think of  a way to do
+    NOTE: If you are using two  ISA DEPCAs, it is  important that you assign
+    the base memory addresses correctly.   The  driver autoprobes I/O  0x300
+    then 0x200.  The  base memory address for  the first device must be less
+    than that of the second so that the auto probe will correctly assign the
+    I/O and memory addresses on the same card.  I can't think of a way to do
     this unambiguously at the moment, since there is nothing on the cards to
     tie I/O and memory information together.
 
-    I   am unable to test    2 DEPCAs together for   now,   so this code  is
+    I am unable  to  test  2 cards   together for now,    so this  code   is
     unchecked. All reports, good or bad, are welcome.
 
     ************************************************************************
 
-    The board IRQ  setting must be  at  an unused  IRQ  which is auto-probed
-    using   Donald Becker's   autoprobe   routines. DE100   board IRQs   are
-    {2,3,4,5,7}, whereas  the DE200 is at  {5,9,10,11,15}. Note that IRQ2 is
+    The board IRQ   setting must be  at an  unused IRQ which  is auto-probed
+    using Donald Becker's autoprobe routines. DEPCA and DE100 board IRQs are
+    {2,3,4,5,7}, whereas the  DE200 is at {5,9,10,11,15}.  Note that IRQ2 is
     really IRQ9 in machines with 16 IRQ lines.
 
     No 16MB memory  limitation should exist with this  driver as DMA is  not
     used and the common memory area is in low memory on the network card (my
     current system has 20MB and I've not had problems yet).
 
-    The DE203,  DE204  and DE205 cards  may  also work  with this driver  (I
-    haven't tested  them so I don't  know). If you have  one of these cards,
-    place the name in the DEPCA_SIGNATURE string  around line 160, recompile
-    the kernel and reboot. Check if the card  is recognised and works - mail
-    me if so, so that I can add it into the list of supported cards!
+    The ability to load this driver as a loadable module has been added. To
+    utilise this ability, you have to do <8 things:
+
+    1) copy depca.c from the  /linux/drivers/net directory to your favourite
+    temporary directory.
+    2) edit the  source code near  line 1530 to reflect  the I/O address and
+    IRQ you're using.
+    3) compile  depca.c, but include -DMODULE in  the command line to ensure
+    that the correct bits are compiled (see end of source code).
+    4) if you are wanting to add a new  card, goto 5. Otherwise, recompile a
+    kernel with the depca configuration turned off and reboot.
+    5) insmod depca.o
+    6) run the net startup bits for your eth?? interface manually 
+    (usually /etc/rc.inet[12] at boot time). 
+    7) enjoy!
+
+    Note that autoprobing is not allowed in loadable modules - the system is
+    already up and running and you're messing with interrupts. Also, there
+    is no way to check on the number of depcas installed at the moment.
+
+    To unload a module, turn off the associated interface 
+    'ifconfig eth?? down' then 'rmmod depca'.
 
     TO DO:
     ------
@@ -103,16 +147,24 @@
 
     Version   Date        Description
   
-      0.1   25-jan-94     Initial writing
-      0.2   27-jan-94     Added LANCE TX buffer chaining
-      0.3    1-feb-94     Added multiple DEPCA support
-      0.31   4-feb-94     Added DE202 recognition
+      0.1   25-jan-94     Initial writing.
+      0.2   27-jan-94     Added LANCE TX hardware buffer chaining.
+      0.3    1-feb-94     Added multiple DEPCA support.
+      0.31   4-feb-94     Added DE202 recognition.
       0.32  19-feb-94     Tidy up. Improve multi-DEPCA support.
+      0.33  25-feb-94     Fix DEPCA ethernet ROM counter enable.
+                          Add jabber packet fix from murf@perftech.com
+			  and becker@super.org
+      0.34   7-mar-94     Fix DEPCA max network memory RAM & NICSR access.
+      0.35   8-mar-94     Added DE201 recognition. Tidied up.
+      0.351 30-apr-94     Added EISA support. Added DE422 recognition.
+      0.36  16-may-94     DE422 fix released.
+      0.37  22-jul-94     Added MODULE support
 
     =========================================================================
 */
 
-static char *version = "depca.c:v0.32 2/19/94 davies@wanton.enet.dec.com\n";
+static char *version = "depca.c:v0.37 7/22/94 davies@wanton.lkg.dec.com\n";
 
 #include <stdarg.h>
 #include <linux/config.h>
@@ -128,22 +180,21 @@ static char *version = "depca.c:v0.32 2/19/94 davies@wanton.enet.dec.com\n";
 #include <asm/io.h>
 #include <asm/dma.h>
 
-#include "dev.h"
-#include "iow.h"
-#include "eth.h"
-#include "skbuff.h"
-#include "arp.h"
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
+#include <linux/skbuff.h>
+
+#ifdef MODULE
+#include <linux/module.h>
+#include "/linux/tools/version.h"
+#endif /* MODULE */
+
 #include "depca.h"
 
 #ifdef DEPCA_DEBUG
-int depca_debug = DEPCA_DEBUG;
+static int depca_debug = DEPCA_DEBUG;
 #else
-int depca_debug = 1;
-#endif
-
-#ifndef DEPCA_IRQ
-/*#define DEPCA_IRQ	{5,9,10,11,15,0}*/
-#define DEPCA_IRQ	5
+static int depca_debug = 1;
 #endif
 
 #ifndef PROBE_LENGTH
@@ -155,7 +206,10 @@ int depca_debug = 1;
 #endif
 
 #ifndef DEPCA_SIGNATURE
-#define DEPCA_SIGNATURE {"DEPCA","DE100","DE200","DE202","DE210",""}
+#define DEPCA_SIGNATURE {"DEPCA","DE100",\
+                         "DE200","DE201","DE202","DE210",\
+                         "DE422",\
+                         ""}
 #define DEPCA_NAME_LENGTH 8
 #endif
 
@@ -175,6 +229,14 @@ static short mem_chkd = 0;               /* holds which base addrs have been */
 
 #ifndef MAX_NUM_DEPCAS
 #define MAX_NUM_DEPCAS 2
+#endif
+
+#ifndef DEPCA_EISA_IO_PORTS 
+#define DEPCA_EISA_IO_PORTS 0x0c00       /* I/O port base address, slot 0 */
+#endif
+
+#ifndef MAX_EISA_SLOTS
+#define MAX_EISA_SLOTS 8
 #endif
 
 /*
@@ -197,11 +259,6 @@ static short mem_chkd = 0;               /* holds which base addrs have been */
 #endif /* CRC_POLYNOMIAL */
 #endif /* HAVE_MULTICAST */
 
-#ifndef HAVE_ALLOC_SKB
-#define alloc_skb(size, priority) (struct sk_buff *) kmalloc(size,priority)
-#define kfree_skbmem(buff, size) kfree_s(buff,size)
-#endif  /* HAVE_ALLOC_SKB */
-
 /*
 ** The DEPCA Rx and Tx ring descriptors. 
 */
@@ -217,8 +274,8 @@ struct depca_tx_head {
     short misc;                 /* Errors and TDR info */
 };
 
-struct depca_ring_info {
-};
+#define LA_MASK 0x0000ffff      /* LANCE address mask for mapping network RAM
+				   to LANCE memory address space */
 
 /*
 ** The Lance initialization block, described in databook, in common memory.
@@ -236,12 +293,13 @@ struct depca_private {
     struct depca_rx_head *rx_ring; /* Pointer to start of RX descriptor ring */
     struct depca_tx_head *tx_ring; /* Pointer to start of TX descriptor ring */
     struct depca_init	init_block;/* Initialization block */
+    long bus_offset;            /* (E)ISA bus address offset vs LANCE */
     long dma_buffs;		/* Start address of Rx and Tx buffers. */
     int	cur_rx, cur_tx;		/* The next free ring entry */
     int dirty_rx, dirty_tx;	/* The ring entries to be free()ed. */
     int dma;
     struct enet_statistics stats;
-    char old_depca;
+    char depca_na;              /* NICSR access width: 0=>byte, 1=>word */
     short ringSize;             /* ring size based on available memory */
     short rmask;                /* modulus mask based on ring size */
     long rlen;                  /* log2(ringSize) for the descriptors */
@@ -275,7 +333,18 @@ static int DevicePresent(short ioaddr);
 static void SetMulticastFilter(int num_addrs, char *addrs, char *multicast_table);
 #endif
 
+#ifndef MODULE
+static struct device *isa_probe(struct device *dev);
+static struct device *eisa_probe(struct device *dev);
+static struct device *alloc_device(struct device *dev, int ioaddr);
+
 static int num_depcas = 0, num_eth = 0;;
+
+#else
+int  init_module(void);
+void cleanup_module(void);
+
+#endif /* MODULE */
 
 /*
 ** Miscellaneous defines...
@@ -284,78 +353,34 @@ static int num_depcas = 0, num_eth = 0;;
     outw(CSR0, DEPCA_ADDR);\
     outw(STOP, DEPCA_DATA)
 
+
 
 
 int depca_probe(struct device *dev)
 {
-    int *port, ports[] = DEPCA_IO_PORTS;
-    int base_addr = dev->base_addr;
-    int status;
-    struct device *eth0 = (struct device *) NULL;
+    short base_addr = dev->base_addr;
+    int status = -ENODEV;
+#ifndef MODULE
+    struct device *eth0;
+#endif
 
     if (base_addr > 0x1ff) {	      /* Check a single specified location. */
-		status = depca_probe1(dev, base_addr);
-    } else if (base_addr > 0) {	      /* Don't probe at all. */
-		status = -ENXIO;
-    } else {                          /* First probe for the DEPCA test */
-                                      /* pattern in ROM */
-
-      for (status = -ENODEV, port = &ports[0]; 
-	                    *port && (num_depcas < MAX_NUM_DEPCAS); port++) {
-	int ioaddr = *port;
-
-#ifdef HAVE_PORTRESERVE
-	if (check_region(ioaddr, DEPCA_TOTAL_SIZE))
-	    continue;
-#endif
-	if (DevicePresent(DEPCA_PROM) == 0) {
-	  if (num_depcas > 0) {        /* only gets here in autoprobe */
-
-	    /*
-	    ** Check the device structures for an end of list or unused device
-	    */
-	    while (dev->next != (struct device *)NULL) {
-	      if (dev->next->base_addr == 0xffe0) break;
-	      dev = dev->next;         /* walk through eth device list */
-	      num_eth++;               /* increment eth device number */
-	    }
-
-	    /*
-	    ** If no more device structures, malloc one up. If memory could
-	    ** not be allocated, print an error message.
-	    ** 
-	    */
-	    if (dev->next == (struct device *)NULL) {
-	      dev->next = (struct device *)kmalloc(sizeof(struct device) + 8,
-                                                                  GFP_KERNEL);
-	    } else {
-	      printk("eth%d: Device not initialised, insufficient memory\n",
-		                                                      num_eth);
-	    }
-
-	    /*
-	    ** If the memory was allocated, point to the new memory area
-	    ** and initialize it (name, I/O address, next device (NULL) and
-	    ** initialisation probe routine).
-	    */
-	    if ((dev->next != (struct device *)NULL) &&
-		(num_eth > 0) && (num_eth < 9999)) {
-	      dev = dev->next;         /* point to the new device */
-	      dev->name = (char *)(dev + sizeof(struct device));
-	      sprintf(dev->name,"eth%d", num_eth); /* New device name */
-	      dev->base_addr = ioaddr; /* assign the io address */
-	      dev->next = (struct device *)NULL; /* mark the end of list */
-	      dev->init = &depca_probe;/* initialisation routine */
-	    }
-	  } else {
-	    eth0 = dev;                /* remember the first device */
-	    status = depca_probe1(dev, ioaddr);
-	  }
-	  num_depcas++;
-	  num_eth++;
-	}
+      if (DevicePresent(base_addr) == 0) { /* Is DEPCA really here? */
+	status = depca_probe1(dev, base_addr);
       }
-      if (eth0) dev = eth0;             /* restore the first device */
+    } else if (base_addr > 0) {	      /* Don't probe at all. */
+      status = -ENXIO;
+    } else {                          /* First probe for the DEPCA test */
+
+#ifdef MODULE                         /* pattern in ROM */
+      printk("Autoprobing is not supported when loading a module based driver.\n");
+      status = -EIO;
+#else
+      eth0=isa_probe(dev);
+      eth0=eisa_probe(eth0);
+      if (dev->priv) status=0;
+#endif /* MODULE */
+
     }
 
     if (status) dev->base_addr = base_addr;
@@ -369,18 +394,18 @@ depca_probe1(struct device *dev, short ioaddr)
     struct depca_private *lp;
     int i,j, status=0;
     unsigned long mem_start, mem_base[] = DEPCA_RAM_BASE_ADDRESSES;
-    char *name=(char *)NULL;
-    int nicsr, offset;
+    char *name = NULL;
+    unsigned int nicsr, offset, netRAM;
 
 
     /*
-    ** Stop the DEPCA. Enable the DBR ROM. Disable interrupts and remote boot
+    ** Stop the DEPCA. Enable the DBR ROM. Disable interrupts and remote boot.
     */
     STOP_DEPCA;
 
-    nicsr = inw(DEPCA_NICSR);
+    nicsr = inb(DEPCA_NICSR);
     nicsr = ((nicsr & ~SHE & ~RBE & ~IEN) | IM);
-    outw(nicsr, DEPCA_NICSR);
+    outb(nicsr, DEPCA_NICSR);
 
     if (inw(DEPCA_DATA) == STOP) {
 
@@ -395,7 +420,7 @@ depca_probe1(struct device *dev, short ioaddr)
 	if (((mem_chkd >> i) & 0x01) == 0) { /* has the memory been checked? */
 	  name = DepcaSignature(mem_base[i]);/* check for a DEPCA here */
 	  mem_chkd |= (0x01 << i);           /* mark location checked */
-	  if (*name != (char)NULL) {         /* one found? */
+	  if (*name != '\0') {			/* one found? */
 	    j = 1;                           /* set exit flag */
 	  } else {
 	    i++;                             /* increment search index */
@@ -403,11 +428,16 @@ depca_probe1(struct device *dev, short ioaddr)
 	}
       }
 
-      if (*name != (char)NULL) {          /* found a DEPCA device */
+      if (*name != '\0') {		/* found a DEPCA device */
 	mem_start = mem_base[i];
 	dev->base_addr = ioaddr;
 
-	printk("%s: DEPCA at %#3x is a %s, ", dev->name, ioaddr, name);
+	if ((ioaddr&0x0fff)==DEPCA_EISA_IO_PORTS) {/* EISA slot address */
+	  printk("%s: %s at %#3x (EISA slot %d)", 
+		                 dev->name, name, ioaddr, ((ioaddr>>12)&0x0f));
+	} else {                             /* ISA port address */
+	  printk("%s: %s at %#3x", dev->name, name, ioaddr);
+	}
 
       /* There is a 32 byte station address PROM at DEPCA_PROM address.
 	 The first six bytes are the station address. They can be read
@@ -418,13 +448,13 @@ depca_probe1(struct device *dev, short ioaddr)
 	 read the ROM info.
       */
 
-	if (strstr(name,"DE100")!=(char *)NULL) {
+	if (strstr(name,"DE100") != NULL) {
 	  j = 1;
 	} else {
 	  j = 0;
 	}
 
-	printk("ethernet address ");
+	printk(", h/w address ");
 	for (i = 0; i < ETH_ALEN - 1; i++) { /* get the ethernet address */
 	  printk("%2.2x:", dev->dev_addr[i] = inb(DEPCA_PROM + j));
 	}
@@ -438,38 +468,54 @@ depca_probe1(struct device *dev, short ioaddr)
 	snarf_region(ioaddr, DEPCA_TOTAL_SIZE);
 #endif
 
+	/*
+	** Set up the maximum amount of network RAM(kB)
+	*/
+	if (strstr(name,"DEPCA") == NULL) {
+	  netRAM=64;
+	} else {
+	  netRAM=48;
+	}
+
 	/* 
-	 ** Determine the base address for the DEPCA RAM from the NI-CSR
-	 ** and make up a DEPCA-specific-data structure. 
+	** Determine the base address for the DEPCA RAM from the NI-CSR
+	** and make up a DEPCA-specific-data structure. 
         */
 
 	if (nicsr & BUF) {
-	  offset = 0x8000;              /* 32kbyte RAM */
+	  offset = 0x8000;              /* 32kbyte RAM offset*/
 	  nicsr &= ~BS;                 /* DEPCA RAM in top 32k */
-	  printk(",\n      with 32kB RAM");
+	  printk(",\n      has %dkB RAM", netRAM - 32);
+	} else 	if ((nicsr & _128KB) && (netRAM!=48)) {
+	  offset = 0x0000;
+	  printk(",\n      has 128kB RAM");
 	} else {
-	  offset = 0x0000;              /* 64kbyte RAM */
-	  printk(",\n      with 64kB RAM");
+	  offset = 0x0000;              /* 64k/48k bytes RAM */
+	  printk(",\n      has %dkB RAM", netRAM);
 	}
 
-	mem_start += offset;
-	printk(" starting at 0x%.5lx", mem_start);
+	mem_start += offset;            /* (E)ISA start address */
+	printk(" at 0x%.5lx", mem_start);
 
 	/*
-	 ** Enable the shadow RAM.
+	** Enable the shadow RAM.
 	*/
-	nicsr |= SHE;
-	outw(nicsr, DEPCA_NICSR);
+	if (strstr(name,"DEPCA") == NULL) {
+	  nicsr |= SHE;
+	  outb(nicsr, DEPCA_NICSR);
+	}
  
 	/*
 	** Calculate the ring size based on the available RAM
 	** found above. Allocate an equal number of buffers, each
-	** of size PKT_BUF_SZ (1544 bytes) to the Tx and Rx. Make sure
+	** of size PKT_BUF_SZ (1544 bytes) to the Tx and Rx, allowing one
+	** descriptor entry (8 bytes) for each buffer. Make sure
 	** that this ring size is <= RING_SIZE. The ring size must be
 	** a power of 2.
 	*/
 
-	j = ((0x10000 - offset) / PKT_BUF_SZ) >> 1;
+	j = (((netRAM << 10) - offset - sizeof(struct depca_private)) / 
+	                                               (PKT_BUF_SZ + 8)) >> 1;
 	for (i=0;j>1;i++) {
 	  j >>= 1;
 	}
@@ -507,12 +553,15 @@ depca_probe1(struct device *dev, short ioaddr)
 	lp->tx_ring = (struct depca_tx_head *)mem_start;
 
 	mem_start += (sizeof(struct depca_tx_head) * j);
-	lp->dma_buffs = mem_start & 0x00ffffff;
+	lp->bus_offset = mem_start & 0x00ff0000;
+	mem_start &= LA_MASK;           /* LANCE re-mapped start address */
+
+	lp->dma_buffs = mem_start;
 
 	mem_start += (PKT_BUF_SZ * j);
 	/* (mem_start now points to the start of the Tx buffers) */
 
-	/* Initialise the data structures */
+	/* Initialise the data structures wrt CPU */
 	memset(lp->rx_ring, 0, sizeof(struct depca_rx_head)*j);
 	memset(lp->tx_ring, 0, sizeof(struct depca_tx_head)*j);
 
@@ -552,14 +601,15 @@ depca_probe1(struct device *dev, short ioaddr)
 	** Enable DEPCA board interrupts for autoprobing
 	*/
 	nicsr = ((nicsr & ~IM)|IEN);
-	outw(nicsr, DEPCA_NICSR);
+	outb(nicsr, DEPCA_NICSR);
 
 	/* The DMA channel may be passed in on this parameter. */
 	dev->dma = 0;
-	
+
 	/* To auto-IRQ we enable the initialization-done and DMA err,
 	 interrupts. For now we will always get a DMA error. */
 	if (dev->irq < 2) {
+#ifndef MODULE
 	  autoirq_setup(0);
 
 	  /* Trigger an initialization just for the interrupt. */
@@ -567,13 +617,14 @@ depca_probe1(struct device *dev, short ioaddr)
 	  
 	  dev->irq = autoirq_report(1);
 	  if (dev->irq) {
-	    printk(" and probed IRQ%d.\n", dev->irq);
+	    printk(" and uses IRQ%d.\n", dev->irq);
 	  } else {
-	    printk(". Failed to detect IRQ line.\n");
+	    printk(" and failed to detect IRQ line.\n");
 	    status = -EAGAIN;
 	  }
+#endif /* MODULE */
 	} else {
-	  printk(". Assigned IRQ%d.\n", dev->irq);
+	  printk(" and assigned IRQ%d.\n", dev->irq);
 	}
       } else {
 	status = -ENXIO;
@@ -595,32 +646,7 @@ depca_probe1(struct device *dev, short ioaddr)
 	dev->mem_start = 0;
 	
 	/* Fill in the generic field of the device structure. */
-	for (i = 0; i < DEV_NUMBUFFS; i++) {
-	  dev->buffs[i] = NULL;
-	}
-
-	dev->hard_header     = eth_header;
-	dev->add_arp	     = eth_add_arp;
-	dev->queue_xmit	     = dev_queue_xmit;
-	dev->rebuild_header  = eth_rebuild_header;
-	dev->type_trans	     = eth_type_trans;
-	
-	dev->type	     = ARPHRD_ETHER;
-	dev->hard_header_len = ETH_HLEN;
-	dev->mtu	     = 1500; /* eth_mtu */
-	dev->addr_len	     = ETH_ALEN;
-
-	for (i = 0; i < dev->addr_len; i++) {
-	  dev->broadcast[i]=0xff;
-	}
-	
-	/* New-style flags. */
-	dev->flags	     = IFF_BROADCAST;
-	dev->family	     = AF_INET;
-	dev->pa_addr	     = 0;
-	dev->pa_brdaddr	     = 0;
-	dev->pa_mask	     = 0;
-	dev->pa_alen	     = sizeof(unsigned long);
+ 	ether_setup(dev);
       }
     } else {
       status = -ENXIO;
@@ -636,7 +662,7 @@ depca_open(struct device *dev)
     struct depca_private *lp = (struct depca_private *)dev->priv;
     int i,nicsr,ioaddr = dev->base_addr;
 
-    if (request_irq(dev->irq, &depca_interrupt)) {
+    if (request_irq(dev->irq, &depca_interrupt, 0, "depca")) {
         printk("depca_open(): Requested IRQ%d is busy\n",dev->irq);
 	return -EAGAIN;
     }
@@ -647,7 +673,7 @@ depca_open(struct device *dev)
     ** Stop the DEPCA & get the board status information.  
     */
     STOP_DEPCA;
-    nicsr = inw(DEPCA_NICSR);
+    nicsr = inb(DEPCA_NICSR);
 
     /* 
     ** Re-initialize the DEPCA... 
@@ -698,7 +724,7 @@ depca_open(struct device *dev)
     ** Enable DEPCA board interrupts
     */
     nicsr = ((nicsr & ~IM & ~LED)|SHE|IEN);
-    outw(nicsr, DEPCA_NICSR);
+    outb(nicsr, DEPCA_NICSR);
     outw(CSR0,DEPCA_ADDR);
 
     dev->tbusy = 0;                         
@@ -709,8 +735,12 @@ depca_open(struct device *dev)
 
     if (depca_debug > 1){
       printk("CSR0: 0x%4.4x\n",inw(DEPCA_DATA));
-      printk("nicsr: 0x%4.4x\n",inw(DEPCA_NICSR));
+      printk("nicsr: 0x%02x\n",inb(DEPCA_NICSR));
     }
+
+#ifdef MODULE
+  MOD_INC_USE_COUNT;
+#endif       
 
     return 0;			          /* Always succeed */
 }
@@ -741,8 +771,8 @@ depca_init_ring(struct device *dev)
     for (i = 0; i < 4; i++) {
       lp->init_block.filter[i] = 0x0000;
     }
-    lp->init_block.rx_ring = (unsigned long)lp->rx_ring | lp->rlen;
-    lp->init_block.tx_ring = (unsigned long)lp->tx_ring | lp->rlen;
+    lp->init_block.rx_ring = ((unsigned long)lp->rx_ring & LA_MASK) | lp->rlen;
+    lp->init_block.tx_ring = ((unsigned long)lp->tx_ring & LA_MASK) | lp->rlen;
 
     lp->init_block.mode = 0x0000;            /* Enable the Tx and Rx */ 
 }
@@ -760,13 +790,13 @@ depca_start_xmit(struct sk_buff *skb, struct device *dev)
     /* Transmitter timeout, serious problems. */
     if (dev->tbusy) {
       int tickssofar = jiffies - dev->trans_start;
-      if (tickssofar < 5) {
+      if (tickssofar < 10) {
 	status = -1;
       } else {
-	STOP_DEPCA;
-	printk("%s: transmit timed out, status %4.4x, resetting.\n",
+	printk("%s: transmit timed out, status %04x, resetting.\n",
 	       dev->name, inw(DEPCA_DATA));
 	
+	STOP_DEPCA;
 	depca_init_ring(dev);
 	LoadCSRs(dev);
 	InitRestartDepca(dev);
@@ -780,14 +810,6 @@ depca_start_xmit(struct sk_buff *skb, struct device *dev)
 	dev_tint(dev);
 	return 0;
     }
-
-    /* Fill in the ethernet header. */
-    if (!skb->arp  &&  dev->rebuild_header(skb->data, dev)) {
-	skb->dev = dev;
-	arp_queue (skb);
-	return 0;
-    }
-    skb->arp=1;
 
     if (skb->len <= 0) {
       return 0;
@@ -817,7 +839,8 @@ depca_start_xmit(struct sk_buff *skb, struct device *dev)
       char *p = (char *) skb->data;
 
       entry &= lp->rmask;  		    /* Ring around buffer number. */
-      buf = (unsigned char *)(lp->tx_ring[entry].base & 0x00ffffff);
+      buf = (unsigned char *)((lp->tx_ring[entry].base+lp->bus_offset) & 
+			                                           0x00ffffff);
 
       /* Wait for a full ring to free up */
       while (lp->tx_ring[entry].base < 0);
@@ -852,7 +875,8 @@ depca_start_xmit(struct sk_buff *skb, struct device *dev)
 	/* Get new buffer pointer */
 	entry = lp->cur_tx++;
 	entry &= lp->rmask;  		    /* Ring around buffer number. */
-	buf = (unsigned char *)(lp->tx_ring[entry].base & 0x00ffffff);
+	buf = (unsigned char *)((lp->tx_ring[entry].base+lp->bus_offset) &
+				                                   0x00ffffff);
 
 	/* Wait for a full ring to free up */
 	while (lp->tx_ring[entry].base < 0);
@@ -880,7 +904,8 @@ depca_start_xmit(struct sk_buff *skb, struct device *dev)
 
       if (depca_debug > 4) {
 	unsigned char *pkt =
-	  (unsigned char *)(lp->tx_ring[entry].base & 0x00ffffff);
+	  (unsigned char *)((lp->tx_ring[entry].base+lp->bus_offset) &
+			                                           0x00ffffff);
 
 	printk("%s: tx ring[%d], %#lx, sk_buf %#lx len %d.\n",
 	       dev->name, entry, (unsigned long) &lp->tx_ring[entry],
@@ -896,9 +921,7 @@ depca_start_xmit(struct sk_buff *skb, struct device *dev)
 	dev->tbusy=0;
       }
 
-      if (skb->free) {
-	kfree_skb (skb, FREE_WRITE);
-      }
+      dev_kfree_skb (skb, FREE_WRITE);
     }
 
     return 0;
@@ -917,53 +940,52 @@ depca_interrupt(int reg_ptr)
 
     if (dev == NULL) {
 	printk ("depca_interrupt(): irq %d for unknown device.\n", irq);
-	return;
     } else {
       lp = (struct depca_private *)dev->priv;
       ioaddr = dev->base_addr;
-    }
 
-    if (dev->interrupt)
+      if (dev->interrupt)
 	printk("%s: Re-entering the interrupt handler.\n", dev->name);
 
-    dev->interrupt = MASK_INTERRUPTS;
+      dev->interrupt = MASK_INTERRUPTS;
 
-    /* mask the DEPCA board interrupts and turn on the LED */
-    nicsr = inw(DEPCA_NICSR);
-    nicsr |= (IM|LED);
-    outw(nicsr, DEPCA_NICSR);
+      /* mask the DEPCA board interrupts and turn on the LED */
+      nicsr = inb(DEPCA_NICSR);
+      nicsr |= (IM|LED);
+      outb(nicsr, DEPCA_NICSR);
 
-    outw(CSR0, DEPCA_ADDR);
-    csr0 = inw(DEPCA_DATA);
+      outw(CSR0, DEPCA_ADDR);
+      csr0 = inw(DEPCA_DATA);
 
-    /* Acknowledge all of the current interrupt sources ASAP. */
-    outw(csr0 & ~(INEA|TDMD|STOP|STRT|INIT), DEPCA_DATA);
+      /* Acknowledge all of the current interrupt sources ASAP. */
+      outw(csr0 & ~(INEA|TDMD|STOP|STRT|INIT), DEPCA_DATA);
 
-    if (depca_debug > 5)
+      if (depca_debug > 5)
 	printk("%s: interrupt  csr0=%#2.2x new csr=%#2.2x.\n",
 	       dev->name, csr0, inw(DEPCA_DATA));
 
-    if (csr0 & RINT)		/* Rx interrupt (packet arrived) */
+      if (csr0 & RINT)		/* Rx interrupt (packet arrived) */
 	depca_rx(dev);
 
-    if (csr0 & TINT) 	        /* Tx interrupt (packet sent) */
+      if (csr0 & TINT) 	        /* Tx interrupt (packet sent) */
         depca_tx(dev);
 
-    /* Clear the interrupts we've handled. */
-    outw(CSR0, DEPCA_ADDR);
-    outw(BABL|CERR|MISS|MERR|RINT|TINT|IDON|INEA, DEPCA_DATA);
+      /* Clear the interrupts we've handled. */
+      outw(CSR0, DEPCA_ADDR);
+      outw(BABL|CERR|MISS|MERR|RINT|TINT|IDON|INEA, DEPCA_DATA);
 
-    if (depca_debug > 4) {
-      printk("%s: exiting interrupt, csr%d=%#4.4x.\n",
-	     dev->name, inw(DEPCA_ADDR),
-	     inw(DEPCA_DATA));
+      if (depca_debug > 4) {
+	printk("%s: exiting interrupt, csr%d=%#4.4x.\n",
+	       dev->name, inw(DEPCA_ADDR),
+	       inw(DEPCA_DATA));
+      }
+
+      /* Unmask the DEPCA board interrupts and turn off the LED */
+      nicsr = (nicsr & ~IM & ~LED);
+      outb(nicsr, DEPCA_NICSR);
+      dev->interrupt = UNMASK_INTERRUPTS;
     }
 
-    /* Unmask the DEPCA board interrupts and turn off the LED */
-    nicsr = (nicsr & ~IM & ~LED);
-    outw(nicsr, DEPCA_NICSR);
-
-    dev->interrupt = UNMASK_INTERRUPTS;
     return;
 }
 
@@ -976,50 +998,66 @@ depca_rx(struct device *dev)
     /* If we own the next entry, it's a new packet. Send it up. */
     for (; lp->rx_ring[entry].base >= 0; entry = (++lp->cur_rx) & lp->rmask) {
 	int status = lp->rx_ring[entry].base >> 16 ;
+	int chained;
 
-	if (status & R_ERR) {	       /* There was an error. */
-	    lp->stats.rx_errors++;     /* Update the error stats. */
+	/*
+	** There is a tricky error noted by John Murphy, <murf@perftech.com>
+	** to Russ Nelson: even with full-sized buffers, it's possible for a
+	** jabber packet to use two buffers, with only the last one correctly
+	** noting the error.
+	*/
+
+	/* Check for a chaining buffer */
+	chained = 0;
+	if (status == R_STP) { 
+	  chained = 1;
+
+	  /* 
+	  ** Wait for next buffer to complete to check for errors. This
+	  ** is slow but infrequent and allows for correct hardware buffer
+	  ** chaining (whilst defeating the chaining's purpose).
+	  */
+	  while ((status=(lp->rx_ring[(entry+1)&lp->rmask].base >> 16)) < 0);
+
+	  /* NB: 'status' now comes from the buffer following 'entry'. */
+	}
+	  
+	if (status & R_ERR) {	               /* There was an error. */
+	    lp->stats.rx_errors++;             /* Update the error stats. */
 	    if (status & R_FRAM) lp->stats.rx_frame_errors++;
 	    if (status & R_OFLO) lp->stats.rx_over_errors++;
 	    if (status & R_CRC)  lp->stats.rx_crc_errors++;
 	    if (status & R_BUFF) lp->stats.rx_fifo_errors++;
 	} else {	  /* Malloc up new buffer, compatible  with net-2e. */
 	    short pkt_len = lp->rx_ring[entry].msg_length;
-	    int sksize = sizeof(struct sk_buff) + pkt_len;
 	    struct sk_buff *skb;
 
-	    skb = alloc_skb(sksize, GFP_ATOMIC);
+	    skb = alloc_skb(pkt_len, GFP_ATOMIC);
 	    if (skb == NULL) {
 		printk("%s: Memory squeeze, deferring packet.\n", dev->name);
 		lp->stats.rx_dropped++;	/* Really, deferred. */
 		break;
 	    }
-	    skb->mem_len = sksize;
-	    skb->mem_addr = skb;
 	    skb->len = pkt_len;
 	    skb->dev = dev;
 	    memcpy(skb->data,
-		   (unsigned char *)(lp->rx_ring[entry].base & 0x00ffffff),
+		  (unsigned char *)((lp->rx_ring[entry].base+lp->bus_offset) &
+				                                   0x00ffffff),
 		   pkt_len);
 	    /* 
 	    ** Notify the upper protocol layers that there is another 
 	    ** packet to handle
 	    */
-#ifdef HAVE_NETIF_RX
 	    netif_rx(skb);
-#else
-	    skb->lock = 0;
-	    if (dev_rint((unsigned char*)skb, pkt_len, IN_SKBUFF, dev) != 0) {
-		kfree_skbmem(skb, sksize);
-		lp->stats.rx_dropped++;
-		break;
-	    }
-#endif
 	    lp->stats.rx_packets++;
 	}
 
 	/* turn over ownership of the current entry back to the LANCE */
 	lp->rx_ring[entry].base |= R_OWN;
+	if (chained && (status & R_ERR)) {          /* next entry also bad */
+	  entry = (++lp->cur_rx) & lp->rmask;
+	  lp->rx_ring[entry].base |= R_OWN;
+	}
     }
 
     /* 
@@ -1105,6 +1143,10 @@ depca_close(struct device *dev)
 
     irq2dev_map[dev->irq] = 0;
 
+#ifdef MODULE
+    MOD_DEC_USE_COUNT;
+#endif    
+
     return 0;
 }
 
@@ -1114,9 +1156,11 @@ static void LoadCSRs(struct device *dev)
   int ioaddr = dev->base_addr;
 
   outw(CSR1, DEPCA_ADDR);                /* initialisation block address LSW */
-  outw((unsigned short)(unsigned long)&lp->init_block, DEPCA_DATA);
+  outw((unsigned short)((unsigned long)(&lp->init_block) & LA_MASK), 
+                                                                   DEPCA_DATA);
   outw(CSR2, DEPCA_ADDR);                /* initialisation block address MSW */
-  outw((unsigned short)((unsigned long)&lp->init_block >> 16), DEPCA_DATA);
+  outw((unsigned short)(((unsigned long)(&lp->init_block) & LA_MASK) >> 16), 
+                                                                   DEPCA_DATA);
   outw(CSR3, DEPCA_ADDR);                /* ALE control */
   outw(ACON, DEPCA_DATA);
   outw(CSR0, DEPCA_ADDR);                /* point back to CSR0 */
@@ -1241,6 +1285,107 @@ static void SetMulticastFilter(int num_addrs, char *addrs, char *multicast_table
 
 #endif  /* HAVE_MULTICAST */
 
+#ifndef MODULE
+/*
+** ISA bus I/O device probe
+*/
+static struct device *isa_probe(struct device *dev)
+{
+  int *port, ports[] = DEPCA_IO_PORTS;
+  int status;
+
+  for (status = -ENODEV, port = &ports[0]; 
+                             *port && (num_depcas < MAX_NUM_DEPCAS); port++) {
+    int ioaddr = *port;
+
+    if (DevicePresent(ioaddr) == 0) {
+      if (num_depcas > 0) {        /* only gets here in autoprobe */
+	dev = alloc_device(dev, ioaddr);
+      } else {
+	if ((status = depca_probe1(dev, ioaddr)) == 0) {
+	  num_depcas++;
+	}
+      }
+      num_eth++;
+    }
+  }
+  return dev;
+}
+
+/*
+** EISA bus I/O device probe. Probe from slot 1 since slot 0 is usually
+** the motherboard.
+*/
+static struct device *eisa_probe(struct device *dev)
+{
+  int i, ioaddr = DEPCA_EISA_IO_PORTS;
+  int status;
+
+  ioaddr+=0x1000;                         /* get the first slot address */
+  for (status = -ENODEV, i=1; i<MAX_EISA_SLOTS; i++, ioaddr+=0x1000) {
+
+    if (DevicePresent(ioaddr) == 0) {
+      if (num_depcas > 0) {        /* only gets here in autoprobe */
+	dev = alloc_device(dev, ioaddr);
+      } else {
+	if ((status = depca_probe1(dev, ioaddr)) == 0) {
+	  num_depcas++;
+	}
+      }
+      num_eth++;
+    }
+  }
+  return dev;
+}
+
+/*
+** Allocate the device by pointing to the next available space in the
+** device structure. Should one not be available, it is created.
+*/
+static struct device *alloc_device(struct device *dev, int ioaddr)
+{
+  /*
+  ** Check the device structures for an end of list or unused device
+  */
+  while (dev->next != NULL) {
+    if (dev->next->base_addr == 0xffe0) break;
+    dev = dev->next;         /* walk through eth device list */
+    num_eth++;               /* increment eth device number */
+  }
+
+  /*
+  ** If no more device structures, malloc one up. If memory could
+  ** not be allocated, print an error message.
+  */
+  if (dev->next == NULL) {
+    dev->next = (struct device *)kmalloc(sizeof(struct device) + 8,
+					 GFP_KERNEL);
+    if (dev->next == NULL) {
+      printk("eth%d: Device not initialised, insufficient memory\n",
+	     num_eth);
+    }
+  }
+  
+  /*
+  ** If the memory was allocated, point to the new memory area
+  ** and initialize it (name, I/O address, next device (NULL) and
+  ** initialisation probe routine).
+  */
+  if ((dev->next != NULL) &&
+      (num_eth > 0) && (num_eth < 9999)) {
+    dev = dev->next;			/* point to the new device */
+    dev->name = (char *)(dev + 1);
+    sprintf(dev->name,"eth%d", num_eth);/* New device name */
+    dev->base_addr = ioaddr;		/* assign the io address */
+    dev->next = NULL;			/* mark the end of list */
+    dev->init = &depca_probe;		/* initialisation routine */
+    num_depcas++;
+  }
+
+  return dev;
+}
+#endif    /* MODULE */
+
 /*
 ** Look for a particular board name in the on-board Remote Diagnostics
 ** and Boot (RDB) ROM. This will also give us a clue to the network RAM
@@ -1256,10 +1401,10 @@ static char *DepcaSignature(unsigned long mem_addr)
   for (i=0;i<16;i++) {                  /* copy the first 16 bytes of ROM to */
     tmpstr[i] = *(unsigned char *)(mem_addr+0xc000+i); /* a temporary string */
   }
-  tmpstr[i]=(char)NULL;
+  tmpstr[i] = '\0';
 
   strcpy(thisName,"");
-  for (i=0;*signatures[i]!=(char)NULL && *thisName==(char)NULL;i++) {
+  for (i = 0 ; *signatures[i] != '\0' && *thisName == '\0' ; i++) {
     for (j=0,k=0;j<16 && k<strlen(signatures[i]);j++) {
       if (signatures[i][k] == tmpstr[j]) {              /* track signature */
 	k++;
@@ -1277,7 +1422,13 @@ static char *DepcaSignature(unsigned long mem_addr)
 
 /*
 ** Look for a special sequence in the Ethernet station address PROM that
-** is common across all DEPCA products.
+** is common across all DEPCA products. Note that the original DEPCA needs
+** its ROM address counter to be initialized and enabled. Only enable
+** if the first address octet is a 0x08 - this minimises the chances of
+** messing around with some other hardware, but it assumes that this DEPCA
+** card initialized itself correctly. It also assumes that all past and
+** future DEPCA/EtherWORKS cards will have ethernet addresses beginning with
+** a 0x08.
 */
 
 static int DevicePresent(short ioaddr)
@@ -1285,14 +1436,30 @@ static int DevicePresent(short ioaddr)
   static short fp=1,sigLength=0;
   static char devSig[] = PROBE_SEQUENCE;
   char data;
-  int i, j, status = 0;
+  int i, j, nicsr, status = 0;
   static char asc2hex(char value);
 
+/*
+** Initialize the counter on a DEPCA card. Two reads to ensure DEPCA ethernet
+** address counter is a) cleared and b) the correct data read.
+*/
+  data = inb(DEPCA_PROM);                /* clear counter */
+  data = inb(DEPCA_PROM);                /* read data */
+
+/*
+** Enable counter
+*/
+  if (data == 0x08) {
+    nicsr = inb(DEPCA_NICSR);
+    nicsr |= AAC;
+    outb(nicsr, DEPCA_NICSR);
+  }
+  
 /* 
 ** Convert the ascii signature to a hex equivalent & pack in place 
 */
   if (fp) {                               /* only do this once!... */
-    for (i=0,j=0;devSig[i]!=(char)NULL && !status;i+=2,j++) {
+    for (i=0,j=0;devSig[i] != '\0' && !status;i+=2,j++) {
       if ((devSig[i]=asc2hex(devSig[i]))>=0) {
 	devSig[i]<<=4;
 	if((devSig[i+1]=asc2hex(devSig[i+1]))>=0){
@@ -1311,14 +1478,14 @@ static int DevicePresent(short ioaddr)
 /* 
 ** Search the Ethernet address ROM for the signature. Since the ROM address
 ** counter can start at an arbitrary point, the search must include the entire
-** probe sequence length plus the length of the (signature - 1).
+** probe sequence length plus the (length_of_the_signature - 1).
 ** Stop the search IMMEDIATELY after the signature is found so that the
 ** PROM address counter is correctly positioned at the start of the
 ** ethernet address for later read out.
 */
   if (!status) {
     for (i=0,j=0;j<sigLength && i<PROBE_LENGTH+sigLength-1;i++) {
-      data = inb(ioaddr);
+      data = inb(DEPCA_PROM);
       if (devSig[j] == data) {    /* track signature */
 	j++;
       } else {                    /* lost signature; begin search again */
@@ -1351,12 +1518,38 @@ static char asc2hex(char value)
   return value;                   /* return hex char or error */
 }
 
+#ifdef MODULE
+char kernel_version[] = UTS_RELEASE;
+static struct device thisDepca = {
+  "        ", /* device name inserted by /linux/drivers/net/net_init.c */
+  0, 0, 0, 0,
+  0x200, 7,   /* I/O address, IRQ <--- EDIT THIS LINE FOR YOUR CONFIGURATION */
+  0, 0, 0, NULL, depca_probe };
+	
+int
+init_module(void)
+{
+  if (register_netdev(&thisDepca) != 0)
+    return -EIO;
+  return 0;
+}
+
+void
+cleanup_module(void)
+{
+  if (MOD_IN_USE) {
+    printk("%s: device busy, remove delayed\n",thisDepca.name);
+  } else {
+    unregister_netdev(&thisDepca);
+  }
+}
+#endif /* MODULE */
+
 
 /*
  * Local variables:
- *  compile-command: "gcc -D__KERNEL__ -I/usr/src/linux/net/inet -Wall -Wstrict-prototypes -O6 -m486 -c depca.c"
+ *  kernel-compile-command: "gcc -D__KERNEL__ -I/usr/src/linux/net/inet -Wall -Wstrict-prototypes -O6 -m486 -c depca.c"
+ *
+ *  module-compile-command: "gcc -D__KERNEL__ -DMODULE -I/usr/src/linux/net/inet -Wall -Wstrict-prototypes -O6 -m486 -c depca.c"
  * End:
  */
-
-
-

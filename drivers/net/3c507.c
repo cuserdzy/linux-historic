@@ -4,7 +4,7 @@
 	Copyright 1993 United States Government as represented by the Director,
 	National Security Agency.  This software may only be used and distributed
 	according to the terms of the GNU Public License as modified by SRC,
-	incorported herein by reference.
+	incorporated herein by reference.
 
 	The author may be reached as becker@super.org or
 	C/O Supercomputing Research Ctr., 17100 Science Dr., Bowie MD 20715
@@ -29,7 +29,7 @@ static char *version =
   Sources:
 	This driver wouldn't have been written with the availability of the
 	Crynwr driver source code.	It provided a known-working implementation
-	that filled in the gaping holes of the Intel documention.  Three cheers
+	that filled in the gaping holes of the Intel documentation.  Three cheers
 	for Russ Nelson.
 
 	Intel Microcommunications Databook, Vol. 1, 1990. It provides just enough
@@ -44,24 +44,17 @@ static char *version =
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
+#include <linux/string.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
 #include <asm/dma.h>
-#include <errno.h>
-#include <memory.h>
+#include <linux/errno.h>
 
-#include "dev.h"
-#include "eth.h"
-#include "skbuff.h"
-#include "arp.h"
-
-#ifndef HAVE_ALLOC_SKB
-#define alloc_skb(size, priority) (struct sk_buff *) kmalloc(size,priority)
-#define kfree_skbmem(addr, size) kfree_s(addr,size);
-#else
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
+#include <linux/skbuff.h>
 #include <linux/malloc.h>
-#endif
 
 /* use 0 for production, 1 for verification, 2..7 for debug */
 #ifndef NET_DEBUG
@@ -73,10 +66,10 @@ static unsigned int net_debug = NET_DEBUG;
   			Details of the i82586.
 
    You'll really need the databook to understand the details of this part,
-   but the outline is that the i82586 has two seperate processing units.
+   but the outline is that the i82586 has two separate processing units.
    Both are started from a list of three configuration tables, of which only
    the last, the System Control Block (SCB), is used after reset-time.  The SCB
-   has the following fileds:
+   has the following fields:
 		Status word
 		Command word
 		Tx/Command block addr.
@@ -149,7 +142,7 @@ struct net_local {
 
 /*  Since the 3c507 maps the shared memory window so that the last byte is
 	at 82586 address FFFF, the first byte is at 82586 address 0, 16K, 32K, or
-	48K cooresponding to window sizes of 64K, 48K, 32K and 16K respectively. 
+	48K corresponding to window sizes of 64K, 48K, 32K and 16K respectively. 
 	We can account for this be setting the 'SBC Base' entry in the ISCP table
 	below for all the 16 bit offset addresses, and also adding the 'SCB Base'
 	value to all 24 bit physical addresses (in the SCP table and the TX and RX
@@ -289,7 +282,7 @@ void init_82586_mem(struct device *dev);
 /* Check for a network adaptor of this type, and return '0' iff one exists.
 	If dev->base_addr == 0, probe all likely locations.
 	If dev->base_addr == 1, always return failure.
-	If dev->base_addr == 2, (detachable devices only) alloate space for the
+	If dev->base_addr == 2, (detachable devices only) allocate space for the
 	device and return success.
 	*/
 int
@@ -347,11 +340,11 @@ int el16_probe1(struct device *dev, short ioaddr)
 	printk("%s: 3c507 at %#x,", dev->name, ioaddr);
 
 	/* We should make a few more checks here, like the first three octets of
-	   the S.A. for the manufactor's code. */ 
+	   the S.A. for the manufacturer's code. */ 
 
 	irq = inb(ioaddr + IRQ_CONFIG) & 0x0f;
 
-	irqval = request_irq(irq, &el16_interrupt);
+	irqval = request_irq(irq, &el16_interrupt, 0, "3c507");
 	if (irqval) {
 		printk ("unable to get IRQ %d (irqval=%d).\n", irq, irqval);
 		return EAGAIN;
@@ -409,32 +402,7 @@ int el16_probe1(struct device *dev, short ioaddr)
 	dev->hard_start_xmit = el16_send_packet;
 	dev->get_stats	= el16_get_stats;
 
-	/* Fill in the fields of the device structure with ethernet-generic values.
-	   This should be in a common file instead of per-driver.  */
-	for (i = 0; i < DEV_NUMBUFFS; i++)
-		dev->buffs[i] = NULL;
-
-	dev->hard_header	= eth_header;
-	dev->add_arp	= eth_add_arp;
-	dev->queue_xmit = dev_queue_xmit;
-	dev->rebuild_header = eth_rebuild_header;
-	dev->type_trans = eth_type_trans;
-
-	dev->type		= ARPHRD_ETHER;
-	dev->hard_header_len = ETH_HLEN;
-	dev->mtu		= 1500; /* eth_mtu */
-	dev->addr_len	= ETH_ALEN;
-	for (i = 0; i < ETH_ALEN; i++) {
-		dev->broadcast[i]=0xff;
-	}
-
-	/* New-style flags. */
-	dev->flags		= IFF_BROADCAST;
-	dev->family		= AF_INET;
-	dev->pa_addr	= 0;
-	dev->pa_brdaddr = 0;
-	dev->pa_mask	= 0;
-	dev->pa_alen	= sizeof(unsigned long);
+	ether_setup(dev);	/* Generic ethernet behaviour */
 
 	return 0;
 }
@@ -496,15 +464,6 @@ el16_send_packet(struct sk_buff *skb, struct device *dev)
 		return 0;
 	}
 
-	/* For ethernet, fill in the header.  This should really be done by a
-	   higher level, rather than duplicated for each ethernet adaptor. */
-	if (!skb->arp  &&  dev->rebuild_header(skb->data, dev)) {
-		skb->dev = dev;
-		arp_queue (skb);
-		return 0;
-	}
-	skb->arp=1;
-
 	/* Block a timer-based transmit from overlapping. */
 	if (set_bit(0, (void*)&dev->tbusy) != 0)
 		printk("%s: Transmitter access conflict.\n", dev->name);
@@ -520,8 +479,7 @@ el16_send_packet(struct sk_buff *skb, struct device *dev)
 		outb(0x84, ioaddr + MISC_CTRL);
 	}
 
-	if (skb->free)
-		kfree_skb (skb, FREE_WRITE);
+	dev_kfree_skb (skb, FREE_WRITE);
 
 	/* You might need to clean up and record Tx statistics here. */
 
@@ -571,7 +529,7 @@ el16_interrupt(int reg_ptr)
 		lp->stats.tx_packets++;
 		lp->stats.collisions += tx_status & 0xf;
 		dev->tbusy = 0;
-		mark_bh(INET_BH);		/* Inform upper layers. */
+		mark_bh(NET_BH);		/* Inform upper layers. */
 	  } else {
 		lp->stats.tx_errors++;
 		if (tx_status & 0x0600)  lp->stats.tx_carrier_errors++;
@@ -855,35 +813,22 @@ el16_rx(struct device *dev)
 			if (frame_status & 0x0080) lp->stats.rx_length_errors++;
 		} else {
 			/* Malloc up new buffer. */
-			int sksize;
 			struct sk_buff *skb;
 
 			pkt_len &= 0x3fff;
-			sksize = sizeof(struct sk_buff) + pkt_len;
-			skb = alloc_skb(sksize, GFP_ATOMIC);
+			skb = alloc_skb(pkt_len, GFP_ATOMIC);
 			if (skb == NULL) {
 				printk("%s: Memory squeeze, dropping packet.\n", dev->name);
 				lp->stats.rx_dropped++;
 				break;
 			}
-			skb->mem_len = sksize;
-			skb->mem_addr = skb;
 			skb->len = pkt_len;
 			skb->dev = dev;
 
 			/* 'skb->data' points to the start of sk_buff data area. */
 			memcpy(skb->data, data_frame + 5, pkt_len);
 		
-#ifdef HAVE_NETIF_RX
 			netif_rx(skb);
-#else
-			skb->lock = 0;
-			if (dev_rint((unsigned char*)skb, pkt_len, IN_SKBUFF, dev) != 0) {
-				kfree_skbmem(skb, sksize);
-				lp->stats.rx_dropped++;
-				break;
-			}
-#endif
 			lp->stats.rx_packets++;
 		}
 

@@ -24,7 +24,7 @@ static char *version =
 #include <asm/io.h>
 #include <asm/system.h>
 
-#include "dev.h"
+#include <linux/netdevice.h>
 #include "8390.h"
 
 /* Compatibility definitions for earlier kernel versions. */
@@ -178,7 +178,7 @@ ultra_open(struct device *dev)
 {
   int ioaddr = dev->base_addr - ULTRA_NIC_OFFSET; /* ASIC addr */
 
-  if (irqaction(dev->irq, &ei_sigaction))
+  if (request_irq(dev->irq, ei_interrupt, 0, "SMC Ultra"))
       return -EAGAIN;
 
   outb(ULTRA_MEMENB, ioaddr);	/* Enable memory, 16 bit mode. */

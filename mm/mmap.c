@@ -16,38 +16,39 @@
 #include <asm/segment.h>
 #include <asm/system.h>
 
-static int anon_map(struct inode *, struct file *,
-		    unsigned long, size_t, int,
-		    unsigned long);
+static int anon_map(struct inode *, struct file *, struct vm_area_struct *);
+
 /*
  * description of effects of mapping type and prot in current implementation.
- * this is due to the current handling of page faults in memory.c. the expected
+ * this is due to the limited x86 page protection hardware.  The expected
  * behavior is in parens:
  *
  * map_type	prot
  *		PROT_NONE	PROT_READ	PROT_WRITE	PROT_EXEC
- * MAP_SHARED	r: (no) yes	r: (yes) yes	r: (no) yes	r: (no) no
- *		w: (no) yes	w: (no) copy	w: (yes) yes	w: (no) no
- *		x: (no) no	x: (no) no	x: (no) no	x: (yes) no
+ * MAP_SHARED	r: (no) no	r: (yes) yes	r: (no) yes	r: (no) yes
+ *		w: (no) no	w: (no) no	w: (yes) yes	w: (no) no
+ *		x: (no) no	x: (no) yes	x: (no) yes	x: (yes) yes
  *		
- * MAP_PRIVATE	r: (no) yes	r: (yes) yes	r: (no) yes	r: (no) no
- *		w: (no) copy	w: (no) copy	w: (copy) copy	w: (no) no
- *		x: (no) no	x: (no) no	x: (no) no	x: (yes) no
+ * MAP_PRIVATE	r: (no) no	r: (yes) yes	r: (no) yes	r: (no) yes
+ *		w: (no) no	w: (no) no	w: (copy) copy	w: (no) no
+ *		x: (no) no	x: (no) yes	x: (no) yes	x: (yes) yes
  *
  */
-
-#define CODE_SPACE(addr)	\
- (PAGE_ALIGN(addr) < current->start_code + current->end_code)
 
 int do_mmap(struct file * file, unsigned long addr, unsigned long len,
 	unsigned long prot, unsigned long flags, unsigned long off)
 {
 	int mask, error;
+	struct vm_area_struct * vma;
 
 	if ((len = PAGE_ALIGN(len)) == 0)
 		return addr;
 
 	if (addr > TASK_SIZE || len > TASK_SIZE || addr > TASK_SIZE-len)
+		return -EINVAL;
+
+	/* offset overflow? */
+	if (off + len < off)
 		return -EINVAL;
 
 	/*
@@ -56,7 +57,7 @@ int do_mmap(struct file * file, unsigned long addr, unsigned long len,
 	 * of the memory object, so we don't do any here.
 	 */
 
-	if (file != NULL)
+	if (file != NULL) {
 		switch (flags & MAP_TYPE) {
 		case MAP_SHARED:
 			if ((prot & PROT_WRITE) && !(file->f_mode & 2))
@@ -70,6 +71,9 @@ int do_mmap(struct file * file, unsigned long addr, unsigned long len,
 		default:
 			return -EINVAL;
 		}
+	} else if ((flags & MAP_TYPE) == MAP_SHARED)
+		return -EINVAL;
+
 	/*
 	 * obtain the address to map to. we verify (or select) it and ensure
 	 * that it represents a valid section of the address space.
@@ -86,7 +90,7 @@ int do_mmap(struct file * file, unsigned long addr, unsigned long len,
 		/* Maybe this works.. Ugly it is. */
 		addr = SHM_RANGE_START;
 		while (addr+len < SHM_RANGE_END) {
-			for (vmm = current->mmap ; vmm ; vmm = vmm->vm_next) {
+			for (vmm = current->mm->mmap ; vmm ; vmm = vmm->vm_next) {
 				if (addr >= vmm->vm_end)
 					continue;
 				if (addr + len <= vmm->vm_start)
@@ -108,7 +112,7 @@ int do_mmap(struct file * file, unsigned long addr, unsigned long len,
 	 */
 	if (file && (!file->f_op || !file->f_op->mmap))
 		return -ENODEV;
-	mask = 0;
+	mask = PAGE_PRESENT;
 	if (prot & (PROT_READ | PROT_EXEC))
 		mask |= PAGE_READONLY;
 	if (prot & PROT_WRITE)
@@ -116,22 +120,50 @@ int do_mmap(struct file * file, unsigned long addr, unsigned long len,
 			mask |= PAGE_COPY;
 		else
 			mask |= PAGE_SHARED;
-	if (!mask)
-		return -EINVAL;
+
+	vma = (struct vm_area_struct *)kmalloc(sizeof(struct vm_area_struct),
+		GFP_KERNEL);
+	if (!vma)
+		return -ENOMEM;
+
+	vma->vm_task = current;
+	vma->vm_start = addr;
+	vma->vm_end = addr + len;
+	vma->vm_page_prot = mask;
+	vma->vm_flags = prot & (VM_READ | VM_WRITE | VM_EXEC);
+	vma->vm_flags |= flags & (VM_GROWSDOWN | VM_DENYWRITE | VM_EXECUTABLE);
+
+	if (file) {
+		if (file->f_mode & 1)
+			vma->vm_flags |= VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC;
+		if (flags & MAP_SHARED) {
+			vma->vm_flags |= VM_SHARED | VM_MAYSHARE;
+			if (!(file->f_mode & 2))
+				vma->vm_flags &= ~VM_MAYWRITE;
+		}
+	} else
+		vma->vm_flags |= VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC;
+	vma->vm_ops = NULL;
+	vma->vm_offset = off;
+	vma->vm_inode = NULL;
+	vma->vm_pte = 0;
 
 	do_munmap(addr, len);	/* Clear old maps */
 
 	if (file)
-		error = file->f_op->mmap(file->f_inode, file, addr, len, mask, off);
+		error = file->f_op->mmap(file->f_inode, file, vma);
 	else
-		error = anon_map(NULL, NULL, addr, len, mask, off);
+		error = anon_map(NULL, NULL, vma);
 	
-	if (!error)
-		return addr;
-
-	if (!current->errno)
-		current->errno = -error;
-	return -1;
+	if (error) {
+		kfree(vma);
+		if (!current->errno)
+			current->errno = -error;
+		return -1;
+	}
+	insert_vm_struct(current, vma);
+	merge_segments(current->mm->mmap);
+	return addr;
 }
 
 asmlinkage int sys_mmap(unsigned long *buffer)
@@ -146,7 +178,7 @@ asmlinkage int sys_mmap(unsigned long *buffer)
 	flags = get_fs_long(buffer+3);
 	if (!(flags & MAP_ANONYMOUS)) {
 		unsigned long fd = get_fs_long(buffer+4);
-		if (fd >= NR_OPEN || !(file = current->filp[fd]))
+		if (fd >= NR_OPEN || !(file = current->files->fd[fd]))
 			return -EBADF;
 	}
 	return do_mmap(file, get_fs_long(buffer), get_fs_long(buffer+1),
@@ -194,6 +226,8 @@ void unmap_fixup(struct vm_area_struct *area,
 	if (addr == area->vm_start && end == area->vm_end) {
 		if (area->vm_ops && area->vm_ops->close)
 			area->vm_ops->close(area);
+		if (area->vm_inode)
+			iput(area->vm_inode);
 		return;
 	}
 
@@ -216,20 +250,14 @@ void unmap_fixup(struct vm_area_struct *area,
 		mpnt->vm_start = end;
 		if (mpnt->vm_inode)
 			mpnt->vm_inode->i_count++;
-		insert_vm_struct(current, mpnt);
 		area->vm_end = addr;	/* Truncate area */
+		insert_vm_struct(current, mpnt);
 	}
 
 	/* construct whatever mapping is needed */
 	mpnt = (struct vm_area_struct *)kmalloc(sizeof(*mpnt), GFP_KERNEL);
 	*mpnt = *area;
 	insert_vm_struct(current, mpnt);
-}
-
-
-asmlinkage int sys_mprotect(unsigned long addr, size_t len, unsigned long prot)
-{
-	return -EINVAL; /* Not implemented yet */
 }
 
 asmlinkage int sys_munmap(unsigned long addr, size_t len)
@@ -259,7 +287,7 @@ int do_munmap(unsigned long addr, size_t len)
 	 * every area affected in some way (by any overlap) is put
 	 * on the list.  If nothing is put on, nothing is affected.
 	 */
-	npp = &current->mmap;
+	npp = &current->mm->mmap;
 	free = NULL;
 	for (mpnt = *npp; mpnt != NULL; mpnt = *npp) {
 		unsigned long end = addr+len;
@@ -308,79 +336,45 @@ int do_munmap(unsigned long addr, size_t len)
 }
 
 /* This is used for a general mmap of a disk file */
-int generic_mmap(struct inode * inode, struct file * file,
-	unsigned long addr, size_t len, int prot, unsigned long off)
+int generic_mmap(struct inode * inode, struct file * file, struct vm_area_struct * vma)
 {
-  	struct vm_area_struct * mpnt;
 	extern struct vm_operations_struct file_mmap;
-	struct buffer_head * bh;
 
-	if (prot & PAGE_RW)	/* only PAGE_COW or read-only supported right now */
+	if (vma->vm_page_prot & PAGE_RW)	/* only PAGE_COW or read-only supported right now */
 		return -EINVAL;
-	if (off & (inode->i_sb->s_blocksize - 1))
+	if (vma->vm_offset & (inode->i_sb->s_blocksize - 1))
 		return -EINVAL;
 	if (!inode->i_sb || !S_ISREG(inode->i_mode))
 		return -EACCES;
 	if (!inode->i_op || !inode->i_op->bmap)
 		return -ENOEXEC;
-	if (!(bh = bread(inode->i_dev,bmap(inode,0),inode->i_sb->s_blocksize)))
-		return -EACCES;
 	if (!IS_RDONLY(inode)) {
 		inode->i_atime = CURRENT_TIME;
 		inode->i_dirt = 1;
 	}
-	brelse(bh);
-
-	mpnt = (struct vm_area_struct * ) kmalloc(sizeof(struct vm_area_struct), GFP_KERNEL);
-	if (!mpnt)
-		return -ENOMEM;
-
-	unmap_page_range(addr, len);	
-	mpnt->vm_task = current;
-	mpnt->vm_start = addr;
-	mpnt->vm_end = addr + len;
-	mpnt->vm_page_prot = prot;
-	mpnt->vm_share = NULL;
-	mpnt->vm_inode = inode;
+	vma->vm_inode = inode;
 	inode->i_count++;
-	mpnt->vm_offset = off;
-	mpnt->vm_ops = &file_mmap;
-	insert_vm_struct(current, mpnt);
-	merge_segments(current->mmap, NULL, NULL);
-	
+	vma->vm_ops = &file_mmap;
 	return 0;
 }
 
 /*
- * Insert vm structure into process list
- * This makes sure the list is sorted by start address, and
- * some some simple overlap checking.
- * JSGF
+ * Insert vm structure into process list sorted by address.
  */
 void insert_vm_struct(struct task_struct *t, struct vm_area_struct *vmp)
 {
-	struct vm_area_struct **nxtpp, *mpnt;
+	struct vm_area_struct **p, *mpnt;
 
-	nxtpp = &t->mmap;
-	
-	for(mpnt = t->mmap; mpnt != NULL; mpnt = mpnt->vm_next)
-	{
+	p = &t->mm->mmap;
+	while ((mpnt = *p) != NULL) {
 		if (mpnt->vm_start > vmp->vm_start)
 			break;
-		nxtpp = &mpnt->vm_next;
-
-		if ((vmp->vm_start >= mpnt->vm_start &&
-		     vmp->vm_start < mpnt->vm_end) ||
-		    (vmp->vm_end >= mpnt->vm_start &&
-		     vmp->vm_end < mpnt->vm_end))
-			printk("insert_vm_struct: ins area %lx-%lx in area %lx-%lx\n",
-			       vmp->vm_start, vmp->vm_end,
-			       mpnt->vm_start, vmp->vm_end);
+		if (mpnt->vm_end > vmp->vm_start)
+			printk("insert_vm_struct: overlapping memory areas\n");
+		p = &mpnt->vm_next;
 	}
-	
 	vmp->vm_next = mpnt;
-
-	*nxtpp = vmp;
+	*p = vmp;
 }
 
 /*
@@ -388,8 +382,7 @@ void insert_vm_struct(struct task_struct *t, struct vm_area_struct *vmp)
  * Redundant vm_area_structs are freed.
  * This assumes that the list is ordered by address.
  */
-void merge_segments(struct vm_area_struct *mpnt,
-		    map_mergep_fnp mergep, void *mpd)
+void merge_segments(struct vm_area_struct *mpnt)
 {
 	struct vm_area_struct *prev, *next;
 
@@ -400,31 +393,29 @@ void merge_segments(struct vm_area_struct *mpnt,
 	    mpnt != NULL;
 	    prev = mpnt, mpnt = next)
 	{
-		int mp;
-
 		next = mpnt->vm_next;
-		
-		if (mergep == NULL)
-		{
-			unsigned long psz = prev->vm_end - prev->vm_start;
-			mp = prev->vm_offset + psz == mpnt->vm_offset;
-		}
-		else
-			mp = (*mergep)(prev, mpnt, mpd);
 
 		/*
-		 * Check they are compatible.
-		 * and the like...
-		 * What does the share pointer mean?
+		 * To share, we must have the same inode, operations.. 
 		 */
-		if (prev->vm_ops != mpnt->vm_ops ||
-		    prev->vm_page_prot != mpnt->vm_page_prot ||
-		    prev->vm_inode != mpnt->vm_inode ||
-		    prev->vm_end != mpnt->vm_start ||
-		    !mp ||
-		    prev->vm_share != mpnt->vm_share ||		/* ?? */
-		    prev->vm_next != mpnt)			/* !!! */
+		if (mpnt->vm_inode != prev->vm_inode)
 			continue;
+		if (mpnt->vm_pte != prev->vm_pte)
+			continue;
+		if (mpnt->vm_ops != prev->vm_ops)
+			continue;
+		if (mpnt->vm_page_prot != prev->vm_page_prot ||
+		    mpnt->vm_flags != prev->vm_flags)
+			continue;
+		if (prev->vm_end != mpnt->vm_start)
+			continue;
+		/*
+		 * and if we have an inode, the offsets must be contiguous..
+		 */
+		if (mpnt->vm_inode != NULL) {
+			if (prev->vm_offset + prev->vm_end - prev->vm_start != mpnt->vm_offset)
+				continue;
+		}
 
 		/*
 		 * merge prev with mpnt and set up pointers so the new
@@ -440,42 +431,11 @@ void merge_segments(struct vm_area_struct *mpnt,
 
 /*
  * Map memory not associated with any file into a process
- * address space.  Adjecent memory is merged.
+ * address space.  Adjacent memory is merged.
  */
-static int anon_map(struct inode *ino, struct file * file,
-		    unsigned long addr, size_t len, int mask,
-		    unsigned long off)
+static int anon_map(struct inode *ino, struct file * file, struct vm_area_struct * vma)
 {
-  	struct vm_area_struct * mpnt;
-
-	if (zeromap_page_range(addr, len, mask))
+	if (zeromap_page_range(vma->vm_start, vma->vm_end - vma->vm_start, vma->vm_page_prot))
 		return -ENOMEM;
-
-	mpnt = (struct vm_area_struct * ) kmalloc(sizeof(struct vm_area_struct), GFP_KERNEL);
-	if (!mpnt)
-		return -ENOMEM;
-
-	mpnt->vm_task = current;
-	mpnt->vm_start = addr;
-	mpnt->vm_end = addr + len;
-	mpnt->vm_page_prot = mask;
-	mpnt->vm_share = NULL;
-	mpnt->vm_inode = NULL;
-	mpnt->vm_offset = 0;
-	mpnt->vm_ops = NULL;
-	insert_vm_struct(current, mpnt);
-	merge_segments(current->mmap, ignoff_mergep, NULL);
-
 	return 0;
-}
-
-/* Merge, ignoring offsets */
-int ignoff_mergep(const struct vm_area_struct *m1,
-		  const struct vm_area_struct *m2,
-		  void *data)
-{
-	if (m1->vm_inode != m2->vm_inode)	/* Just to be sure */
-		return 0;
-
-	return (struct inode *)data == m1->vm_inode;
 }

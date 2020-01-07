@@ -58,7 +58,7 @@ int fcntl_getlk(unsigned int fd, struct flock *l)
 	struct file *filp;
 	struct file_lock *fl,file_lock;
 
-	if (fd >= NR_OPEN || !(filp = current->filp[fd]))
+	if (fd >= NR_OPEN || !(filp = current->files->fd[fd]))
 		return -EBADF;
 	error = verify_area(VERIFY_WRITE,l, sizeof(*l));
 	if (error)
@@ -102,7 +102,7 @@ int fcntl_setlk(unsigned int fd, unsigned int cmd, struct flock *l)
 	 * Get arguments and validate them ...
 	 */
 
-	if (fd >= NR_OPEN || !(filp = current->filp[fd]))
+	if (fd >= NR_OPEN || !(filp = current->files->fd[fd]))
 		return -EBADF;
 	error = verify_area(VERIFY_WRITE, l, sizeof(*l));
 	if (error)
@@ -199,8 +199,6 @@ static int copy_flock(struct file *filp, struct file_lock *fl, struct flock *l,
 	off_t start;
 
 	if (!filp->f_inode)	/* just in case */
-		return 0;
-	if (!S_ISREG(filp->f_inode->i_mode))
 		return 0;
 	if (l->l_type != F_UNLCK && l->l_type != F_RDLCK && l->l_type != F_WRLCK
 	 && l->l_type != F_SHLCK && l->l_type != F_EXLCK)
@@ -360,7 +358,7 @@ static int lock_it(struct file *filp, struct file_lock *caller, unsigned int fd)
 			/*
 			 * Replace the old lock with the new one. Wake up
 			 * anybody waiting for the old one, as the change in
-			 * lock type migth satisfy his needs.
+			 * lock type might satisfy his needs.
 			 */
 			wake_up(&fl->fl_wait);
 			fl->fl_start = caller->fl_start;
@@ -377,8 +375,22 @@ next_lock:
 	}
 
 	if (! added) {
-		if (caller->fl_type == F_UNLCK)
+		if (caller->fl_type == F_UNLCK) {
+/*
+ * XXX - under iBCS-2, attempting to unlock a not-locked region is 
+ * 	not considered an error condition, although I'm not sure if this 
+ * 	should be a default behavior (it makes porting to native Linux easy)
+ * 	or a personality option.
+ *
+ *	Does Xopen/1170 say anything about this?
+ *	- drew@Colorado.EDU
+ */
+#if 0
 			return -EINVAL;
+#else
+			return 0;
+#endif
+		}
 		if (! (caller = alloc_lock(before, caller, fd)))
 			return -ENOLCK;
 	}

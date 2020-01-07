@@ -4,6 +4,16 @@
  *  Copyright (C) 1992, 1993, 1994  Rick Sladkey
  *
  *  OS-independent nfs remote procedure call functions
+ *
+ *  Tuned by Alan Cox <A.Cox@swansea.ac.uk> for >3K buffers
+ *  so at last we can have decent(ish) throughput off a 
+ *  Sun server.
+ *
+ *  FixMe: We ought to define a sensible small max size for
+ *  things like getattr that are tiny packets and use the
+ *  old get_free_page stuff with it.
+ *
+ *  Feel free to fix it and mail me the diffs if it worries you.
  */
 
 /*
@@ -20,6 +30,7 @@
 #include <linux/param.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
+#include <linux/malloc.h>
 #include <linux/nfs_fs.h>
 #include <linux/utsname.h>
 #include <linux/errno.h>
@@ -48,15 +59,18 @@ static int nfs_stat_to_errno(int stat);
 /*
  * Our memory allocation and release functions.
  */
+ 
+#define NFS_SLACK_SPACE		1024	/* Total overkill */ 
 
-static inline int *nfs_rpc_alloc(void)
+static inline int *nfs_rpc_alloc(int size)
 {
-	return (int *) __get_free_page(GFP_KERNEL);
+	size+=NFS_SLACK_SPACE;		/* Allow for the NFS crap as well as buffer */
+	return (int *)kmalloc(size,GFP_KERNEL);
 }
 
 static inline void nfs_rpc_free(int *p)
 {
-	free_page((long) p);
+	kfree((void *)p);
 }
 
 /*
@@ -195,7 +209,7 @@ int nfs_proc_getattr(struct nfs_server *server, struct nfs_fh *fhandle,
 	int ruid = 0;
 
 	PRINTK("NFS call  getattr\n");
-	if (!(p0 = nfs_rpc_alloc()))
+	if (!(p0 = nfs_rpc_alloc(server->rsize)))
 		return -EIO;
 retry:
 	p = nfs_rpc_header(p0, NFSPROC_GETATTR, ruid);
@@ -211,7 +225,7 @@ retry:
 		PRINTK("NFS reply getattr\n");
 	}
 	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
+		if (!ruid && current->fsuid == 0 && current->uid != 0) {
 			ruid = 1;
 			goto retry;
 		}
@@ -229,7 +243,7 @@ int nfs_proc_setattr(struct nfs_server *server, struct nfs_fh *fhandle,
 	int ruid = 0;
 
 	PRINTK("NFS call  setattr\n");
-	if (!(p0 = nfs_rpc_alloc()))
+	if (!(p0 = nfs_rpc_alloc(server->wsize)))
 		return -EIO;
 retry:
 	p = nfs_rpc_header(p0, NFSPROC_SETATTR, ruid);
@@ -246,7 +260,7 @@ retry:
 		PRINTK("NFS reply setattr\n");
 	}
 	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
+		if (!ruid && current->fsuid == 0 && current->uid != 0) {
 			ruid = 1;
 			goto retry;
 		}
@@ -268,7 +282,7 @@ int nfs_proc_lookup(struct nfs_server *server, struct nfs_fh *dir, const char *n
 	if (!strcmp(name, "xyzzy"))
 		proc_debug = 1 - proc_debug;
 #endif
-	if (!(p0 = nfs_rpc_alloc()))
+	if (!(p0 = nfs_rpc_alloc(server->rsize)))
 		return -EIO;
 retry:
 	p = nfs_rpc_header(p0, NFSPROC_LOOKUP, ruid);
@@ -286,7 +300,7 @@ retry:
 		PRINTK("NFS reply lookup\n");
 	}
 	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
+		if (!ruid && current->fsuid == 0 && current->uid != 0) {
 			ruid = 1;
 			goto retry;
 		}
@@ -304,7 +318,7 @@ int nfs_proc_readlink(struct nfs_server *server, struct nfs_fh *fhandle,
 	int ruid = 0;
 
 	PRINTK("NFS call  readlink\n");
-	if (!(p0 = nfs_rpc_alloc()))
+	if (!(p0 = nfs_rpc_alloc(server->rsize)))
 		return -EIO;
 retry:
 	p = nfs_rpc_header(p0, NFSPROC_READLINK, ruid);
@@ -324,7 +338,7 @@ retry:
 			PRINTK("NFS reply readlink %s\n", res);
 	}
 	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
+		if (!ruid && current->fsuid == 0 && current->uid != 0) {
 			ruid = 1;
 			goto retry;
 		}
@@ -343,7 +357,7 @@ int nfs_proc_read(struct nfs_server *server, struct nfs_fh *fhandle,
 	int len = 0; /* = 0 is for gcc */
 
 	PRINTK("NFS call  read %d @ %d\n", count, offset);
-	if (!(p0 = nfs_rpc_alloc()))
+	if (!(p0 = nfs_rpc_alloc(server->rsize)))
 		return -EIO;
 retry:
 	p = nfs_rpc_header(p0, NFSPROC_READ, ruid);
@@ -367,7 +381,7 @@ retry:
 			PRINTK("NFS reply read %d\n", len);
 	}
 	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
+		if (!ruid && current->fsuid == 0 && current->uid != 0) {
 			ruid = 1;
 			goto retry;
 		}
@@ -385,7 +399,7 @@ int nfs_proc_write(struct nfs_server *server, struct nfs_fh *fhandle,
 	int ruid = 0;
 
 	PRINTK("NFS call  write %d @ %d\n", count, offset);
-	if (!(p0 = nfs_rpc_alloc()))
+	if (!(p0 = nfs_rpc_alloc(server->wsize)))
 		return -EIO;
 retry:
 	p = nfs_rpc_header(p0, NFSPROC_WRITE, ruid);
@@ -405,7 +419,7 @@ retry:
 		PRINTK("NFS reply write\n");
 	}
 	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
+		if (!ruid && current->fsuid == 0 && current->uid != 0) {
 			ruid = 1;
 			goto retry;
 		}
@@ -424,7 +438,7 @@ int nfs_proc_create(struct nfs_server *server, struct nfs_fh *dir,
 	int ruid = 0;
 
 	PRINTK("NFS call  create %s\n", name);
-	if (!(p0 = nfs_rpc_alloc()))
+	if (!(p0 = nfs_rpc_alloc(server->wsize)))
 		return -EIO;
 retry:
 	p = nfs_rpc_header(p0, NFSPROC_CREATE, ruid);
@@ -443,7 +457,7 @@ retry:
 		PRINTK("NFS reply create\n");
 	}
 	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
+		if (!ruid && current->fsuid == 0 && current->uid != 0) {
 			ruid = 1;
 			goto retry;
 		}
@@ -460,7 +474,7 @@ int nfs_proc_remove(struct nfs_server *server, struct nfs_fh *dir, const char *n
 	int ruid = 0;
 
 	PRINTK("NFS call  remove %s\n", name);
-	if (!(p0 = nfs_rpc_alloc()))
+	if (!(p0 = nfs_rpc_alloc(server->wsize)))
 		return -EIO;
 retry:
 	p = nfs_rpc_header(p0, NFSPROC_REMOVE, ruid);
@@ -476,7 +490,7 @@ retry:
 		PRINTK("NFS reply remove\n");
 	}
 	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
+		if (!ruid && current->fsuid == 0 && current->uid != 0) {
 			ruid = 1;
 			goto retry;
 		}
@@ -495,7 +509,7 @@ int nfs_proc_rename(struct nfs_server *server,
 	int ruid = 0;
 
 	PRINTK("NFS call  rename %s -> %s\n", old_name, new_name);
-	if (!(p0 = nfs_rpc_alloc()))
+	if (!(p0 = nfs_rpc_alloc(server->wsize)))
 		return -EIO;
 retry:
 	p = nfs_rpc_header(p0, NFSPROC_RENAME, ruid);
@@ -513,7 +527,7 @@ retry:
 		PRINTK("NFS reply rename\n");
 	}
 	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
+		if (!ruid && current->fsuid == 0 && current->uid != 0) {
 			ruid = 1;
 			goto retry;
 		}
@@ -531,7 +545,7 @@ int nfs_proc_link(struct nfs_server *server, struct nfs_fh *fhandle,
 	int ruid = 0;
 
 	PRINTK("NFS call  link %s\n", name);
-	if (!(p0 = nfs_rpc_alloc()))
+	if (!(p0 = nfs_rpc_alloc(server->wsize)))
 		return -EIO;
 retry:
 	p = nfs_rpc_header(p0, NFSPROC_LINK, ruid);
@@ -548,7 +562,7 @@ retry:
 		PRINTK("NFS reply link\n");
 	}
 	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
+		if (!ruid && current->fsuid == 0 && current->uid != 0) {
 			ruid = 1;
 			goto retry;
 		}
@@ -566,7 +580,7 @@ int nfs_proc_symlink(struct nfs_server *server, struct nfs_fh *dir,
 	int ruid = 0;
 
 	PRINTK("NFS call  symlink %s -> %s\n", name, path);
-	if (!(p0 = nfs_rpc_alloc()))
+	if (!(p0 = nfs_rpc_alloc(server->wsize)))
 		return -EIO;
 retry:
 	p = nfs_rpc_header(p0, NFSPROC_SYMLINK, ruid);
@@ -584,7 +598,7 @@ retry:
 		PRINTK("NFS reply symlink\n");
 	}
 	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
+		if (!ruid && current->fsuid == 0 && current->uid != 0) {
 			ruid = 1;
 			goto retry;
 		}
@@ -603,7 +617,7 @@ int nfs_proc_mkdir(struct nfs_server *server, struct nfs_fh *dir,
 	int ruid = 0;
 
 	PRINTK("NFS call  mkdir %s\n", name);
-	if (!(p0 = nfs_rpc_alloc()))
+	if (!(p0 = nfs_rpc_alloc(server->wsize)))
 		return -EIO;
 retry:
 	p = nfs_rpc_header(p0, NFSPROC_MKDIR, ruid);
@@ -622,7 +636,7 @@ retry:
 		PRINTK("NFS reply mkdir\n");
 	}
 	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
+		if (!ruid && current->fsuid == 0 && current->uid != 0) {
 			ruid = 1;
 			goto retry;
 		}
@@ -639,7 +653,7 @@ int nfs_proc_rmdir(struct nfs_server *server, struct nfs_fh *dir, const char *na
 	int ruid = 0;
 
 	PRINTK("NFS call  rmdir %s\n", name);
-	if (!(p0 = nfs_rpc_alloc()))
+	if (!(p0 = nfs_rpc_alloc(server->wsize)))
 		return -EIO;
 retry:
 	p = nfs_rpc_header(p0, NFSPROC_RMDIR, ruid);
@@ -655,7 +669,7 @@ retry:
 		PRINTK("NFS reply rmdir\n");
 	}
 	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
+		if (!ruid && current->fsuid == 0 && current->uid != 0) {
 			ruid = 1;
 			goto retry;
 		}
@@ -677,7 +691,7 @@ int nfs_proc_readdir(struct nfs_server *server, struct nfs_fh *fhandle,
 
 	PRINTK("NFS call  readdir %d @ %d\n", count, cookie);
 	size = server->rsize;
-	if (!(p0 = nfs_rpc_alloc()))
+	if (!(p0 = nfs_rpc_alloc(server->rsize)))
 		return -EIO;
 retry:
 	p = nfs_rpc_header(p0, NFSPROC_READDIR, ruid);
@@ -709,7 +723,7 @@ retry:
 		}
 	}
 	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
+		if (!ruid && current->fsuid == 0 && current->uid != 0) {
 			ruid = 1;
 			goto retry;
 		}
@@ -727,7 +741,7 @@ int nfs_proc_statfs(struct nfs_server *server, struct nfs_fh *fhandle,
 	int ruid = 0;
 
 	PRINTK("NFS call  statfs\n");
-	if (!(p0 = nfs_rpc_alloc()))
+	if (!(p0 = nfs_rpc_alloc(server->rsize)))
 		return -EIO;
 retry:
 	p = nfs_rpc_header(p0, NFSPROC_STATFS, ruid);
@@ -743,7 +757,7 @@ retry:
 		PRINTK("NFS reply statfs\n");
 	}
 	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
+		if (!ruid && current->fsuid == 0 && current->uid != 0) {
 			ruid = 1;
 			goto retry;
 		}
@@ -778,7 +792,7 @@ static int *nfs_rpc_header(int *p, int procedure, int ruid)
 	p1 = p++;
 	*p++ = htonl(CURRENT_TIME); /* traditional, could be anything */
 	p = xdr_encode_string(p, (char *) sys);
-	*p++ = htonl(ruid ? current->uid : current->euid);
+	*p++ = htonl(ruid ? current->uid : current->fsuid);
 	*p++ = htonl(current->egid);
 	p2 = p++;
 	for (i = 0; i < 16 && i < NGROUPS && current->groups[i] != NOGROUP; i++)

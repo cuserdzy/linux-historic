@@ -1,8 +1,6 @@
 #ifndef _LINUX_SCHED_H
 #define _LINUX_SCHED_H
 
-#define NEW_SWAP
-
 /*
  * define DEBUG if you want the wait-queues to have some extra
  * debugging code. It's not normally used, but might catch some
@@ -14,14 +12,22 @@
 #define HZ 100
 
 /*
- * System setup flags..
+ * System setup and hardware bug flags..
  */
 extern int hard_math;
 extern int x86;
 extern int ignore_irq13;
-extern int wp_works_ok;
+extern int wp_works_ok;		/* doesn't work on a 386 */
+extern int hlt_works_ok;	/* problems on some 486Dx4's and old 386's */
 
 extern unsigned long intr_count;
+extern unsigned long event;
+
+#define start_bh_atomic() \
+__asm__ __volatile__("incl _intr_count")
+
+#define end_bh_atomic() \
+__asm__ __volatile__("decl _intr_count")
 
 /*
  * Bus types (default is ISA, but people can check others with these..)
@@ -30,6 +36,8 @@ extern unsigned long intr_count;
 extern int EISA_bus;
 #define MCA_bus 0
 
+#include <linux/binfmts.h>
+#include <linux/personality.h>
 #include <linux/tasks.h>
 #include <asm/system.h>
 
@@ -83,6 +91,7 @@ extern unsigned long avenrun[];		/* Load averages */
 #include <linux/resource.h>
 #include <linux/vm86.h>
 #include <linux/math_emu.h>
+#include <linux/ptrace.h>
 
 #define TASK_RUNNING		0
 #define TASK_INTERRUPTIBLE	1
@@ -166,6 +175,71 @@ struct tss_struct {
 	union i387_union i387;
 };
 
+#define INIT_TSS  { \
+	0,0, \
+	sizeof(init_kernel_stack) + (long) &init_kernel_stack, \
+	KERNEL_DS, 0, \
+	0,0,0,0,0,0, \
+	(long) &swapper_pg_dir, \
+	0,0,0,0,0,0,0,0,0,0, \
+	USER_DS,0,USER_DS,0,USER_DS,0,USER_DS,0,USER_DS,0,USER_DS,0, \
+	_LDT(0),0, \
+	0, 0x8000, \
+	{~0, }, /* ioperm */ \
+	_TSS(0), 0, 0,0, \
+	{ { 0, }, }  /* 387 state */ \
+}
+
+struct files_struct {
+	int count;
+	fd_set close_on_exec;
+	struct file * fd[NR_OPEN];
+};
+
+#define INIT_FILES { \
+	0, \
+	{ { 0, } }, \
+	{ NULL, } \
+}
+
+struct fs_struct {
+	int count;
+	unsigned short umask;
+	struct inode * root, * pwd;
+};
+
+#define INIT_FS { \
+	0, \
+	0022, \
+	NULL, NULL \
+}
+
+struct mm_struct {
+	int count;
+	unsigned long start_code, end_code, end_data;
+	unsigned long start_brk, brk, start_stack, start_mmap;
+	unsigned long arg_start, arg_end, env_start, env_end;
+	unsigned long rss;
+	unsigned long min_flt, maj_flt, cmin_flt, cmaj_flt;
+	int swappable:1;
+	unsigned long swap_address;
+	unsigned long old_maj_flt;	/* old value of maj_flt */
+	unsigned long dec_flt;		/* page fault count of the last time */
+	unsigned long swap_cnt;		/* number of pages to swap on next pass */
+	struct vm_area_struct * mmap;
+};
+
+#define INIT_MM { \
+		0, \
+		0, 0, 0, \
+		0, 0, 0, 0, \
+		0, 0, 0, 0, \
+		0, \
+/* ?_flt */	0, 0, 0, 0, \
+		0, \
+/* swap */	0, 0, 0, 0, \
+		NULL }
+
 struct task_struct {
 /* these are hardcoded - don't touch */
 	volatile long state;	/* -1 unrunnable, 0 runnable, >0 stopped */
@@ -176,18 +250,17 @@ struct task_struct {
 	unsigned long flags;	/* per process flags, defined below */
 	int errno;
 	int debugreg[8];  /* Hardware debugging registers */
+	struct exec_domain *exec_domain;
 /* various fields */
+	struct linux_binfmt *binfmt;
 	struct task_struct *next_task, *prev_task;
 	struct sigaction sigaction[32];
 	unsigned long saved_kernel_stack;
 	unsigned long kernel_stack_page;
 	int exit_code, exit_signal;
-	int elf_executable:1;
+	unsigned long personality;
 	int dumpable:1;
-	int swappable:1;
 	int did_exec:1;
-	unsigned long start_code,end_code,end_data,start_brk,brk,start_stack,start_mmap;
-	unsigned long arg_start, arg_end, env_start, env_end;
 	int pid,pgrp,session,leader;
 	int	groups[NGROUPS];
 	/* 
@@ -195,50 +268,37 @@ struct task_struct {
 	 * older sibling, respectively.  (p->father can be replaced with 
 	 * p->p_pptr->pid)
 	 */
-	struct task_struct *p_opptr,*p_pptr, *p_cptr, *p_ysptr, *p_osptr;
+	struct task_struct *p_opptr, *p_pptr, *p_cptr, *p_ysptr, *p_osptr;
 	struct wait_queue *wait_chldexit;	/* for wait4() */
-	/*
-	 * For ease of programming... Normal sleeps don't need to
-	 * keep track of a wait-queue: every task has an entry of its own
-	 */
-	unsigned short uid,euid,suid;
-	unsigned short gid,egid,sgid;
+	unsigned short uid,euid,suid,fsuid;
+	unsigned short gid,egid,sgid,fsgid;
 	unsigned long timeout;
 	unsigned long it_real_value, it_prof_value, it_virt_value;
 	unsigned long it_real_incr, it_prof_incr, it_virt_incr;
-	long utime,stime,cutime,cstime,start_time;
-	unsigned long min_flt, maj_flt;
-	unsigned long cmin_flt, cmaj_flt;
+	long utime, stime, cutime, cstime, start_time;
 	struct rlimit rlim[RLIM_NLIMITS]; 
 	unsigned short used_math;
-	unsigned short rss;	/* number of resident pages */
 	char comm[16];
+/* virtual 86 mode stuff */
 	struct vm86_struct * vm86_info;
 	unsigned long screen_bitmap;
+	unsigned long v86flags, v86mask, v86mode;
 /* file system info */
 	int link_count;
-	int tty;		/* -1 if no tty, so it must be signed */
-	unsigned short umask;
-	struct inode * pwd;
-	struct inode * root;
-	struct inode * executable;
-	struct vm_area_struct * mmap;
+	struct tty_struct *tty; /* NULL if no tty */
+/* shm stuff */
 	struct shm_desc *shm;
 	struct sem_undo *semun;
-	struct file * filp[NR_OPEN];
-	fd_set close_on_exec;
 /* ldt for this task - used by Wine.  If NULL, default_ldt is used */
 	struct desc_struct *ldt;
 /* tss for this task */
 	struct tss_struct tss;
-#ifdef NEW_SWAP
-	unsigned long old_maj_flt;	/* old value of maj_flt */
-	unsigned long dec_flt;		/* page fault count of the last time */
-	unsigned long swap_cnt;		/* number of pages to swap on next pass */
-	short swap_table;		/* current page table */
-	short swap_page;		/* current page */
-#endif NEW_SWAP
-	struct vm_area_struct *stk_vma;
+/* filesystem information */
+	struct fs_struct fs[1];
+/* open file information */
+	struct files_struct files[1];
+/* memory management info */
+	struct mm_struct mm[1];
 };
 
 /*
@@ -263,42 +323,33 @@ struct task_struct {
 #define INIT_TASK \
 /* state etc */	{ 0,15,15,0,0,0,0, \
 /* debugregs */ { 0, },            \
+/* exec domain */&default_exec_domain, \
+/* binfmt */	NULL, \
 /* schedlink */	&init_task,&init_task, \
 /* signals */	{{ 0, },}, \
 /* stack */	0,(unsigned long) &init_kernel_stack, \
-/* ec,brk... */	0,0,0,0,0,0,0,0,0,0,0,0,0, \
-/* argv.. */	0,0,0,0, \
+/* ec,brk... */	0,0,0,0,0, \
 /* pid etc.. */	0,0,0,0, \
 /* suppl grps*/ {NOGROUP,}, \
 /* proc links*/ &init_task,&init_task,NULL,NULL,NULL,NULL, \
-/* uid etc */	0,0,0,0,0,0, \
+/* uid etc */	0,0,0,0,0,0,0,0, \
 /* timeout */	0,0,0,0,0,0,0,0,0,0,0,0, \
-/* min_flt */	0,0,0,0, \
 /* rlimits */   { {LONG_MAX, LONG_MAX}, {LONG_MAX, LONG_MAX},  \
 		  {LONG_MAX, LONG_MAX}, {LONG_MAX, LONG_MAX},  \
 		  {       0, LONG_MAX}, {LONG_MAX, LONG_MAX}}, \
 /* math */	0, \
-/* rss */	2, \
 /* comm */	"swapper", \
-/* vm86_info */	NULL, 0, \
-/* fs info */	0,-1,0022,NULL,NULL,NULL,NULL, \
+/* vm86_info */	NULL, 0, 0, 0, 0, \
+/* fs info */	0,NULL, \
 /* ipc */	NULL, NULL, \
-/* filp */	{NULL,}, \
-/* cloe */	{{ 0, }}, \
 /* ldt */	NULL, \
-/*tss*/	{0,0, \
-	 sizeof(init_kernel_stack) + (long) &init_kernel_stack, KERNEL_DS, 0, \
-	 0,0,0,0,0,0, \
-	 (long) &swapper_pg_dir, \
-	 0,0,0,0,0,0,0,0,0,0, \
-	 USER_DS,0,USER_DS,0,USER_DS,0,USER_DS,0,USER_DS,0,USER_DS,0, \
-	 _LDT(0),0, \
-	 0, 0x8000, \
-/* ioperm */ 	{~0, }, \
-	 _TSS(0), 0, 0,0, \
-/* 387 state */	{ { 0, }, } \
-	} \
+/* tss */	INIT_TSS, \
+/* fs */	{ INIT_FS }, \
+/* files */	{ INIT_FILES }, \
+/* mm */	{ INIT_MM } \
 }
+
+#ifdef __KERNEL__
 
 extern struct task_struct init_task;
 extern struct task_struct *task[NR_TASKS];
@@ -321,9 +372,8 @@ extern void notify_parent(struct task_struct * tsk);
 extern int send_sig(unsigned long sig,struct task_struct * p,int priv);
 extern int in_group_p(gid_t grp);
 
-extern int request_irq(unsigned int irq,void (*handler)(int));
+extern int request_irq(unsigned int irq,void (*handler)(int), unsigned long flags, const char *device);
 extern void free_irq(unsigned int irq);
-extern int irqaction(unsigned int irq,struct sigaction * sa);
 
 /*
  * Entry into gdt where to find first TSS. GDT layout:
@@ -357,9 +407,7 @@ __asm__("str %%ax\n\t" \
  * tha math co-processor latest.
  */
 #define switch_to(tsk) \
-__asm__("cmpl %%ecx,_current\n\t" \
-	"je 1f\n\t" \
-	"cli\n\t" \
+__asm__("cli\n\t" \
 	"xchgl %%ecx,_current\n\t" \
 	"ljmp %0\n\t" \
 	"sti\n\t" \
@@ -486,6 +534,9 @@ extern inline void select_wait(struct wait_queue ** wait_address, select_table *
 
 extern void __down(struct semaphore * sem);
 
+/*
+ * These are not yet interrupt-safe
+ */
 extern inline void down(struct semaphore * sem)
 {
 	if (sem->count <= 0)
@@ -566,5 +617,7 @@ extern struct desc_struct default_ldt;
 			: /* no output */ \
 			:"m" (current->debugreg[register]) \
 			:"dx");
+
+#endif /* __KERNEL__ */
 
 #endif

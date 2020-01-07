@@ -1,5 +1,6 @@
 /*
- *      sr.c by David Giller
+ *      sr.c Copyright (C) 1992 David Giller
+ *	     Copyright (C) 1993, 1994 Eric Youngdale
  *
  *      adapted from:
  *	sd.c Copyright (C) 1992 Drew Eckhardt 
@@ -8,7 +9,7 @@
  *
  *	<drew@colorado.edu>
  *
- *       Modified by Eric Youngdale eric@tantalus.nrl.navy.mil to
+ *       Modified by Eric Youngdale ericy@cais.com to
  *       add scatter-gather, multiple outstanding request, and other
  *       enhancements.
  */
@@ -28,11 +29,19 @@
 #include "scsi_ioctl.h"   /* For the door lock/unlock commands */
 #include "constants.h"
 
-#define MAX_RETRIES 1
-#define SR_TIMEOUT 500
+#define MAX_RETRIES 3
+#define SR_TIMEOUT 5000
 
-int NR_SR=0;
-int MAX_SR=0;
+static void sr_init(void);
+static void sr_finish(void);
+static void sr_attach(Scsi_Device *);
+static int sr_detect(Scsi_Device *);
+
+struct Scsi_Device_Template sr_template = {NULL, "cdrom", "sr", TYPE_ROM, 
+					     SCSI_CDROM_MAJOR, 0, 0, 0, 1,
+					     sr_detect, sr_init,
+					     sr_finish, sr_attach, NULL};
+
 Scsi_CD * scsi_CDs;
 static int * sr_sizes;
 
@@ -44,6 +53,7 @@ static void get_sectorsize(int);
 extern int sr_ioctl(struct inode *, struct file *, unsigned int, unsigned long);
 
 void requeue_sr_request (Scsi_Cmnd * SCpnt);
+static int check_cdrom_media_change(dev_t);
 
 static void sr_release(struct inode * inode, struct file * file)
 {
@@ -61,9 +71,12 @@ static struct file_operations sr_fops =
 	NULL,			/* select */
 	sr_ioctl,		/* ioctl */
 	NULL,			/* mmap */
-	sr_open,       		/* no special open code */
+	sr_open,       		/* special open code */
 	sr_release,		/* release */
-	NULL			/* fsync */
+	NULL,			/* fsync */
+	NULL,			/* fasync */
+	check_cdrom_media_change,  /* Disk change */
+	NULL			/* revalidate */
 };
 
 /*
@@ -76,13 +89,14 @@ static struct file_operations sr_fops =
  * an inode for that to work, and we do not always have one.
  */
 
-int check_cdrom_media_change(int full_dev, int flag){
+int check_cdrom_media_change(dev_t full_dev){
 	int retval, target;
 	struct inode inode;
+	int flag = 0;
 
 	target =  MINOR(full_dev);
 
-	if (target >= NR_SR) {
+	if (target >= sr_template.nr_dev) {
 		printk("CD-ROM request error: invalid device.\n");
 		return 0;
 	};
@@ -259,8 +273,11 @@ static void rw_intr (Scsi_Cmnd * SCpnt)
 
 static int sr_open(struct inode * inode, struct file * filp)
 {
-	if(MINOR(inode->i_rdev) >= NR_SR || 
+	if(MINOR(inode->i_rdev) >= sr_template.nr_dev || 
 	   !scsi_CDs[MINOR(inode->i_rdev)].device) return -ENXIO;   /* No such device */
+
+	if (filp->f_mode & 2)  
+	    return -EROFS;
 
         check_disk_change(inode->i_rdev);
 
@@ -296,12 +313,12 @@ static void do_sr_request (void)
       sti();
       return;
     };
-
+    
     INIT_SCSI_REQUEST;
 
     if (flag++ == 0)
       SCpnt = allocate_device(&CURRENT,
-			      scsi_CDs[DEVICE_NR(MINOR(CURRENT->dev))].device->index, 0); 
+			      scsi_CDs[DEVICE_NR(MINOR(CURRENT->dev))].device, 0); 
     else SCpnt = NULL;
     sti();
 
@@ -312,14 +329,14 @@ static void do_sr_request (void)
    to have the interrupts off when monkeying with the request list, because
    otherwise the kernel might try and slip in a request inbetween somewhere. */
 
-    if (!SCpnt && NR_SR > 1){
+    if (!SCpnt && sr_template.nr_dev > 1){
       struct request *req1;
       req1 = NULL;
       cli();
       req = CURRENT;
       while(req){
 	SCpnt = request_queueable(req,
-				  scsi_CDs[DEVICE_NR(MINOR(req->dev))].device->index);
+				  scsi_CDs[DEVICE_NR(MINOR(req->dev))].device);
 	if(SCpnt) break;
 	req1 = req;
 	req = req->next;
@@ -362,7 +379,7 @@ void requeue_sr_request (Scsi_Cmnd * SCpnt)
 	buffer = NULL;
 	this_count = 0;
 
-	if (dev >= NR_SR)
+	if (dev >= sr_template.nr_dev)
 		{
 		/* printk("CD-ROM request error: invalid device.\n");			*/
 		end_scsi_request(SCpnt, 0, SCpnt->request.nr_sectors);
@@ -587,60 +604,83 @@ are any multiple of 512 bytes long.  */
 		}
 	else
 		{
-		if (realcount > 0xff)
-		        {
-			realcount = 0xff;
-			this_count = realcount * (scsi_CDs[dev].sector_size >> 9);
-		        }
-	
-		cmd[1] |= (unsigned char) ((block >> 16) & 0x1f);
-		cmd[2] = (unsigned char) ((block >> 8) & 0xff);
-		cmd[3] = (unsigned char) block & 0xff;
-		cmd[4] = (unsigned char) realcount;
-		cmd[5] = 0;
+		  if (realcount > 0xff)
+		    {
+		      realcount = 0xff;
+		      this_count = realcount * (scsi_CDs[dev].sector_size >> 9);
+		    }
+		  
+		  cmd[1] |= (unsigned char) ((block >> 16) & 0x1f);
+		  cmd[2] = (unsigned char) ((block >> 8) & 0xff);
+		  cmd[3] = (unsigned char) block & 0xff;
+		  cmd[4] = (unsigned char) realcount;
+		  cmd[5] = 0;
 		}   
 
 #ifdef DEBUG
-{ 
-	int i;
-	printk("ReadCD: %d %d %d %d\n",block, realcount, buffer, this_count);
-	printk("Use sg: %d\n", SCpnt->use_sg);
-	printk("Dumping command: ");
-	for(i=0; i<12; i++) printk("%2.2x ", cmd[i]);
-	printk("\n");
-};
+	{ 
+	  int i;
+	  printk("ReadCD: %d %d %d %d\n",block, realcount, buffer, this_count);
+	  printk("Use sg: %d\n", SCpnt->use_sg);
+	  printk("Dumping command: ");
+	  for(i=0; i<12; i++) printk("%2.2x ", cmd[i]);
+	  printk("\n");
+	};
 #endif
-
+	
 	SCpnt->this_count = this_count;
 	scsi_do_cmd (SCpnt, (void *) cmd, buffer, 
 		     realcount * scsi_CDs[dev].sector_size, 
 		     rw_intr, SR_TIMEOUT, MAX_RETRIES);
 }
 
-unsigned long sr_init1(unsigned long mem_start, unsigned long mem_end){
-  scsi_CDs = (Scsi_CD *) mem_start;
-  mem_start += MAX_SR * sizeof(Scsi_CD);
-  return mem_start;
-};
+static int sr_detect(Scsi_Device * SDp){
+  
+  /* We do not support attaching loadable devices yet. */
+  if(scsi_loadable_module_flag) return 0;
+  if(SDp->type != TYPE_ROM && SDp->type != TYPE_WORM) return 0;
 
-void sr_attach(Scsi_Device * SDp){
-  scsi_CDs[NR_SR++].device = SDp;
-  if(NR_SR > MAX_SR) panic ("scsi_devices corrupt (sr)");
-};
+  printk("Detected scsi CD-ROM sr%d at scsi%d, id %d, lun %d\n", 
+	 ++sr_template.dev_noticed,
+	 SDp->host->host_no , SDp->id, SDp->lun); 
+
+	 return 1;
+}
+
+static void sr_attach(Scsi_Device * SDp){
+  Scsi_CD * cpnt;
+  int i;
+  
+  /* We do not support attaching loadable devices yet. */
+  
+  if(scsi_loadable_module_flag) return;
+  if(SDp->type != TYPE_ROM && SDp->type != TYPE_WORM) return;
+  
+  if (sr_template.nr_dev >= sr_template.dev_max)
+    panic ("scsi_devices corrupt (sr)");
+  
+  for(cpnt = scsi_CDs, i=0; i<sr_template.dev_max; i++, cpnt++) 
+    if(!cpnt->device) break;
+  
+  if(i >= sr_template.dev_max) panic ("scsi_devices corrupt (sr)");
+  
+  SDp->scsi_request_fn = do_sr_request;
+  scsi_CDs[i].device = SDp;
+  sr_template.nr_dev++;
+  if(sr_template.nr_dev > sr_template.dev_max)
+    panic ("scsi_devices corrupt (sr)");
+}
+     
 
 static void sr_init_done (Scsi_Cmnd * SCpnt)
 {
   struct request * req;
-  struct task_struct * p;
   
   req = &SCpnt->request;
   req->dev = 0xfffe; /* Busy, but indicate request done */
   
-  if ((p = req->waiting) != NULL) {
-    req->waiting = NULL;
-    p->state = TASK_RUNNING;
-    if (p->counter > current->counter)
-      need_resched = 1;
+  if (req->sem != NULL) {
+    up(req->sem);
   }
 }
 
@@ -650,7 +690,7 @@ static void get_sectorsize(int i){
   int the_result, retries;
   Scsi_Cmnd * SCpnt;
   
-  SCpnt = allocate_device(NULL, scsi_CDs[i].device->index, 1);
+  SCpnt = allocate_device(NULL, scsi_CDs[i].device, 1);
 
   retries = 3;
   do {
@@ -670,8 +710,10 @@ static void get_sectorsize(int i){
       while(SCpnt->request.dev != 0xfffe);
     else
       if (SCpnt->request.dev != 0xfffe){
-	SCpnt->request.waiting = current;
-	current->state = TASK_UNINTERRUPTIBLE;
+      	struct semaphore sem = MUTEX_LOCKED;
+	SCpnt->request.sem = &sem;
+	down(&sem);
+	/* Hmm.. Have to ask about this */
 	while (SCpnt->request.dev != 0xfffe) schedule();
       };
     
@@ -682,7 +724,7 @@ static void get_sectorsize(int i){
   
   SCpnt->request.dev = -1;  /* Mark as not busy */
   
-  wake_up(&scsi_devices[SCpnt->index].device_wait); 
+  wake_up(&SCpnt->device->device_wait); 
 
   if (the_result) {
     scsi_CDs[i].capacity = 0x1fffff;
@@ -707,26 +749,42 @@ static void get_sectorsize(int i){
   };
 }
 
-unsigned long sr_init(unsigned long memory_start, unsigned long memory_end)
+static void sr_init()
 {
 	int i;
+	static int sr_registered = 0;
 
-	if (register_blkdev(MAJOR_NR,"sr",&sr_fops)) {
-		printk("Unable to get major %d for SCSI-CD\n",MAJOR_NR);
-		return memory_start;
+	if(sr_template.dev_noticed == 0) return;
+
+	if(!sr_registered) {
+	  if (register_blkdev(MAJOR_NR,"sr",&sr_fops)) {
+	    printk("Unable to get major %d for SCSI-CD\n",MAJOR_NR);
+	    return;
+	  }
 	}
-	if(MAX_SR == 0) return memory_start;
 
-	sr_sizes = (int *) memory_start;
-	memory_start += MAX_SR * sizeof(int);
-	memset(sr_sizes, 0, MAX_SR * sizeof(int));
+	/* We do not support attaching loadable devices yet. */
+	if(scsi_loadable_module_flag) return;
 
-	sr_blocksizes = (int *) memory_start;
-	memory_start += MAX_SR * sizeof(int);
-	for(i=0;i<MAX_SR;i++) sr_blocksizes[i] = 2048;
+	sr_template.dev_max = sr_template.dev_noticed;
+	scsi_CDs = (Scsi_CD *) scsi_init_malloc(sr_template.dev_max * sizeof(Scsi_CD));
+	memset(scsi_CDs, 0, sr_template.dev_max * sizeof(Scsi_CD));
+
+	sr_sizes = (int *) scsi_init_malloc(sr_template.dev_max * sizeof(int));
+	memset(sr_sizes, 0, sr_template.dev_max * sizeof(int));
+
+	sr_blocksizes = (int *) scsi_init_malloc(sr_template.dev_max * 
+						 sizeof(int));
+	for(i=0;i<sr_template.dev_max;i++) sr_blocksizes[i] = 2048;
 	blksize_size[MAJOR_NR] = sr_blocksizes;
 
-	for (i = 0; i < NR_SR; ++i)
+}
+
+void sr_finish()
+{
+  int i;
+
+	for (i = 0; i < sr_template.nr_dev; ++i)
 		{
 		  get_sectorsize(i);
 		  printk("Scd sectorsize = %d bytes\n", scsi_CDs[i].sector_size);
@@ -747,5 +805,5 @@ unsigned long sr_init(unsigned long memory_start, unsigned long memory_end)
 	else
 	  read_ahead[MAJOR_NR] = 4;  /* 4 sector read-ahead */
 
-	return memory_start;
+	return;
 }	

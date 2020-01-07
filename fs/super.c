@@ -7,6 +7,8 @@
 /*
  * super.c contains code to handle the super-block tables.
  */
+#include <stdarg.h>
+
 #include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -20,17 +22,12 @@
 #include <asm/segment.h>
 
  
-/*
- * The definition of file_systems that used to be here is now in
- * filesystems.c.  Now super.c contains no fs specific code.  -- jrs
- */
-
-extern struct file_system_type file_systems[];
 extern struct file_operations * get_blkfops(unsigned int);
 extern struct file_operations * get_chrfops(unsigned int);
 
 extern void wait_for_keypress(void);
 extern void fcntl_init_locks(void);
+extern int floppy_grab_irq_and_dma(void);
 
 extern int root_mountflags;
 
@@ -41,16 +38,149 @@ static int do_remount_sb(struct super_block *sb, int flags, char * data);
 /* this is initialized in init/main.c */
 dev_t ROOT_DEV = 0;
 
+static struct file_system_type * file_systems = NULL;
+
+int register_filesystem(struct file_system_type * fs)
+{
+	struct file_system_type ** tmp;
+
+	if (!fs)
+		return -EINVAL;
+	if (fs->next)
+		return -EBUSY;
+	tmp = &file_systems;
+	while (*tmp) {
+		if (strcmp((*tmp)->name, fs->name) == 0)
+			return -EBUSY;
+		tmp = &(*tmp)->next;
+	}
+	*tmp = fs;
+	return 0;
+}
+
+int unregister_filesystem(struct file_system_type * fs)
+{
+	struct file_system_type ** tmp;
+
+	tmp = &file_systems;
+	while (*tmp) {
+		if (fs == *tmp) {
+			*tmp = fs->next;
+			fs->next = NULL;
+			return 0;
+		}
+		tmp = &(*tmp)->next;
+	}
+	return -EINVAL;
+}
+
+static int fs_index(const char * __name)
+{
+	struct file_system_type * tmp;
+	char * name;
+	int err, index;
+
+	err = getname(__name, &name);
+	if (err)
+		return err;
+	index = 0;
+	for (tmp = file_systems ; tmp ; tmp = tmp->next) {
+		if (strcmp(tmp->name, name) == 0) {
+			putname(name);
+			return index;
+		}
+		index++;
+	}
+	putname(name);
+	return -EINVAL;
+}
+
+static int fs_name(unsigned int index, char * buf)
+{
+	struct file_system_type * tmp;
+	int err, len;
+
+	tmp = file_systems;
+	while (tmp && index > 0) {
+		tmp = tmp->next;
+		index--;
+	}
+	if (!tmp)
+		return -EINVAL;
+	len = strlen(tmp->name) + 1;
+	err = verify_area(VERIFY_WRITE, buf, len);
+	if (err)
+		return err;
+	memcpy_tofs(buf, tmp->name, len);
+	return 0;
+}
+
+static int fs_maxindex(void)
+{
+	struct file_system_type * tmp;
+	int index;
+
+	index = 0;
+	for (tmp = file_systems ; tmp ; tmp = tmp->next)
+		index++;
+	return index;
+}
+
+/*
+ * Whee.. Weird sysv syscall. 
+ */
+asmlinkage int sys_sysfs(int option, ...)
+{
+	va_list args;
+	int retval = -EINVAL;
+	unsigned int index;
+
+	va_start(args, option);
+	switch (option) {
+		case 1:
+			retval = fs_index(va_arg(args, const char *));
+			break;
+
+		case 2:
+			index = va_arg(args, unsigned int);
+			retval = fs_name(index, va_arg(args, char *));
+			break;
+
+		case 3:
+			retval = fs_maxindex();
+			break;
+	}
+	va_end(args);
+	return retval;
+}
+
+int get_filesystem_list(char * buf)
+{
+	int len = 0;
+	struct file_system_type * tmp;
+
+	tmp = file_systems;
+	while (tmp && len < PAGE_SIZE - 80) {
+		len += sprintf(buf+len, "%s\t%s\n",
+			tmp->requires_dev ? "" : "nodev",
+			tmp->name);
+		tmp = tmp->next;
+	}
+	return len;
+}
+
 struct file_system_type *get_fs_type(char *name)
 {
-	int a;
+	struct file_system_type * fs = file_systems;
 	
 	if (!name)
-		return &file_systems[0];
-	for(a = 0 ; file_systems[a].read_super ; a++)
-		if (!strcmp(name,file_systems[a].name))
-			return(&file_systems[a]);
-	return NULL;
+		return fs;
+	while (fs) {
+		if (!strcmp(name,fs->name))
+			break;
+		fs = fs->next;
+	}
+	return fs;
 }
 
 void __wait_on_super(struct super_block * sb)
@@ -349,6 +479,9 @@ static int do_remount_sb(struct super_block *sb, int flags, char *data)
 {
 	int retval;
 	
+	if (!(flags & MS_RDONLY ) && sb->s_dev && is_read_only(sb->s_dev))
+		return -EACCES;
+		/*flags |= MS_RDONLY;*/
 	/* If we are remounting RDONLY, make sure there are no rw files open */
 	if ((flags & MS_RDONLY) && !(sb->s_flags & MS_RDONLY))
 		if (!fs_may_remount_ro(sb->s_dev))
@@ -390,7 +523,7 @@ static int copy_mount_options (const void * data, unsigned long *where)
 	if (!data)
 		return 0;
 
-	for (vma = current->mmap ; ; ) {
+	for (vma = current->mm->mmap ; ; ) {
 		if (!vma ||
 		    (unsigned long) data < vma->vm_start) {
 			return -EFAULT;
@@ -481,7 +614,11 @@ asmlinkage int sys_mount(char * dev_name, char * dir_name, char * type,
 	}
 	fops = get_blkfops(MAJOR(dev));
 	if (fops && fops->open) {
-		retval = fops->open(inode,NULL);
+		struct file dummy;	/* allows read-write or read-only flag */
+		memset(&dummy, 0, sizeof(dummy));
+		dummy.f_inode = inode;
+		dummy.f_mode = (new_flags & MS_RDONLY) ? 1 : 3;
+		retval = fops->open(inode, &dummy);
 		if (retval) {
 			iput(inode);
 			return retval;
@@ -499,7 +636,7 @@ asmlinkage int sys_mount(char * dev_name, char * dir_name, char * type,
 	retval = do_mount(dev,dir_name,t,flags,(void *) page);
 	free_page(page);
 	if (retval && fops && fops->release)
-		fops->release(inode,NULL);
+		fops->release(inode, NULL);
 	iput(inode);
 	return retval;
 }
@@ -515,8 +652,11 @@ void mount_root(void)
 	if (MAJOR(ROOT_DEV) == FLOPPY_MAJOR) {
 		printk(KERN_NOTICE "VFS: Insert root floppy and press ENTER\n");
 		wait_for_keypress();
+		/* ugly, ugly */
+		if (floppy_grab_irq_and_dma())
+			printk("Unable to grab floppy IRQ/DMA for mounting root floppy\n");
 	}
-	for (fs_type = file_systems; fs_type->read_super; fs_type++) {
+	for (fs_type = file_systems ; fs_type ; fs_type = fs_type->next) {
 		if (!fs_type->requires_dev)
 			continue;
 		sb = read_super(ROOT_DEV,fs_type->name,root_mountflags,NULL,1);
@@ -525,13 +665,14 @@ void mount_root(void)
 			inode->i_count += 3 ;	/* NOTE! it is logically used 4 times, not 1 */
 			sb->s_covered = inode;
 			sb->s_flags = root_mountflags;
-			current->pwd = inode;
-			current->root = inode;
+			current->fs->pwd = inode;
+			current->fs->root = inode;
 			printk ("VFS: Mounted root (%s filesystem)%s.\n",
 				fs_type->name,
 				(sb->s_flags & MS_RDONLY) ? " readonly" : "");
 			return;
 		}
 	}
-	panic("VFS: Unable to mount root");
+	panic("VFS: Unable to mount root fs on %02x:%02x",
+		MAJOR(ROOT_DEV), MINOR(ROOT_DEV));
 }

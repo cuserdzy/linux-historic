@@ -384,6 +384,7 @@ repeat:
 	clear_inode(inode);
 	inode->i_count = 1;
 	inode->i_nlink = 1;
+	inode->i_version = ++event;
 	inode->i_sem.count = 1;
 	nr_free_inodes--;
 	if (nr_free_inodes < 0) {
@@ -413,15 +414,10 @@ struct inode * get_pipe_inode(void)
 	PIPE_LOCK(*inode) = 0;
 	inode->i_pipe = 1;
 	inode->i_mode |= S_IFIFO | S_IRUSR | S_IWUSR;
-	inode->i_uid = current->euid;
-	inode->i_gid = current->egid;
+	inode->i_uid = current->fsuid;
+	inode->i_gid = current->fsgid;
 	inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
 	return inode;
-}
-
-struct inode * iget(struct super_block * sb,int nr)
-{
-	return __iget(sb,nr,1);
 }
 
 struct inode * __iget(struct super_block * sb, int nr, int crossmntp)

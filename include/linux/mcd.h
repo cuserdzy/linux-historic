@@ -25,10 +25,10 @@
 #define MCD_BASE_ADDR	        0x300
 
 /* *** change this to set the interrupt number */
-#define MCD_INTR_NR		11
+#define MCD_INTR_NR		10
 
 /* Increase this if you get lots of timeouts */
-#define MCD_STATUS_DELAY	100
+#define MCD_STATUS_DELAY	200
 
 /* number of times to retry a command before giving up */
 #define MCD_RETRY_ATTEMPTS      5

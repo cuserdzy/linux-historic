@@ -25,15 +25,15 @@
  *		2 of the License, or (at your option) any later version.
  */
 #include <linux/config.h>
-#include <linux/ddi.h>
-#include "dev.h"
+#include <linux/netdevice.h>
+#include <linux/errno.h>
 
 #define LOOPBACK			/* always present, right?	*/
 
 #define	NEXT_DEV	NULL
 
 
-/* A unifed ethernet device probe.  This is the easiest way to have every
+/* A unified ethernet device probe.  This is the easiest way to have every
    ethernet adaptor have the name "eth[0123...]".
    */
 
@@ -42,6 +42,7 @@ extern int wd_probe(struct device *dev);
 extern int el2_probe(struct device *dev);
 extern int ne_probe(struct device *dev);
 extern int hp_probe(struct device *dev);
+extern int hp_plus_probe(struct device *dev);
 extern int znet_probe(struct device *);
 extern int express_probe(struct device *);
 extern int el3_probe(struct device *);
@@ -53,10 +54,14 @@ extern int el16_probe(struct device *);
 extern int elplus_probe(struct device *);
 extern int ac3200_probe(struct device *);
 extern int e2100_probe(struct device *);
+extern int ni52_probe(struct device *);
+extern int ni65_probe(struct device *);
+extern int SK_init(struct device *);
 
-/* Detachable devices ("pocket adaptors" and special PCMCIA drivers). */
+/* Detachable devices ("pocket adaptors") */
 extern int atp_init(struct device *);
-extern int d_link_init(struct device *);
+extern int de600_probe(struct device *);
+extern int de620_probe(struct device *);
 
 static int
 ethif_probe(struct device *dev)
@@ -81,6 +86,9 @@ ethif_probe(struct device *dev)
 #endif
 #if defined(CONFIG_HPLAN) || defined(HPLAN)
 	&& hp_probe(dev)
+#endif
+#if defined(CONFIG_HPLAN_PLUS)
+	&& hp_plus_probe(dev)
 #endif
 #ifdef CONFIG_AT1500
 	&& at1500_probe(dev)
@@ -115,6 +123,21 @@ ethif_probe(struct device *dev)
 #ifdef CONFIG_E2100		/* Cabletron E21xx series. */
 	&& e2100_probe(dev)
 #endif
+#ifdef CONFIG_DE600		/* D-Link DE-600 adapter */
+	&& de600_probe(dev)
+#endif
+#ifdef CONFIG_DE620		/* D-Link DE-620 adapter */
+	&& de620_probe(dev)
+#endif
+#if defined(CONFIG_SK_G16)
+	&& SK_init(dev)
+#endif
+#ifdef CONFIG_NI52
+	&& ni52_probe(dev)
+#endif
+#ifdef CONFIG_NI65
+	&& ni65_probe(dev)
+#endif
 	&& 1 ) {
 	return 1;	/* -ENODEV or -EAGAIN would be more accurate. */
     }
@@ -122,13 +145,6 @@ ethif_probe(struct device *dev)
 }
 
 
-/* This remains seperate because it requires the addr and IRQ to be set. */
-#if defined(D_LINK) || defined(CONFIG_DE600)
-static struct device d_link_dev = {
-    "dl0", 0, 0, 0, 0, D_LINK_IO, D_LINK_IRQ, 0, 0, 0, NEXT_DEV, d_link_init };
-#   undef NEXT_DEV
-#   define NEXT_DEV	(&d_link_dev)
-#endif
 
 /* Run-time ATtachable (Pocket) devices have a different (not "eth#") name. */
 #ifdef CONFIG_ATP		/* AT-LAN-TEC (RealTek) pocket adaptor. */
@@ -241,6 +257,14 @@ static struct device ppp0_dev = {
 #undef NEXT_DEV
 #define NEXT_DEV (&ppp0_dev)
 #endif   /* PPP */
+
+#ifdef CONFIG_DUMMY
+    extern int dummy_init(struct device *dev);
+    static struct device dummy_dev = {
+	"dummy", 0x0, 0x0, 0x0, 0x0, 0, 0, 0, 0, 0, NEXT_DEV, dummy_init, };
+#   undef	NEXT_DEV
+#   define	NEXT_DEV	(&dummy_dev)
+#endif
 
 #ifdef LOOPBACK
     extern int loopback_init(struct device *dev);

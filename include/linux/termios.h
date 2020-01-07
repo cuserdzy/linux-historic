@@ -1,7 +1,9 @@
 #ifndef _LINUX_TERMIOS_H
 #define _LINUX_TERMIOS_H
 
-/* 0x54 is just a magic number to make these relatively uniqe ('T') */
+#include <linux/types.h>
+
+/* 0x54 is just a magic number to make these relatively unique ('T') */
 
 #define TCGETS		0x5401
 #define TCSETS		0x5402
@@ -49,6 +51,7 @@
 #define TIOCSERSWILD	0x5455
 #define TIOCGLCKTRMIOS	0x5456
 #define TIOCSLCKTRMIOS	0x5457
+#define TIOCSERGSTRUCT	0x5458 /* For debugging only */
 
 /* Used for packet mode */
 #define TIOCPKT_DATA		 0

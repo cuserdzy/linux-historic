@@ -6,13 +6,14 @@
  *  scatter/gather added by Scott Taylor (n217cg@tamuts.tamu.edu)
  *  24F and multiple command support by John F. Carr (jfc@athena.mit.edu)
  *    John's work modified by Caleb Epstein (cae@jpmorgan.com) and 
- *    Eric Youngdale (eric@tantalus.nrl.navy.mil).
+ *    Eric Youngdale (ericy@cais.com).
  *	Thanks to UltraStor for providing the necessary documentation
  */
 
 /*
  * TODO:
  *	1. Find out why scatter/gather is limited to 16 requests per command.
+ *         This is fixed, at least on the 24F, as of version 1.12 - CAE.
  *	2. Look at command linking (mscp.command_link and
  *	   mscp.command_link_id).  (Does not work with many disks, 
  *				and no performance increase.  ERY).
@@ -36,6 +37,15 @@
  *
  *    Places flagged with a triple question-mark are things which are either
  *    unfinished, questionable, or wrong.
+ */
+
+/* Changes from version 1.11 alpha to 1.12
+ *
+ * Increased the size of the scatter-gather list to 33 entries for
+ * the 24F adapter (it was 16).  I don't have the specs for the 14F
+ * or the 34F, so they may support larger s-g lists as well.
+ *
+ * Caleb Epstein <cae@jpmorgan.com>
  */
 
 /* Changes from version 1.9 to 1.11
@@ -130,6 +140,7 @@
 #include "scsi.h"
 #include "hosts.h"
 #include "ultrastor.h"
+#include "sd.h"
 
 #define FALSE 0
 #define TRUE 1
@@ -138,7 +149,7 @@
 #define ULTRASTOR_DEBUG (UD_ABORT|UD_CSIR|UD_RESET)
 #endif
 
-#define VERSION "1.11 alpha"
+#define VERSION "1.12"
 
 #define ARRAY_SIZE(arr) (sizeof (arr) / sizeof (arr)[0])
 
@@ -183,7 +194,7 @@ struct mscp {
      the MSCP structure because they are associated with SCSI requests.  */
   void (*done)(Scsi_Cmnd *);
   Scsi_Cmnd *SCint;
-  ultrastor_sg_list sglist[ULTRASTOR_14F_MAX_SG];
+  ultrastor_sg_list sglist[ULTRASTOR_24F_MAX_SG]; /* use larger size for 24F */
 };
 
 
@@ -229,9 +240,6 @@ static struct ultrastor_config
 #ifdef PRINT_U24F_VERSION
   volatile int csir_done;
 #endif
-
-  /* Our index in the host adapter array maintained by higher-level driver */
-  int host_number;
 
   /* A pool of MSCP structures for this adapter, and a bitmask of
      busy structures.  (If ULTRASTOR_14F_MAX_CMDS == 1, a 1 byte
@@ -290,15 +298,18 @@ static inline int find_and_clear_bit_16(unsigned short *field)
   return rv;
 }
 
-/* This asm is fragile: it doesn't work without the casts and it may
+/* This has been re-implemented with the help of Richard Earnshaw,
+   <rwe@pegasus.esprit.ec.org> and works with gcc-2.5.8 and gcc-2.6.0.
+   The instability noted by jfc below appears to be a bug in
+   gcc-2.5.x when compiling w/o optimization.  --Caleb
+
+   This asm is fragile: it doesn't work without the casts and it may
    not work without optimization.  Maybe I should add a swap builtin
    to gcc.  --jfc  */
 static inline unsigned char xchgb(unsigned char reg,
 				  volatile unsigned char *mem)
 {
-  asm("xchgb %0,%1" :
-      "=r" (reg), "=m" (*(unsigned char *)mem) :
-      "0" (reg), "1" (*(unsigned char *)mem));
+  asm ("xchgb %0, (%2)" : "=q" (reg) : "0" (reg), "q" (mem) : "m");
   return reg;
 }
 
@@ -328,7 +339,7 @@ static void log_ultrastor_abort(register struct ultrastor_config *config,
 }
 #endif
 
-static int ultrastor_14f_detect(int hostnum)
+static int ultrastor_14f_detect(Scsi_Host_Template * tpnt)
 {
     size_t i;
     unsigned char in_byte, version_byte = 0;
@@ -475,15 +486,14 @@ static int ultrastor_14f_detect(int hostnum)
 	   config.port_address, config.bios_segment, config.interrupt,
 	   config.dma_channel, config.ha_scsi_id, config.subversion);
 #endif
-    config.host_number = hostnum;
-    scsi_hosts[hostnum].this_id = config.ha_scsi_id;
-    scsi_hosts[hostnum].unchecked_isa_dma = (config.subversion != U34F);
+    tpnt->this_id = config.ha_scsi_id;
+    tpnt->unchecked_isa_dma = (config.subversion != U34F);
 
 #if ULTRASTOR_MAX_CMDS > 1
     config.mscp_free = ~0;
 #endif
 
-    if (request_irq(config.interrupt, ultrastor_interrupt)) {
+    if (request_irq(config.interrupt, ultrastor_interrupt, 0, "Ultrastor")) {
 	printk("Unable to allocate IRQ%u for UltraStor controller.\n",
 	       config.interrupt);
 	return FALSE;
@@ -494,16 +504,17 @@ static int ultrastor_14f_detect(int hostnum)
 	free_irq(config.interrupt);
 	return FALSE;
     }
-    scsi_hosts[hostnum].sg_tablesize = ULTRASTOR_14F_MAX_SG;
+    tpnt->sg_tablesize = ULTRASTOR_14F_MAX_SG;
     printk("UltraStor driver version" VERSION ".  Using %d SG lists.\n",
 	   ULTRASTOR_14F_MAX_SG);
 
     return TRUE;
 }
 
-static int ultrastor_24f_detect(int hostnum)
+static int ultrastor_24f_detect(Scsi_Host_Template * tpnt)
 {
   register int i;
+  struct Scsi_Host * shpnt = NULL;
 
 #if (ULTRASTOR_DEBUG & UD_DETECT)
   printk("US24F: detect");
@@ -552,7 +563,7 @@ static int ultrastor_24f_detect(int hostnum)
 	  printk("U24F: invalid IRQ\n");
 	  return FALSE;
 	}
-      if (request_irq(config.interrupt, ultrastor_interrupt))
+      if (request_irq(config.interrupt, ultrastor_interrupt, 0, "Ultrastor"))
 	{
 	  printk("Unable to allocate IRQ%u for UltraStor controller.\n",
 		 config.interrupt);
@@ -577,10 +588,14 @@ static int ultrastor_24f_detect(int hostnum)
 	     config.port_address, config.bios_segment,
 	     config.interrupt, config.ha_scsi_id);
 #endif
-      config.host_number = hostnum;
-      scsi_hosts[hostnum].this_id = config.ha_scsi_id;
-      scsi_hosts[hostnum].unchecked_isa_dma = 0;
-      scsi_hosts[hostnum].sg_tablesize = ULTRASTOR_14F_MAX_SG;
+      tpnt->this_id = config.ha_scsi_id;
+      tpnt->unchecked_isa_dma = 0;
+      tpnt->sg_tablesize = ULTRASTOR_24F_MAX_SG;
+
+      shpnt = scsi_register(tpnt, 0);
+      shpnt->irq = config.interrupt;
+      shpnt->dma_channel = config.dma_channel;
+      shpnt->io_port = config.port_address;
 
 #if ULTRASTOR_MAX_CMDS > 1
       config.mscp_free = ~0;
@@ -594,15 +609,15 @@ static int ultrastor_24f_detect(int hostnum)
       outb(ultrastor_bus_reset ? 0xc2 : 0x82, LCL_DOORBELL_MASK(addr+12));
       outb(0x02, SYS_DOORBELL_MASK(addr+12));
       printk("UltraStor driver version " VERSION ".  Using %d SG lists.\n",
-	     ULTRASTOR_14F_MAX_SG);
+	     tpnt->sg_tablesize);
       return TRUE;
     }
   return FALSE;
 }
 
-int ultrastor_detect(int hostnum)
+int ultrastor_detect(Scsi_Host_Template * tpnt)
 {
-  return ultrastor_14f_detect(hostnum) || ultrastor_24f_detect(hostnum);
+  return ultrastor_14f_detect(tpnt) || ultrastor_24f_detect(tpnt);
 }
 
 const char *ultrastor_info(void)
@@ -682,7 +697,7 @@ int ultrastor_queuecommand(Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
        activity. 
 
        ???  Which other device types should never use the cache?   */
-    my_mscp->ca = scsi_devices[SCpnt->index].type != TYPE_TAPE;
+    my_mscp->ca = SCpnt->device->type != TYPE_TAPE;
     my_mscp->target_id = SCpnt->target;
     my_mscp->ch_no = 0;
     my_mscp->lun = SCpnt->lun;
@@ -796,7 +811,7 @@ int ultrastor_queuecommand(Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
 
  */
 
-int ultrastor_abort(Scsi_Cmnd *SCpnt, int code)
+int ultrastor_abort(Scsi_Cmnd *SCpnt)
 {
 #if ULTRASTOR_DEBUG & UD_ABORT
     char out[108];
@@ -807,7 +822,12 @@ int ultrastor_abort(Scsi_Cmnd *SCpnt, int code)
     unsigned char old_aborted;
     void (*done)(Scsi_Cmnd *);
 
-    if(config.slot) return 0;  /* Do not attempt an abort for the 24f */
+    if(config.slot) 
+      return SCSI_ABORT_SNOOZE;  /* Do not attempt an abort for the 24f */
+
+    /* Simple consistency checking */
+    if(!SCpnt->host_scribble)
+      return SCSI_ABORT_NOT_RUNNING;
 
     mscp_index = ((struct mscp *)SCpnt->host_scribble) - config.mscp;
     if (mscp_index >= ULTRASTOR_MAX_CMDS)
@@ -851,16 +871,16 @@ int ultrastor_abort(Scsi_Cmnd *SCpnt, int code)
 	cli();
 	ultrastor_interrupt(0);
 	restore_flags(flags);
-	return 0;
+	return SCSI_ABORT_SUCCESS;  /* FIXME - is this correct? -ERY */
       }
 #endif
 
-    old_aborted = xchgb(code ? code : DID_ABORT, &config.aborted[mscp_index]);
+    old_aborted = xchgb(DID_ABORT, &config.aborted[mscp_index]);
 
     /* aborted == 0xff is the signal that queuecommand has not yet sent
        the command.  It will notice the new abort flag and fail.  */
     if (old_aborted == 0xff)
-	return 0;
+	return SCSI_ABORT_SUCCESS;
 
     /* On 24F, send an abort MSCP request.  The adapter will interrupt
        and the interrupt handler will call done.  */
@@ -879,7 +899,7 @@ int ultrastor_abort(Scsi_Cmnd *SCpnt, int code)
 	printk(out, ogm_status, ogm_addr, icm_status, icm_addr);
 #endif
 	restore_flags(flags);
-	return 0;
+	return SCSI_ABORT_PENDING;
       }
 
 #if ULTRASTOR_DEBUG & UD_ABORT
@@ -891,13 +911,18 @@ int ultrastor_abort(Scsi_Cmnd *SCpnt, int code)
        still be using it.  Setting SCint = 0 causes the interrupt
        handler to ignore the command.  */
 
+    /* FIXME - devices that implement soft resets will still be running
+       the command after a bus reset.  We would probably rather leave
+       the command in the queue.  The upper level code will automatically
+       leave the command in the active state instead of requeueing it. ERY */
+
 #if ULTRASTOR_DEBUG & UD_ABORT
     if (config.mscp[mscp_index].SCint != SCpnt)
-	printk("abort: command mismatch, %x != %x\n",
+	printk("abort: command mismatch, %p != %p\n",
 	       config.mscp[mscp_index].SCint, SCpnt);
 #endif
     if (config.mscp[mscp_index].SCint == 0)
-	return 1;
+	return SCSI_ABORT_NOT_RUNNING;
 
     if (config.mscp[mscp_index].SCint != SCpnt) panic("Bad abort");
     config.mscp[mscp_index].SCint = 0;
@@ -908,8 +933,7 @@ int ultrastor_abort(Scsi_Cmnd *SCpnt, int code)
     done(SCpnt);
 
     /* Need to set a timeout here in case command never completes.  */
-    return 0;
-
+    return SCSI_ABORT_SUCCESS;
 }
 
 int ultrastor_reset(Scsi_Cmnd * SCpnt)
@@ -920,10 +944,8 @@ int ultrastor_reset(Scsi_Cmnd * SCpnt)
     printk("US14F: reset: called\n");
 #endif
 
-    if(config.slot) {
-      if (SCpnt) SCpnt->flags |= NEEDS_JUMPSTART;
-      return 0;  /* Do not attempt a reset for the 24f */
-    };
+    if(config.slot)
+      return SCSI_RESET_PUNT;  /* Do not attempt a reset for the 24f */
 
     save_flags(flags);
     cli();
@@ -958,6 +980,9 @@ int ultrastor_reset(Scsi_Cmnd * SCpnt)
       }
 #endif
 
+    /* FIXME - if the device implements soft resets, then the command
+       will still be running.  ERY */
+
     memset((unsigned char *)config.aborted, 0, sizeof config.aborted);
 #if ULTRASTOR_MAX_CMDS == 1
     config.mscp_busy = 0;
@@ -966,12 +991,13 @@ int ultrastor_reset(Scsi_Cmnd * SCpnt)
 #endif
 
     restore_flags(flags);
-    return 0;
+    return SCSI_RESET_SUCCESS;
 
 }
 
-int ultrastor_biosparam(int size, int dev, int * dkinfo)
+int ultrastor_biosparam(Disk * disk, int dev, int * dkinfo)
 {
+    int size = disk->capacity;
     unsigned int s = config.heads * config.sectors;
 
     dkinfo[0] = config.heads;

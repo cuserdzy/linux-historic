@@ -10,7 +10,7 @@
  *
  * Pauline Middelink :  Made cmdline,envline only break at '\0's, to
  *                      make sure SET_PROCTITLE works. Also removed
- *                      bad '!' which forced addres recalculation for
+ *                      bad '!' which forced address recalculation for
  *                      EVERY character on the current page.
  *                      <middelin@calvin.iaf.nl>
  */
@@ -25,6 +25,7 @@
 #include <linux/a.out.h>
 #include <linux/string.h>
 #include <linux/mman.h>
+#include <linux/proc_fs.h>
 
 #include <asm/segment.h>
 #include <asm/io.h>
@@ -80,6 +81,15 @@ static int read_core(struct inode * inode, struct file * file,char * buf, int co
 	file->f_pos += read;
 	return read;
 }
+
+static struct file_operations proc_kcore_operations = {
+	NULL,           /* lseek */
+	read_core,
+};
+
+struct inode_operations proc_kcore_inode_operations = {
+	&proc_kcore_operations, 
+};
 
 static int get_loadavg(char * buffer)
 {
@@ -224,7 +234,7 @@ static int get_array(struct task_struct ** p, unsigned long start, unsigned long
 		} while (addr & ~PAGE_MASK);
 	}
 ready:
-	/* remove the trailing blanks, used to fillout argv,envp space */
+	/* remove the trailing blanks, used to fill out argv,envp space */
 	while (result>0 && buffer[result-1]==' ')
 		result--;
 	return result;
@@ -236,7 +246,7 @@ static int get_env(int pid, char * buffer)
 
 	if (!p || !*p)
 		return 0;
-	return get_array(p, (*p)->env_start, (*p)->env_end, buffer);
+	return get_array(p, (*p)->mm->env_start, (*p)->mm->env_end, buffer);
 }
 
 static int get_arg(int pid, char * buffer)
@@ -245,7 +255,7 @@ static int get_arg(int pid, char * buffer)
 
 	if (!p || !*p)
 		return 0;
-	return get_array(p, (*p)->arg_start, (*p)->arg_end, buffer);
+	return get_array(p, (*p)->mm->arg_start, (*p)->mm->arg_end, buffer);
 }
 
 static unsigned long get_wchan(struct task_struct *p)
@@ -294,7 +304,7 @@ static int get_stat(int pid, char * buffer)
 	if (vsize) {
 		eip = KSTK_EIP(vsize);
 		esp = KSTK_ESP(vsize);
-		vsize = (*p)->brk - (*p)->start_code + PAGE_SIZE-1;
+		vsize = (*p)->mm->brk - (*p)->mm->start_code + PAGE_SIZE-1;
 		if (esp)
 			vsize += TASK_SIZE - esp;
 	}
@@ -306,13 +316,12 @@ static int get_stat(int pid, char * buffer)
 		default: sigcatch |= bit;
 		} bit <<= 1;
 	}
-	tty_pgrp = (*p)->tty;
-	if (tty_pgrp > 0 && tty_table[tty_pgrp])
-		tty_pgrp = tty_table[tty_pgrp]->pgrp;
+	if ((*p)->tty)
+		tty_pgrp = (*p)->tty->pgrp;
 	else
 		tty_pgrp = -1;
 	return sprintf(buffer,"%d (%s) %c %d %d %d %d %d %lu %lu \
-%lu %lu %lu %ld %ld %ld %ld %ld %ld %lu %lu %ld %lu %u %u %lu %lu %lu %lu %lu %lu \
+%lu %lu %lu %ld %ld %ld %ld %ld %ld %lu %lu %ld %lu %lu %u %lu %lu %lu %lu %lu %lu \
 %lu %lu %lu %lu\n",
 		pid,
 		(*p)->comm,
@@ -320,13 +329,13 @@ static int get_stat(int pid, char * buffer)
 		(*p)->p_pptr->pid,
 		(*p)->pgrp,
 		(*p)->session,
-		(*p)->tty,
+	        (*p)->tty ? (*p)->tty->device : 0,
 		tty_pgrp,
 		(*p)->flags,
-		(*p)->min_flt,
-		(*p)->cmin_flt,
-		(*p)->maj_flt,
-		(*p)->cmaj_flt,
+		(*p)->mm->min_flt,
+		(*p)->mm->cmin_flt,
+		(*p)->mm->maj_flt,
+		(*p)->mm->cmaj_flt,
 		(*p)->utime,
 		(*p)->stime,
 		(*p)->cutime,
@@ -339,11 +348,11 @@ static int get_stat(int pid, char * buffer)
 		(*p)->it_real_value,
 		(*p)->start_time,
 		vsize,
-		(*p)->rss, /* you might want to shift this left 3 */
+		(*p)->mm->rss, /* you might want to shift this left 3 */
 		(*p)->rlim[RLIMIT_RSS].rlim_cur,
-		(*p)->start_code,
-		(*p)->end_code,
-		(*p)->start_stack,
+		(*p)->mm->start_code,
+		(*p)->mm->end_code,
+		(*p)->mm->start_stack,
 		esp,
 		eip,
 		(*p)->signal,
@@ -362,7 +371,7 @@ static int get_statm(int pid, char * buffer)
 
 	if (!p || !*p)
 		return 0;
-	tpag = (*p)->end_code / PAGE_SIZE;
+	tpag = (*p)->mm->end_code / PAGE_SIZE;
 	if ((*p)->state != TASK_ZOMBIE) {
 	  pagedir = (unsigned long *) (*p)->tss.cr3;
 	  for (i = 0; i < 0x300; ++i) {
@@ -409,34 +418,19 @@ static int get_maps(int pid, char *buf)
 	if (!p || !*p)
 		return 0;
 
-	for(map = (*p)->mmap; map != NULL; map = map->vm_next) {
+	for(map = (*p)->mm->mmap; map != NULL; map = map->vm_next) {
 		char str[7], *cp = str;
-		int prot = map->vm_page_prot;
-		int perms, flags;
+		int flags;
 		int end = sz + 80;	/* Length of line */
 		dev_t dev;
 		unsigned long ino;
 
-		/*
-		 * This tries to get an "rwxsp" string out of silly
-		 * intel page permissions.  The vm_area_struct should
-		 * probably have the original mmap args preserved.
-		 */
-		
-		flags = perms = 0;
+		flags = map->vm_flags;
 
-		if ((prot & PAGE_READONLY) == PAGE_READONLY)
-			perms |= PROT_READ | PROT_EXEC;
-		if (prot & (PAGE_COW|PAGE_RW)) {
-			perms |= PROT_WRITE | PROT_READ;
-			flags = prot & PAGE_COW ? MAP_PRIVATE : MAP_SHARED;
-		}
-
-		*cp++ = perms & PROT_READ ? 'r' : '-';
-		*cp++ = perms & PROT_WRITE ? 'w' : '-';
-		*cp++ = perms & PROT_EXEC ? 'x' : '-';
-		*cp++ = flags & MAP_SHARED ? 's' : '-';
-		*cp++ = flags & MAP_PRIVATE ? 'p' : '-';
+		*cp++ = flags & VM_READ ? 'r' : '-';
+		*cp++ = flags & VM_WRITE ? 'w' : '-';
+		*cp++ = flags & VM_EXEC ? 'x' : '-';
+		*cp++ = flags & VM_SHARED ? 's' : 'p';
 		*cp++ = 0;
 		
 		if (end >= PAGE_SIZE) {
@@ -465,76 +459,105 @@ static int get_maps(int pid, char *buf)
 }
 
 extern int get_module_list(char *);
+extern int get_device_list(char *);
+extern int get_filesystem_list(char *);
+extern int get_ksyms_list(char *);
+extern int get_irq_list(char *);
+
+static int get_root_array(char * page, int type)
+{
+	switch (type) {
+		case PROC_LOADAVG:
+			return get_loadavg(page);
+
+		case PROC_UPTIME:
+			return get_uptime(page);
+
+		case PROC_MEMINFO:
+			return get_meminfo(page);
+
+		case PROC_VERSION:
+			return get_version(page);
+
+#ifdef CONFIG_DEBUG_MALLOC
+		case PROC_MALLOC:
+			return get_malloc(page);
+#endif
+
+		case PROC_MODULES:
+			return get_module_list(page);
+
+		case PROC_STAT:
+			return get_kstat(page);
+
+		case PROC_DEVICES:
+			return get_device_list(page);
+
+		case PROC_INTERRUPTS:
+			return get_irq_list(page);
+
+		case PROC_FILESYSTEMS:
+			return get_filesystem_list(page);
+
+		case PROC_KSYMS:
+			return get_ksyms_list(page);
+	}
+	return -EBADF;
+}
+
+static int get_process_array(char * page, int pid, int type)
+{
+	switch (type) {
+		case PROC_PID_ENVIRON:
+			return get_env(pid, page);
+		case PROC_PID_CMDLINE:
+			return get_arg(pid, page);
+		case PROC_PID_STAT:
+			return get_stat(pid, page);
+		case PROC_PID_STATM:
+			return get_statm(pid, page);
+		case PROC_PID_MAPS:
+			return get_maps(pid, page);
+	}
+	return -EBADF;
+}
+
+
+static inline int fill_array(char * page, int pid, int type)
+{
+	if (pid)
+		return get_process_array(page, pid, type);
+	return get_root_array(page, type);
+}
 
 static int array_read(struct inode * inode, struct file * file,char * buf, int count)
 {
-	char * page;
+	unsigned long page;
 	int length;
 	int end;
 	unsigned int type, pid;
 
 	if (count < 0)
 		return -EINVAL;
-	if (!(page = (char*) __get_free_page(GFP_KERNEL)))
+	if (!(page = __get_free_page(GFP_KERNEL)))
 		return -ENOMEM;
 	type = inode->i_ino;
 	pid = type >> 16;
 	type &= 0x0000ffff;
-	switch (type) {
-		case 2:
-			length = get_loadavg(page);
-			break;
-		case 3:
-			length = get_uptime(page);
-			break;
-		case 4:
-			length = get_meminfo(page);
-			break;
-		case 6:
-			length = get_version(page);
-			break;
-		case 9:
-			length = get_env(pid, page);
-			break;
-		case 10:
-			length = get_arg(pid, page);
-			break;
-		case 11:
-			length = get_stat(pid, page);
-			break;
-		case 12:
-			length = get_statm(pid, page);
-			break;
-#ifdef CONFIG_DEBUG_MALLOC
-		case 13:
-			length = get_malloc(page);
-			break;
-#endif
-		case 14:
-			free_page((unsigned long) page);
-			return read_core(inode, file, buf, count);
-		case 15:
-			length = get_maps(pid, page);
-			break;
-		case 16:
-			length = get_module_list(page);
-			break;
-		case 17:
-			length = get_kstat(page);
-			break;
-		default:
-			free_page((unsigned long) page);
-			return -EBADF;
+	length = fill_array((char *) page, pid, type);
+	if (length < 0) {
+		free_page(page);
+		return length;
 	}
 	if (file->f_pos >= length) {
-		free_page((unsigned long) page);
+		free_page(page);
 		return 0;
 	}
 	if (count + file->f_pos > length)
 		count = length - file->f_pos;
 	end = count + file->f_pos;
-	memcpy_tofs(buf, page + file->f_pos, count);
-	free_page((unsigned long) page);
+	memcpy_tofs(buf, (char *) page + file->f_pos, count);
+	free_page(page);
 	file->f_pos = end;
 	return count;
 }

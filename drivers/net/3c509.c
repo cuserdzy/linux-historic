@@ -1,7 +1,8 @@
 /* 3c509.c: A 3c509 EtherLink3 ethernet driver for linux. */
 /*
-	Written 1993 by Donald Becker.
+	Written 1993,1994 by Donald Becker.
 
+	Copyright 1994 by Donald Becker. 
 	Copyright 1993 United States Government as represented by the
 	Director, National Security Agency.	 This software may be used and
 	distributed according to the terms of the GNU Public License,
@@ -9,11 +10,21 @@
 	
 	This driver is for the 3Com EtherLinkIII series.
 
-	The author may be reached as becker@super.org or
-	C/O Supercomputing Research Ctr., 17100 Science Dr., Bowie MD 20715
+	The author may be reached as becker@cesdis.gsfc.nasa.gov or
+	C/O Center of Excellence in Space Data and Information Sciences
+		Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+
+	Known limitations:
+	Because of the way 3c509 ISA detection works it's difficult to predict
+	a priori which of several ISA-mode cards will be detected first.
+
+	This driver does not use predictive interrupt mode, resulting in higher
+	packet latency but lower overhead.  If interrupts are disabled for an
+	unusually long time it could also result in missed packets, but in
+	practice this rarely happens.
 */
 
-static char *version = "3c509.c:pl15k 3/5/94 becker@super.org\n";
+static char *version = "3c509.c:1.01 7/5/94 becker@cesdis.gsfc.nasa.gov\n";
 
 #include <linux/config.h>
 #include <linux/kernel.h>
@@ -28,14 +39,14 @@ static char *version = "3c509.c:pl15k 3/5/94 becker@super.org\n";
 #include <asm/bitops.h>
 #include <asm/io.h>
 
-#include "dev.h"
-#include "eth.h"
-#include "skbuff.h"
-#include "arp.h"
-
-#ifndef HAVE_ALLOC_SKB
-#define alloc_skb(size, priority) (struct sk_buff *) kmalloc(size,priority)
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
+#include <linux/skbuff.h>
+#ifdef MODULE
+#include <linux/module.h>
+#include "../../tools/version.h"
 #endif
+
 
 
 #ifdef EL3_DEBUG
@@ -92,9 +103,14 @@ int el3_probe(struct device *dev)
 	short *phys_addr = (short *)dev->dev_addr;
 	static int current_tag = 0;
 
-	/* First check for a board on the EISA bus. */
+	/* First check all slots of the EISA bus.  The next slot address to
+	   probe is kept in 'eisa_addr' to support multiple probe() calls. */
 	if (EISA_bus) {
-		for (ioaddr = 0x1000; ioaddr < 0x9000; ioaddr += 0x1000) {
+		static int eisa_addr = 0x1000;
+		while (eisa_addr < 0x9000) {
+			ioaddr = eisa_addr;
+			eisa_addr += 0x1000;
+
 			/* Check the standard EISA ID register for an encoded '3Com'. */
 			if (inw(ioaddr + 0xC80) != 0x6d50)
 				continue;
@@ -134,7 +150,10 @@ int el3_probe(struct device *dev)
 	}
 #endif	  
 
-	/* Send the ID sequence to the ID_PORT. */
+	/* Next check for all ISA bus boards by sending the ID sequence to the
+	   ID_PORT.  We find cards past the first by setting the 'current_tag'
+	   on cards as they are found.  Cards with their tag set will not
+	   respond to subsequent ID sequences. */
 	outb(0x00, ID_PORT);
 	outb(0x00, ID_PORT);
 	for(i = 0; i < 255; i++) {
@@ -167,9 +186,6 @@ int el3_probe(struct device *dev)
 	}
 	irq = id_read_eeprom(9) >> 12;
 
-	/* The current Space.c structure makes it difficult to have more
-	   than one adaptor initialized.  Send me email if you have a need for
-	   multiple adaptors, and we'll work out something.	 -becker@super.org */
 	if (dev->base_addr != 0
 		&&	dev->base_addr != (unsigned short)ioaddr) {
 		return -ENODEV;
@@ -219,31 +235,7 @@ int el3_probe(struct device *dev)
 #endif
 
 	/* Fill in the generic fields of the device structure. */
-	for (i = 0; i < DEV_NUMBUFFS; i++)
-		dev->buffs[i] = NULL;
-
-	dev->hard_header	= eth_header;
-	dev->add_arp		= eth_add_arp;
-	dev->queue_xmit		= dev_queue_xmit;
-	dev->rebuild_header = eth_rebuild_header;
-	dev->type_trans		= eth_type_trans;
-
-	dev->type			= ARPHRD_ETHER;
-	dev->hard_header_len = ETH_HLEN;
-	dev->mtu			= 1500; /* eth_mtu */
-	dev->addr_len		= ETH_ALEN;
-	for (i = 0; i < ETH_ALEN; i++) {
-		dev->broadcast[i]=0xff;
-	}
-
-	/* New-style flags. */
-	dev->flags			= IFF_BROADCAST;
-	dev->family			= AF_INET;
-	dev->pa_addr		= 0;
-	dev->pa_brdaddr		= 0;
-	dev->pa_mask		= 0;
-	dev->pa_alen		= sizeof(unsigned long);
-
+	ether_setup(dev);
 	return 0;
 }
 
@@ -291,7 +283,7 @@ el3_open(struct device *dev)
 	int ioaddr = dev->base_addr;
 	int i;
 
-	if (request_irq(dev->irq, &el3_interrupt)) {
+	if (request_irq(dev->irq, &el3_interrupt, 0, "3c509")) {
 		return -EAGAIN;
 	}
 
@@ -340,6 +332,9 @@ el3_open(struct device *dev)
 		printk("%s: Opened 3c509  IRQ %d  status %4.4x.\n",
 			   dev->name, dev->irq, inw(ioaddr + EL3_STATUS));
 
+#ifdef MODULE
+	MOD_INC_USE_COUNT;
+#endif
 	return 0;					/* Always succeed */
 }
 
@@ -368,19 +363,11 @@ el3_start_xmit(struct sk_buff *skb, struct device *dev)
 		return 0;
 	}
 
-	/* Fill in the ethernet header. */
-	if (!skb->arp  &&  dev->rebuild_header(skb->data, dev)) {
-		skb->dev = dev;
-		arp_queue (skb);
-		return 0;
-	}
-	skb->arp=1;
-
 	if (skb->len <= 0)
 		return 0;
 
 	if (el3_debug > 4) {
-		printk("%s: el3_start_xmit(lenght = %ld) called, status %4.4x.\n",
+		printk("%s: el3_start_xmit(length = %ld) called, status %4.4x.\n",
 			   dev->name, skb->len, inw(ioaddr + EL3_STATUS));
 	}
 #ifndef final_version
@@ -417,8 +404,7 @@ el3_start_xmit(struct sk_buff *skb, struct device *dev)
 			outw(0x9000 + 1536, ioaddr + EL3_CMD);
 	}
 
-	if (skb->free)
-		kfree_skb (skb, FREE_WRITE);
+	dev_kfree_skb (skb, FREE_WRITE);
 
 	/* Clear the Tx status stack. */
 	{
@@ -472,7 +458,7 @@ el3_interrupt(int reg_ptr)
 			/* There's room in the FIFO for a full-sized packet. */
 			outw(0x6808, ioaddr + EL3_CMD); /* Ack IRQ */
 			dev->tbusy = 0;
-			mark_bh(INET_BH);
+			mark_bh(NET_BH);
 		}
 		if (status & 0x80)				/* Statistics full. */
 			update_stats(ioaddr, dev);
@@ -480,7 +466,7 @@ el3_interrupt(int reg_ptr)
 		if (++i > 10) {
 			printk("%s: Infinite loop in interrupt, status %4.4x.\n",
 				   dev->name, status);
-			/* Clear all interrupts we have handled. */
+			/* Clear all interrupts we have handled */
 			outw(0x68FF, ioaddr + EL3_CMD);
 			break;
 		}
@@ -568,16 +554,13 @@ el3_rx(struct device *dev)
 		if ( (! (rx_status & 0x4000))
 			|| ! (rx_status & 0x1000)) { /* Dribble bits are OK. */
 			short pkt_len = rx_status & 0x7ff;
-			int sksize = sizeof(struct sk_buff) + pkt_len + 3;
 			struct sk_buff *skb;
 
-			skb = alloc_skb(sksize, GFP_ATOMIC);
+			skb = alloc_skb(pkt_len+3, GFP_ATOMIC);
 			if (el3_debug > 4)
-				printk("	   Receiving packet size %d status %4.4x.\n",
+				printk("Receiving packet size %d status %4.4x.\n",
 					   pkt_len, rx_status);
 			if (skb != NULL) {
-				skb->mem_len = sksize;
-				skb->mem_addr = skb;
 				skb->len = pkt_len;
 				skb->dev = dev;
 
@@ -606,12 +589,12 @@ el3_rx(struct device *dev)
 					continue;
 				} else {
 					printk("%s: receive buffers full.\n", dev->name);
-					kfree_s(skb, sksize);
+					kfree_s(skb, FREE_READ);
 				}
 #endif
 			} else if (el3_debug)
 				printk("%s: Couldn't allocate a sk_buff of size %d.\n",
-					   dev->name, sksize);
+					   dev->name, pkt_len);
 		}
 		lp->stats.rx_dropped++;
 		outw(0x4000, ioaddr + EL3_CMD); /* Rx discard */
@@ -684,6 +667,9 @@ el3_close(struct device *dev)
 	irq2dev_map[dev->irq] = 0;
 
 	update_stats(ioaddr, dev);
+#ifdef MODULE
+	MOD_DEC_USE_COUNT;
+#endif
 	return 0;
 }
 
@@ -695,3 +681,29 @@ el3_close(struct device *dev)
  *  tab-width: 4
  * End:
  */
+#ifdef MODULE
+char kernel_version[] = UTS_RELEASE;
+static struct device dev_3c509 = {
+	"        " /*"3c509"*/, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, el3_probe };
+
+int
+init_module(void)
+{
+	if (register_netdev(&dev_3c509) != 0)
+		return -EIO;
+	return 0;
+}
+
+void
+cleanup_module(void)
+{
+	if (MOD_IN_USE)
+		printk("3c509: device busy, remove delayed\n");
+	else
+	{
+		unregister_netdev(&dev_3c509);
+		kfree_s(dev_3c509.priv,sizeof(struct el3_private));
+		dev_3c509.priv=NULL;
+	}
+}
+#endif /* MODULE */

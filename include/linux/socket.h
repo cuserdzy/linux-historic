@@ -23,7 +23,7 @@ struct linger {
 #define SOCK_PACKET	10		/* linux specific way of	*/
 					/* getting packets at the dev	*/
 					/* level.  For writing rarp and	*/
-					/* other similiar things on the	*/
+					/* other similar things on the	*/
 					/* user level.			*/
 
 /* Supported address families. */
@@ -33,15 +33,20 @@ struct linger {
 #define AF_AX25		3
 #define AF_IPX		4
 
+#define AF_MAX		8	/* For now.. */
+
 /* Protocol families, same as address families. */
+#define PF_UNSPEC	AF_UNSPEC
 #define PF_UNIX		AF_UNIX
 #define PF_INET		AF_INET
 #define PF_AX25		AF_AX25
 #define PF_IPX		AF_IPX
 
+#define PF_MAX		AF_MAX
 /* Flags we can use with send/ and recv. */
 #define MSG_OOB		1
 #define MSG_PEEK	2
+#define MSG_DONTROUTE	4
 
 /* Setsockoptions(2) level. Thanks to BSD these must match IPPROTO_xxx */
 #define SOL_SOCKET	1

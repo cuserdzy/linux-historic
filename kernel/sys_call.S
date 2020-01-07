@@ -78,6 +78,7 @@ flags		= 20
 errno		= 24
 dbgreg6		= 52
 dbgreg7		= 56
+exec_domain	= 60
 
 ENOSYS = 38
 
@@ -141,8 +142,11 @@ _lcall7:
 	movl %edx,EIP(%esp)	# Now we move them to their "normal" places
 	movl %ecx,CS(%esp)	#
 	movl %esp,%eax
+	movl _current,%edx
 	pushl %eax
-	call _iABI_emulate
+	movl exec_domain(%edx),%edx	# Get the execution domain
+	movl 4(%edx),%edx	# Get the lcall7 handler for the domain
+	call *%edx
 	popl %eax
 	jmp ret_from_sys_call
 
@@ -201,10 +205,10 @@ _system_call:
 ret_from_sys_call:
 	cmpl $0,_intr_count
 	jne 2f
-	movl _bh_mask,%eax
+9:	movl _bh_mask,%eax
 	andl _bh_active,%eax
 	jne handle_bottom_half
-9:	movl EFLAGS(%esp),%eax		# check VM86 flag: CS/SS are
+	movl EFLAGS(%esp),%eax		# check VM86 flag: CS/SS are
 	testl $(VM_MASK),%eax		# different then
 	jne 1f
 	cmpw $(KERNEL_CS),CS(%esp)	# was old code segment supervisor ?
@@ -531,5 +535,10 @@ _sys_call_table:
 	.long _sys_getpgid
 	.long _sys_fchdir
 	.long _sys_bdflush
+	.long _sys_sysfs		/* 135 */
+	.long _sys_personality
+	.long 0				/* for afs_syscall */
+	.long _sys_setfsuid
+	.long _sys_setfsgid
 
-	.space (NR_syscalls-130)*4
+	.space (NR_syscalls-137)*4

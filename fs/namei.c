@@ -68,8 +68,9 @@ void putname(char * name)
  *	permission()
  *
  * is used to check for read/write/execute permissions on a file.
- * I don't know if we should look at just the euid or both euid and
- * uid, but that should be easily changed.
+ * We use "fsuid" for this, letting us set arbitrary permissions
+ * permissions for filesystem access without changing the "normal"
+ * uids which are used for other things..
  */
 int permission(struct inode * inode,int mask)
 {
@@ -77,11 +78,11 @@ int permission(struct inode * inode,int mask)
 
 	if (inode->i_op && inode->i_op->permission)
 		return inode->i_op->permission(inode, mask);
-	else if (current->euid == inode->i_uid)
+	else if (current->fsuid == inode->i_uid)
 		mode >>= 6;
 	else if (in_group_p(inode->i_gid))
 		mode >>= 3;
-	if (((mode & mask & 0007) == mask) || suser())
+	if (((mode & mask & 0007) == mask) || fsuser())
 		return 1;
 	return 0;
 }
@@ -103,7 +104,7 @@ int lookup(struct inode * dir,const char * name, int len,
 /* check permissions before traversing mount-points */
 	perm = permission(dir,MAY_EXEC);
 	if (len==2 && name[0] == '.' && name[1] == '.') {
-		if (dir == current->root) {
+		if (dir == current->fs->root) {
 			*result = dir;
 			return 0;
 		} else if ((sb = dir->i_sb) && (dir == sb->s_mounted)) {
@@ -163,12 +164,12 @@ static int dir_namei(const char * pathname, int * namelen, const char ** name,
 
 	*res_inode = NULL;
 	if (!base) {
-		base = current->pwd;
+		base = current->fs->pwd;
 		base->i_count++;
 	}
 	if ((c = *pathname) == '/') {
 		iput(base);
-		base = current->root;
+		base = current->fs->root;
 		pathname++;
 		base->i_count++;
 	}
@@ -279,7 +280,7 @@ int open_namei(const char * pathname, int flag, int mode,
 	struct inode * dir, *inode;
 	struct task_struct ** p;
 
-	mode &= S_IALLUGO & ~current->umask;
+	mode &= S_IALLUGO & ~current->fs->umask;
 	mode |= S_IFREG;
 	error = dir_namei(pathname,&namelen,&basename,base,&dir);
 	if (error)
@@ -353,14 +354,12 @@ int open_namei(const char * pathname, int flag, int mode,
 		        struct vm_area_struct * mpnt;
  			if (!*p)
  				continue;
- 			if (inode == (*p)->executable) {
- 				iput(inode);
- 				return -ETXTBSY;
- 			}
-			for(mpnt = (*p)->mmap; mpnt; mpnt = mpnt->vm_next) {
+			for(mpnt = (*p)->mm->mmap; mpnt; mpnt = mpnt->vm_next) {
+				if (inode != mpnt->vm_inode)
+					continue;
 				if (mpnt->vm_page_prot & PAGE_RW)
 					continue;
-				if (inode == mpnt->vm_inode) {
+				if (mpnt->vm_flags & VM_DENYWRITE) {
 					iput(inode);
 					return -ETXTBSY;
 				}
@@ -387,7 +386,7 @@ int do_mknod(const char * filename, int mode, dev_t dev)
 	int namelen, error;
 	struct inode * dir;
 
-	mode &= ~current->umask;
+	mode &= ~current->fs->umask;
 	error = dir_namei(filename,&namelen,&basename, NULL, &dir);
 	if (error)
 		return error;
@@ -407,9 +406,11 @@ int do_mknod(const char * filename, int mode, dev_t dev)
 		iput(dir);
 		return -EPERM;
 	}
+	dir->i_count++;
 	down(&dir->i_sem);
 	error = dir->i_op->mknod(dir,basename,namelen,mode,dev);
 	up(&dir->i_sem);
+	iput(dir);
 	return error;
 }
 
@@ -418,7 +419,7 @@ asmlinkage int sys_mknod(const char * filename, int mode, dev_t dev)
 	int error;
 	char * tmp;
 
-	if (S_ISDIR(mode) || (!S_ISFIFO(mode) && !suser()))
+	if (S_ISDIR(mode) || (!S_ISFIFO(mode) && !fsuser()))
 		return -EPERM;
 	switch (mode & S_IFMT) {
 	case 0:
@@ -462,9 +463,11 @@ static int do_mkdir(const char * pathname, int mode)
 		iput(dir);
 		return -EPERM;
 	}
+	dir->i_count++;
 	down(&dir->i_sem);
 	error = dir->i_op->mkdir(dir,basename,namelen,mode);
 	up(&dir->i_sem);
+	iput(dir);
 	return error;
 }
 
@@ -588,9 +591,11 @@ static int do_symlink(const char * oldname, const char * newname)
 		iput(dir);
 		return -EPERM;
 	}
+	dir->i_count++;
 	down(&dir->i_sem);
 	error = dir->i_op->symlink(dir,basename,namelen,oldname);
 	up(&dir->i_sem);
+	iput(dir);
 	return error;
 }
 
@@ -647,9 +652,11 @@ static int do_link(struct inode * oldinode, const char * newname)
 		iput(oldinode);
 		return -EPERM;
 	}
+	dir->i_count++;
 	down(&dir->i_sem);
 	error = dir->i_op->link(oldinode, dir, basename, namelen);
 	up(&dir->i_sem);
+	iput(dir);
 	return error;
 }
 
@@ -723,10 +730,12 @@ static int do_rename(const char * oldname, const char * newname)
 		iput(new_dir);
 		return -EPERM;
 	}
+	new_dir->i_count++;
 	down(&new_dir->i_sem);
 	error = old_dir->i_op->rename(old_dir, old_base, old_len, 
 		new_dir, new_base, new_len);
 	up(&new_dir->i_sem);
+	iput(new_dir);
 	return error;
 }
 

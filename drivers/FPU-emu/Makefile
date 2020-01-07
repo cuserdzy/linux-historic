@@ -5,14 +5,13 @@
 #DEBUG	= -DDEBUGGING
 DEBUG	=
 PARANOID = -DPARANOID
-REENTRANT	= -DREENTRANT_FPU
 CFLAGS	:= $(CFLAGS) $(PARANOID) $(DEBUG) -fno-builtin
 
 .c.o:
 	$(CC) $(CFLAGS) $(MATH_EMULATION) -c $<
 
 .S.o:
-	$(CC) -D__ASSEMBLER__ $(PARANOID) $(REENTRANT) -c $<
+	$(CC) -D__ASSEMBLER__ $(PARANOID) -c $<
 
 .s.o:
 	$(CC) -c $<
@@ -21,12 +20,13 @@ OBJS =	fpu_entry.o div_small.o errors.o \
 	fpu_arith.o fpu_aux.o fpu_etc.o fpu_trig.o \
 	load_store.o get_address.o \
 	poly_atan.o poly_l2.o poly_2xm1.o poly_sin.o poly_tan.o \
-	poly_div.o poly_mul64.o polynomial.o \
 	reg_add_sub.o reg_compare.o reg_constant.o reg_ld_str.o \
 	reg_div.o reg_mul.o reg_norm.o \
 	reg_u_add.o reg_u_div.o reg_u_mul.o reg_u_sub.o \
 	reg_round.o \
-	wm_shrx.o wm_sqrt.o
+	wm_shrx.o wm_sqrt.o \
+	div_Xsig.o polynom_Xsig.o round_Xsig.o \
+	shr_Xsig.o mul_Xsig.o
 
 math.a: $(OBJS)
 	rm -f math.a

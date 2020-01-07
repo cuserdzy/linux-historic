@@ -3,6 +3,11 @@
  *
  * Created for Linux based loosely upon Mathius Lattner's minix
  * patches by Peter MacDonald. Heavily edited by Linus.
+ *
+ *  4 February 1994
+ *     COFF/ELF binary emulation. If the process has the STICKY_TIMEOUTS
+ *     flag set in its personality we do *not* modify the given timeout
+ *     parameter to reflect time remaining.
  */
 
 #include <linux/types.h>
@@ -14,6 +19,7 @@
 #include <linux/stat.h>
 #include <linux/signal.h>
 #include <linux/errno.h>
+#include <linux/personality.h>
 
 #include <asm/segment.h>
 #include <asm/system.h>
@@ -95,9 +101,9 @@ static int do_select(int n, fd_set *in, fd_set *out, fd_set *ex,
 				goto end_check;
 			if (!(set & 1))
 				continue;
-			if (!current->filp[i])
+			if (!current->files->fd[i])
 				return -EBADF;
-			if (!current->filp[i]->f_inode)
+			if (!current->files->fd[i]->f_inode)
 				return -EBADF;
 			max = i;
 		}
@@ -116,17 +122,17 @@ end_check:
 repeat:
 	current->state = TASK_INTERRUPTIBLE;
 	for (i = 0 ; i < n ; i++) {
-		if (FD_ISSET(i,in) && check(SEL_IN,wait,current->filp[i])) {
+		if (FD_ISSET(i,in) && check(SEL_IN,wait,current->files->fd[i])) {
 			FD_SET(i, res_in);
 			count++;
 			wait = NULL;
 		}
-		if (FD_ISSET(i,out) && check(SEL_OUT,wait,current->filp[i])) {
+		if (FD_ISSET(i,out) && check(SEL_OUT,wait,current->files->fd[i])) {
 			FD_SET(i, res_out);
 			count++;
 			wait = NULL;
 		}
-		if (FD_ISSET(i,ex) && check(SEL_EX,wait,current->filp[i])) {
+		if (FD_ISSET(i,ex) && check(SEL_EX,wait,current->files->fd[i])) {
 			FD_SET(i, res_ex);
 			count++;
 			wait = NULL;
@@ -185,7 +191,7 @@ __get_fd_set(nr, (unsigned long *) (fsp), (unsigned long *) (fdp))
 __set_fd_set(nr, (unsigned long *) (fsp), (unsigned long *) (fdp))
 
 /*
- * We can actually return ERESTARTSYS insetad of EINTR, but I'd
+ * We can actually return ERESTARTSYS instead of EINTR, but I'd
  * like to be certain this leads to no problems. So I return
  * EINTR just for safety.
  *
@@ -235,7 +241,7 @@ asmlinkage int sys_select( unsigned long *buffer )
 	else
 		timeout = 0;
 	current->timeout = 0;
-	if (tvp) {
+	if (tvp && !(current->personality & STICKY_TIMEOUTS)) {
 		put_fs_long(timeout/HZ, (unsigned long *) &tvp->tv_sec);
 		timeout %= HZ;
 		timeout *= (1000000/HZ);

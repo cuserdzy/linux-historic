@@ -28,6 +28,26 @@ static struct device_struct blkdevs[MAX_BLKDEV] = {
 	{ NULL, NULL },
 };
 
+int get_device_list(char * page)
+{
+	int i;
+	int len;
+
+	len = sprintf(page, "Character devices:\n");
+	for (i = 0; i < MAX_CHRDEV ; i++) {
+		if (chrdevs[i].fops) {
+			len += sprintf(page+len, "%2d %s\n", i, chrdevs[i].name);
+		}
+	}
+	len += sprintf(page+len, "\nBlock devices:\n");
+	for (i = 0; i < MAX_BLKDEV ; i++) {
+		if (blkdevs[i].fops) {
+			len += sprintf(page+len, "%2d %s\n", i, blkdevs[i].name);
+		}
+	}
+	return len;
+}
+
 struct file_operations * get_blkfops(unsigned int major)
 {
 	if (major >= MAX_BLKDEV)
@@ -44,9 +64,23 @@ struct file_operations * get_chrfops(unsigned int major)
 
 int register_chrdev(unsigned int major, const char * name, struct file_operations *fops)
 {
+	if (major == 0) {
+		for (major = MAX_CHRDEV-1; major > 0; major--) {
+			if (chrdevs[major].fops == fops)
+				return major;
+		}
+		for (major = MAX_CHRDEV-1; major > 0; major--) {
+			if (chrdevs[major].fops == NULL) {
+				chrdevs[major].name = name;
+				chrdevs[major].fops = fops;
+				return major;
+			}
+		}
+		return -EBUSY;
+	}
 	if (major >= MAX_CHRDEV)
 		return -EINVAL;
-	if (chrdevs[major].fops)
+	if (chrdevs[major].fops && chrdevs[major].fops != fops)
 		return -EBUSY;
 	chrdevs[major].name = name;
 	chrdevs[major].fops = fops;
@@ -55,9 +89,23 @@ int register_chrdev(unsigned int major, const char * name, struct file_operation
 
 int register_blkdev(unsigned int major, const char * name, struct file_operations *fops)
 {
+	if (major == 0) {
+		for (major = MAX_BLKDEV-1; major > 0; major--) {
+			if (blkdevs[major].fops == fops)
+				return major;
+		}
+		for (major = MAX_BLKDEV-1; major > 0; major--) {
+			if (blkdevs[major].fops == NULL) {
+				blkdevs[major].name = name;
+				blkdevs[major].fops = fops;
+				return major;
+			}
+		}
+		return -EBUSY;
+	}
 	if (major >= MAX_BLKDEV)
 		return -EINVAL;
-	if (blkdevs[major].fops)
+	if (blkdevs[major].fops && blkdevs[major].fops != fops)
 		return -EBUSY;
 	blkdevs[major].name = name;
 	blkdevs[major].fops = fops;
@@ -88,6 +136,41 @@ int unregister_blkdev(unsigned int major, const char * name)
 	blkdevs[major].name = NULL;
 	blkdevs[major].fops = NULL;
 	return 0;
+}
+
+/*
+ * This routine checks whether a removable media has been changed,
+ * and invalidates all buffer-cache-entries in that case. This
+ * is a relatively slow routine, so we have to try to minimize using
+ * it. Thus it is called only upon a 'mount' or 'open'. This
+ * is the best way of combining speed and utility, I think.
+ * People changing diskettes in the middle of an operation deserve
+ * to loose :-)
+ */
+int check_disk_change(dev_t dev)
+{
+	int i;
+	struct file_operations * fops;
+
+	i = MAJOR(dev);
+	if (i >= MAX_BLKDEV || (fops = blkdevs[i].fops) == NULL)
+		return 0;
+	if (fops->check_media_change == NULL)
+		return 0;
+	if (!fops->check_media_change(dev))
+		return 0;
+
+	printk("VFS: Disk change detected on device %d/%d\n",
+					MAJOR(dev), MINOR(dev));
+	for (i=0 ; i<NR_SUPER ; i++)
+		if (super_blocks[i].s_dev == dev)
+			put_super(super_blocks[i].s_dev);
+	invalidate_inodes(dev);
+	invalidate_buffers(dev);
+
+	if (fops->revalidate)
+		fops->revalidate(dev);
+	return 1;
 }
 
 /*

@@ -44,6 +44,7 @@ struct screen_info {
 	unsigned short orig_video_ega_bx;
 	unsigned short orig_video_ega_cx;
 	unsigned char  orig_video_lines;
+	unsigned short orig_video_points;
 };
 
 extern struct screen_info screen_info;
@@ -57,6 +58,7 @@ extern struct screen_info screen_info;
 #define ORIG_VIDEO_EGA_BX	(screen_info.orig_video_ega_bx)
 #define ORIG_VIDEO_EGA_CX	(screen_info.orig_video_ega_cx)
 #define ORIG_VIDEO_LINES	(screen_info.orig_video_lines)
+#define ORIG_VIDEO_POINTS       (screen_info.orig_video_points)
 
 #define VIDEO_TYPE_MDA		0x10	/* Monochrome Text Display	*/
 #define VIDEO_TYPE_CGA		0x11	/* CGA Display 			*/
@@ -266,14 +268,6 @@ extern struct tty_struct * redirect;
 extern struct tty_ldisc ldiscs[];
 extern int fg_console;
 extern struct wait_queue * keypress_wait;
-
-/*	intr=^C		quit=^|		erase=del	kill=^U
-	eof=^D		vtime=\0	vmin=\1		sxtc=\0
-	start=^Q	stop=^S		susp=^Z		eol=\0
-	reprint=^R	discard=^U	werase=^W	lnext=^V
-	eol2=\0
-*/
-#define INIT_C_CC "\003\034\177\025\004\0\1\0\021\023\032\0\022\017\027\026\0"
 
 extern long rs_init(long);
 extern long lp_init(long);

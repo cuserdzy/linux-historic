@@ -4,7 +4,15 @@
  *  Copyright (C) 1992  by Linus Torvalds
  *  based on ideas by Darren Senn
  *
- *  stat,statm extensions by Michael K. Johnson, johnsonm@stolaf.edu
+ * Fixes:
+ * Michael. K. Johnson: stat,statm extensions.
+ *                      <johnsonm@stolaf.edu>
+ *
+ * Pauline Middelink :  Made cmdline,envline only break at '\0's, to
+ *                      make sure SET_PROCTITLE works. Also removed
+ *                      bad '!' which forced addres recalculation for
+ *                      EVERY character on the current page.
+ *                      <middelin@calvin.iaf.nl>
  */
 
 #include <linux/types.h>
@@ -88,28 +96,38 @@ static int get_loadavg(char * buffer)
 
 static int get_kstat(char * buffer)
 {
-        return sprintf(buffer,	"cpu  %u %u %u %lu\n"
-        			"disk %u %u %u %u\n"
-        			"page %u %u\n"
-        			"swap %u %u\n"
-        			"intr %u\n"
-        			"ctxt %u\n"
-        			"btime %lu\n",
-                kstat.cpu_user,
-                kstat.cpu_nice,
-                kstat.cpu_system,
-                jiffies - (kstat.cpu_user + kstat.cpu_nice + kstat.cpu_system),
-                kstat.dk_drive[0],
-                kstat.dk_drive[1],
-                kstat.dk_drive[2],
-                kstat.dk_drive[3],
-                kstat.pgpgin,
-                kstat.pgpgout,
-                kstat.pswpin,
-                kstat.pswpout,
-                kstat.interrupts,
-                kstat.context_swtch,
-                xtime.tv_sec - jiffies / HZ);
+	int i, len;
+	unsigned sum = 0;
+
+	for (i = 0 ; i < 16 ; i++)
+		sum += kstat.interrupts[i];
+	len = sprintf(buffer,
+		"cpu  %u %u %u %lu\n"
+		"disk %u %u %u %u\n"
+		"page %u %u\n"
+		"swap %u %u\n"
+		"intr %u",
+		kstat.cpu_user,
+		kstat.cpu_nice,
+		kstat.cpu_system,
+		jiffies - (kstat.cpu_user + kstat.cpu_nice + kstat.cpu_system),
+		kstat.dk_drive[0],
+		kstat.dk_drive[1],
+		kstat.dk_drive[2],
+		kstat.dk_drive[3],
+		kstat.pgpgin,
+		kstat.pgpgout,
+		kstat.pswpin,
+		kstat.pswpout,
+		sum);
+	for (i = 0 ; i < 16 ; i++)
+		len += sprintf(buffer + len, " %u", kstat.interrupts[i]);
+	len += sprintf(buffer + len,
+		"\nctxt %u\n"
+		"btime %lu\n",
+		kstat.context_swtch,
+		xtime.tv_sec - jiffies / HZ);
+	return len;
 }
 
 
@@ -167,12 +185,12 @@ static unsigned long get_phys_addr(struct task_struct ** p, unsigned long ptr)
 	if (!p || !*p || ptr >= TASK_SIZE)
 		return 0;
 	page = *PAGE_DIR_OFFSET((*p)->tss.cr3,ptr);
-	if (!(page & 1))
+	if (!(page & PAGE_PRESENT))
 		return 0;
 	page &= PAGE_MASK;
 	page += PAGE_PTR(ptr);
 	page = *(unsigned long *) page;
-	if (!(page & 1))
+	if (!(page & PAGE_PRESENT))
 		return 0;
 	page &= PAGE_MASK;
 	page += ptr & ~PAGE_MASK;
@@ -190,7 +208,7 @@ static int get_array(struct task_struct ** p, unsigned long start, unsigned long
 	for (;;) {
 		addr = get_phys_addr(p, start);
 		if (!addr)
-			return result;
+			goto ready;
 		do {
 			c = *(char *) addr;
 			if (!c)
@@ -198,13 +216,18 @@ static int get_array(struct task_struct ** p, unsigned long start, unsigned long
 			if (size < PAGE_SIZE)
 				buffer[size++] = c;
 			else
-				return result;
+				goto ready;
 			addr++;
 			start++;
-			if (start >= end)
-				return result;
-		} while (!(addr & ~PAGE_MASK));
+			if (!c && start >= end)
+				goto ready;
+		} while (addr & ~PAGE_MASK);
 	}
+ready:
+	/* remove the trailing blanks, used to fillout argv,envp space */
+	while (result>0 && buffer[result-1]==' ')
+		result--;
+	return result;
 }
 
 static int get_env(int pid, char * buffer)

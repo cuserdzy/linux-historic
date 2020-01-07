@@ -1,6 +1,6 @@
 VERSION = 1
-PATCHLEVEL = 0
-ALPHA =
+PATCHLEVEL = 1
+SUBLEVEL = 0
 
 all:	Version zImage
 
@@ -9,6 +9,7 @@ all:	Version zImage
 CONFIG_SHELL := $(shell if [ -x "$$BASH" ]; then echo $$BASH; \
 	  else if [ -x /bin/bash ]; then echo /bin/bash; \
 	  else echo sh; fi ; fi)
+ROOT	:= $(shell if [ "$$PWD" != "" ]; then echo $$PWD; else pwd; fi)
 
 #
 # Make "config" the default target if there is no configuration file or
@@ -74,8 +75,9 @@ LD86	=ld86 -0
 
 AS	=as
 LD	=ld
+LDFLAGS	=#-qmagic
 HOSTCC	=gcc
-CC	=gcc -D__KERNEL__
+CC	=gcc -D__KERNEL__ -I$(ROOT)/include
 MAKE	=make
 CPP	=$(CC) -E
 AR	=ar
@@ -128,7 +130,7 @@ tools/./version.h: tools/version.h
 
 tools/version.h: $(CONFIGURE) Makefile
 	@./makever.sh
-	@echo \#define UTS_RELEASE \"$(VERSION).$(PATCHLEVEL)$(ALPHA)\" > tools/version.h
+	@echo \#define UTS_RELEASE \"$(VERSION).$(PATCHLEVEL).$(SUBLEVEL)\" > tools/version.h
 	@echo \#define UTS_VERSION \"\#`cat .version` `date`\" >> tools/version.h
 	@echo \#define LINUX_COMPILE_TIME \"`date +%T`\" >> tools/version.h
 	@echo \#define LINUX_COMPILE_BY \"`whoami`\" >> tools/version.h

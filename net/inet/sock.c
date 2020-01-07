@@ -428,7 +428,7 @@ destroy_sock(struct sock *sk)
    * structure, otherwise we need to keep it around until
    * everything is gone.
    */
-	  if (sk->rmem_alloc == 0 && sk->wmem_alloc == 0) 
+	  if (sk->dead && sk->rmem_alloc == 0 && sk->wmem_alloc == 0) 
 	  {
 		kfree_s((void *)sk,sizeof(*sk));
 	  } 
@@ -1194,8 +1194,12 @@ inet_accept(struct socket *sock, struct socket *newsock, int flags)
    * We need to free it up because the tcp module creates
    * it's own when it accepts one.
    */
-  if (newsock->data) kfree_s(newsock->data, sizeof(struct sock));
-  newsock->data = NULL;
+  if (newsock->data) {
+  	struct sock * sk = (struct sock *) newsock->data;
+  	newsock->data = NULL;
+  	sk->dead = 1;
+  	destroy_sock(sk);
+  }
 
   if (sk1->prot->accept == NULL) return(-EOPNOTSUPP);
 
@@ -1651,7 +1655,7 @@ sock_wfree(struct sock *sk, void *mem, unsigned long size)
 {
   DPRINTF((DBG_INET, "sock_wfree(sk=%X, mem=%X, size=%d)\n", sk, mem, size));
 
-  IS_SKB(mem);
+  IS_SKB((struct sk_buff *) mem);
   kfree_skbmem(mem, size);
   if (sk) {
 	sk->wmem_alloc -= size;
@@ -1671,7 +1675,7 @@ void
 sock_rfree(struct sock *sk, void *mem, unsigned long size)
 {
   DPRINTF((DBG_INET, "sock_rfree(sk=%X, mem=%X, size=%d)\n", sk, mem, size));
-  IS_SKB(mem);
+  IS_SKB((struct sk_buff *) mem);
   kfree_skbmem(mem, size);
   if (sk) {
 	sk->rmem_alloc -= size;

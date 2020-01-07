@@ -12,6 +12,9 @@
  *		Mark Evans, <evansmp@uhura.aston.ac.uk>
  *		Corey Minyard <wf-rch!minyard@relay.EU.net>
  *		Florian La Roche, <flla@stud.uni-sb.de>
+ *		Charles Hedrick, <hedrick@klinzhai.rutgers.edu>
+ *		Linus Torvalds, <torvalds@cs.helsinki.fi>
+ *		Alan Cox, <gw4pts@gw4pts.ampr.org>
  *
  * Fixes:	
  *		Alan Cox	:	Numerous verify_area() calls
@@ -63,6 +66,7 @@
  *		Charles Hedrick	:	Window fix
  *		Linus		:	Rewrote tcp_read() and URG handling
  *					completely
+ *		Gerhard Koerting:	Fixed some missing timer handling
  *
  *
  * To Fix:
@@ -146,22 +150,6 @@ static struct sk_buff *
 get_firstr(struct sock *sk)
 {
   return skb_dequeue(&sk->rqueue);
-}
-
-/*
- *	Difference between two values in tcp ack terms.
- */
-
-static long
-diff(unsigned long seq1, unsigned long seq2)
-{
-  long d;
-
-  d = seq1 - seq2;
-  if (d > 0) return(d);
-
-  /* I hope this returns what I want. */
-  return(~d+1);
 }
 
 /* This routine picks a TCP windows for a socket based on
@@ -1487,8 +1475,13 @@ tcp_shutdown(struct sock *sk, int how)
 			   IPPROTO_TCP, sk->opt,
 			   sizeof(struct tcphdr),sk->ip_tos,sk->ip_ttl);
   if (tmp < 0) {
+  	/* Finish anyway, treat this as a send that got lost. */
   	buff->free=1;
 	prot->wfree(sk,buff->mem_addr, buff->mem_len);
+	if(sk->state==TCP_ESTABLISHED)
+		sk->state=TCP_FIN_WAIT1;
+	else
+		sk->state=TCP_FIN_WAIT2;
 	release_sock(sk);
 	DPRINTF((DBG_TCP, "Unable to build header for fin.\n"));
 	return;
@@ -2024,6 +2017,13 @@ tcp_close(struct sock *sk, int timeout)
 				         sizeof(struct tcphdr),sk->ip_tos,sk->ip_ttl);
 		if (tmp < 0) {
 			kfree_skb(buff,FREE_WRITE);
+			if(sk->state==TCP_ESTABLISHED)
+				sk->state=TCP_FIN_WAIT1;
+			else
+				sk->state=TCP_FIN_WAIT2;
+			reset_timer(sk, TIME_CLOSE,4*sk->rto);
+			if(timeout)
+				tcp_time_wait(sk);
 			DPRINTF((DBG_TCP, "Unable to build header for fin.\n"));
 			release_sock(sk);
 			return;
@@ -2854,6 +2854,7 @@ tcp_fin(struct sock *sk, struct tcphdr *th,
 	case TCP_SYN_SENT:
 	case TCP_ESTABLISHED:
 		/* Contains the one that needs to be acked */
+		reset_timer(sk, TIME_CLOSE, TCP_TIMEOUT_LEN);
 		sk->fin_seq = th->seq+1;
 		sk->state = TCP_CLOSE_WAIT;
 		if (th->rst) sk->shutdown = SHUTDOWN_MASK;

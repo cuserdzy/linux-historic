@@ -426,12 +426,14 @@ void kfree_skb(struct sk_buff *skb, int rw)
 struct sk_buff *alloc_skb(unsigned int size,int priority)
 {
 	struct sk_buff *skb;
-	extern unsigned long intr_count;
 
 	if (intr_count && priority != GFP_ATOMIC) {
-		printk("alloc_skb called nonatomically from interrupt %08lx\n",
-			((unsigned long *)&size)[-1]);
-		priority = GFP_ATOMIC;
+		static int count = 0;
+		if (++count < 5) {
+			printk("alloc_skb called nonatomically from interrupt %08lx\n",
+				((unsigned long *)&size)[-1]);
+			priority = GFP_ATOMIC;
+		}
 	}
 	skb=(struct sk_buff *)kmalloc(size,priority);
 	if(skb==NULL)
@@ -456,7 +458,7 @@ struct sk_buff *alloc_skb(unsigned int size,int priority)
 
 void kfree_skbmem(void *mem,unsigned size)
 {
-	struct sk_buff *x=mem;
+	struct sk_buff *x=(struct sk_buff *) mem;
 	IS_SKB(x);
 	if(x->magic_debug_cookie==SK_GOOD_SKB)
 	{

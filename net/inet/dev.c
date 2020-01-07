@@ -134,6 +134,7 @@ static struct packet_type ip_packet_type = {
 
 struct packet_type *ptype_base = &ip_packet_type;
 static struct sk_buff *volatile backlog = NULL;
+static int backlog_size = 0;
 static unsigned long ip_bcast = 0;
 
 
@@ -482,14 +483,25 @@ dev_queue_xmit(struct sk_buff *skb, struct device *dev, int pri)
 void
 netif_rx(struct sk_buff *skb)
 {
+  static int dropping = 0;
   /* Set any necessary flags. */
   skb->sk = NULL;
   skb->free = 1;
-  
+
+  /* check that we aren't oevrdoing things.. */
+  if (!backlog_size)
+  	dropping = 0;
+  else if (backlog_size > 100)
+  	dropping = 1;
+  if (dropping) {
+	kfree_skb(skb, FREE_READ);
+	return;
+  }
   /* and add it to the "backlog" queue. */
   IS_SKB(skb);
   skb_queue_tail(&backlog,skb);
-   
+  backlog_size++;
+  
   /* If any packet arrived, mark it for processing. */
   if (backlog != NULL) mark_bh(INET_BH);
 
@@ -607,6 +619,7 @@ inet_bh(void *tmp)
   /* Any data left to process? */
   while((skb=skb_dequeue(&backlog))!=NULL)
   {
+  	backlog_size--;
   	nitcount=dev_nit;
 	flag=0;
 	sti();
@@ -732,6 +745,9 @@ dev_ifconf(char *arg)
   memcpy_fromfs(&ifc, arg, sizeof(struct ifconf));
   len = ifc.ifc_len;
   pos = ifc.ifc_buf;
+  err=verify_area(VERIFY_WRITE, pos, len);
+  if(err)
+	return err;
 
   /* Loop over the interfaces, and write an info block for each. */
   for (dev = dev_base; dev != NULL; dev = dev->next) {

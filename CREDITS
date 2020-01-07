@@ -390,7 +390,7 @@ S: D-37083 Goettingen
 S: Germany
 
 N: Ian A. Murdock
-E: imurdock@shell.portal.com
+E: imurdock@gnu.ai.mit.edu
 D: Creator of Debian distribution
 S: 30 White Tail Lane
 S: Lafayette, Indiana 47906
@@ -402,6 +402,15 @@ D: PS/2 mouse driver writer etc.
 S: Dragonvagen 1 A 13
 S: FIN-00330 Helsingfors
 S: Finland
+
+N: Kai Petzke
+E: wpp@marie.physik.tu-berlin.de
+D: Driver for Laser Magnetic Storage CD-ROM
+D: Some kernel bug fixes, new swapping routine
+D: Port of the database Postgres
+S: Stresemannstr. 62
+S: 10963 Berlin
+S: Germany
 
 N: Stefan Probst
 E: snprobst@immd4.informatik.uni-erlangen.de

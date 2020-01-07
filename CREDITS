@@ -275,10 +275,11 @@ S: Oak Park, Illinois 60302
 S: USA
 
 N: Nigel Gamble
-E: nigel%gamble.uucp@gate.net
+E: nigel@nrg.org
+E: nigel@sgi.com
 D: Interrupt-driven printer driver
-S: 301 Norwood Terrace, Apartment N226
-S: Boca Raton, Florida 33431-6588
+S: 765 N Rengstorff Ave, Apartment 7
+S: Mountain View, California 94043-2420
 S: USA
 
 N: Jacques Gelinas
@@ -681,6 +682,10 @@ N: Ken Pizzini
 E: ken@halcyon.com
 D: CDROM driver "sonycd535" (Sony CDU-535/531)
 S: 
+
+N: Frederic Potter 
+E: Frederic.Potter@masi.ibp.fr 
+D: Some PCI kernel support
 
 N: Stefan Probst
 E: snprobst@immd4.informatik.uni-erlangen.de

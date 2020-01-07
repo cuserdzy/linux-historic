@@ -34,12 +34,18 @@
 #include <linux/delay.h>
 #include <linux/config.h>
 
-#ifdef CONFIG_INET
+#ifdef CONFIG_NET
 #include <linux/net.h>
 #include <linux/netdevice.h>
+#ifdef CONFIG_INET
 #include <linux/ip.h>
+#include <linux/tcp.h>
 #include "../net/inet/protocol.h"
 #include "../net/inet/arp.h"
+#if defined(CONFIG_PPP) || defined(CONFIG_SLIP)
+#include "../drivers/net/slhc.h"
+#endif
+#endif
 #endif
 #ifdef CONFIG_PCI
 #include <linux/pci.h>
@@ -62,6 +68,7 @@ extern char * ftape_big_buffer;
 #ifdef CONFIG_SCSI
 #include "../drivers/scsi/scsi.h"
 #include "../drivers/scsi/hosts.h"
+#include "../drivers/scsi/constants.h"
 #endif
 
 extern int sys_tz;
@@ -100,6 +107,7 @@ struct symbol_table symbol_table = {
 	X(pcibios_read_config_byte),
 	X(pcibios_read_config_word),
 	X(pcibios_read_config_dword),
+    	X(pcibios_strerror),
 	X(pcibios_write_config_byte),
 	X(pcibios_write_config_word),
 	X(pcibios_write_config_dword),
@@ -206,6 +214,7 @@ struct symbol_table symbol_table = {
 	X(del_timer),
 	X(tq_timer),
 	X(tq_immediate),
+	X(tq_scheduler),
 	X(tq_last),
 	X(timer_active),
 	X(timer_table),
@@ -270,6 +279,15 @@ struct symbol_table symbol_table = {
 #ifdef CONFIG_INET	
 	X(inet_add_protocol),
 	X(inet_del_protocol),
+#if defined(CONFIG_PPP) || defined(CONFIG_SLIP)
+    	/* VJ header compression */
+	X(slhc_init),
+	X(slhc_free),
+	X(slhc_remember),
+	X(slhc_compress),
+	X(slhc_uncompress),
+	X(slhc_toss),
+#endif
 #endif
 	/* Device callback registration */
 	X(register_netdevice_notifier),
@@ -304,10 +322,14 @@ struct symbol_table symbol_table = {
 	X(n_tty_ioctl),
 	X(tty_register_ldisc),
 	X(kill_fasync),
-	X(tty_hung_up_p),
 #endif
 #ifdef CONFIG_SCSI
 	/* Supports loadable scsi drivers */
+    	/* 
+ 	 * in_scan_scsis is a hack, and should go away once the new 
+	 * memory allocation code is in the NCR driver 
+	 */
+    	X(in_scan_scsis),
 	X(scsi_register_module),
 	X(scsi_unregister_module),
 	X(scsi_free),
@@ -315,6 +337,11 @@ struct symbol_table symbol_table = {
 	X(scsi_register),
 	X(scsi_unregister),
 	X(scsicam_bios_param),
+        X(scsi_init_malloc),
+        X(scsi_init_free),
+	X(print_command),
+    	X(print_msg),
+	X(print_status),
 #endif
 	/* Added to make file system as module */
 	X(set_writetime),

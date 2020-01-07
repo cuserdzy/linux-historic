@@ -4,7 +4,7 @@
  *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
-#define DEBUG_PROC_TREE
+#undef DEBUG_PROC_TREE
 
 #include <linux/wait.h>
 #include <linux/errno.h>
@@ -47,7 +47,7 @@ int send_sig(unsigned long sig,struct task_struct * p,int priv)
 	if (!p || sig > 32)
 		return -EINVAL;
 	if (!priv && ((sig != SIGCONT) || (current->session != p->session)) &&
-	    (current->euid != p->euid) && (current->uid != p->uid) && !suser())
+	    (current->euid != p->euid) && (current->euid != p->uid) && !suser())
 		return -EPERM;
 	if (!sig)
 		return 0;
@@ -91,6 +91,7 @@ void release(struct task_struct * p)
 	}
 	for (i=1 ; i<NR_TASKS ; i++)
 		if (task[i] == p) {
+			nr_tasks--;
 			task[i] = NULL;
 			REMOVE_LINKS(p);
 			if (STACK_MAGIC != *(unsigned long *)p->kernel_stack_page)

@@ -125,7 +125,7 @@ void icmp_send(struct sk_buff *skb_in, int type, int code, unsigned long info, s
 	 */
 	 
 	atype=ip_chk_addr(iph->daddr);
-	if(atype==IS_BROADCAST || IN_MULTICAST(iph->daddr))
+	if(atype==IS_BROADCAST || atype==IS_MULTICAST)
 		return;
 
 	/*
@@ -210,7 +210,7 @@ void icmp_send(struct sk_buff *skb_in, int type, int code, unsigned long info, s
 	 */
 	 
 	len = dev->hard_header_len + sizeof(struct iphdr) + sizeof(struct icmphdr) +
-		sizeof(struct iphdr) + 8;	/* amount of header to return */
+		sizeof(struct iphdr) + 32;	/* amount of header to return */
 	   
 	skb = (struct sk_buff *) alloc_skb(len, GFP_ATOMIC);
 	if (skb == NULL) 

@@ -1,4 +1,3 @@
-#define THREE_LEVEL
 /*
  *  linux/mm/swap.c
  *
@@ -468,6 +467,11 @@ static int swap_out_vma(struct vm_area_struct * vma, pgd_t *pgdir,
 {
 	unsigned long end;
 
+	/* Don't swap out areas like shared memory which have their
+	    own separate swapping mechanism. */
+	if (vma->vm_flags & VM_SHM)
+		return 0;
+
 	end = vma->vm_end;
 	while (start < end) {
 		int result = swap_out_pgd(vma, pgdir, start, end);
@@ -518,7 +522,7 @@ static int swap_out(unsigned int priority)
 	int loop, counter;
 	struct task_struct *p;
 
-	counter = 2*NR_TASKS >> priority;
+	counter = 6*nr_tasks >> priority;
 	for(; counter >= 0; counter--) {
 		/*
 		 * Check that swap_task is suitable for swapping.  If not, look for
@@ -600,7 +604,7 @@ static int try_to_free_page(int priority)
 			if (swap_out(i))
 				return 1;
 			state = 0;
-		} while(--i);
+		} while(i--);
 	}
 	return 0;
 }

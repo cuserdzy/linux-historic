@@ -204,6 +204,8 @@ static int tty_set_ldisc(struct tty_struct *tty, int ldisc)
 		return 0;	/* We are already in the desired discipline */
 	o_ldisc = tty->ldisc;
 
+	tty_wait_until_sent(tty, 0);
+	
 	/* Shutdown the current discipline. */
 	if (tty->ldisc.close)
 		(tty->ldisc.close)(tty);
@@ -865,8 +867,15 @@ repeat:
 			}
 		}
 		tty = NULL;
-	} else
+	} else {
+		if ((*tty_loc)->flags & (1 << TTY_CLOSING)) {
+			printk("Attempt to open closing tty %s.\n",
+			       tty_name(*tty_loc));
+			printk("Ack!!!!  This should never happen!!\n");
+			return -EINVAL;
+		}
 		(*tty_loc)->count++;
+	}
 	if (driver->type == TTY_DRIVER_TYPE_PTY) {
 		if (!*o_tp_loc) {
 			*o_tp_loc = o_tp;
@@ -1014,6 +1023,9 @@ static void release_dev(struct file * filp)
 	if (tty->count)
 		return;
 
+	/*
+	 * We're committed; at this point, we must not block!
+	 */
 	if (o_tty) {
 		if (o_tty->count)
 			return;
@@ -1025,6 +1037,7 @@ static void release_dev(struct file * filp)
 #ifdef TTY_DEBUG_HANGUP
 	printk("freeing tty structure...");
 #endif
+	tty->flags |= (1 << TTY_CLOSING);
 
 	/*
 	 * Make sure there aren't any processes that still think this
@@ -1051,7 +1064,6 @@ static void release_dev(struct file * filp)
 		if (o_tty->ldisc.close)
 			(o_tty->ldisc.close)(o_tty);
 		o_tty->ldisc = ldiscs[N_TTY];
-		o_tty->termios->c_line = N_TTY;
 	}
 	
 	tty->driver.table[idx] = NULL;
@@ -1659,7 +1671,7 @@ int tty_unregister_driver(struct tty_driver *driver)
 	int	retval;
 	struct tty_driver *p;
 	int	found = 0;
-	int	major_inuse = 0;
+	char *othername = NULL;
 	
 	if (*driver->refcount)
 		return -EBUSY;
@@ -1668,14 +1680,15 @@ int tty_unregister_driver(struct tty_driver *driver)
 		if (p == driver)
 			found++;
 		else if (p->major == driver->major)
-			major_inuse++;
+			othername = p->name;
 	}
 
-	if (!major_inuse) {
+	if (othername == NULL) {
 		retval = unregister_chrdev(driver->major, driver->name);
 		if (retval)
 			return retval;
-	}
+	} else
+		register_chrdev(driver->major, othername, &tty_fops);
 
 	if (driver->prev)
 		driver->prev->next = driver->next;

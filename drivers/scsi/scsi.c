@@ -369,7 +369,7 @@ void scan_scsis (struct Scsi_Host * shpnt)
 	     do it right and use a mutex */
 
 	  if (current == task[0])
-	      while (SCpnt->request.dev != 0xfffe);
+	      while (SCpnt->request.dev != 0xfffe) barrier();
 	  else if (SCpnt->request.dev != 0xfffe) {
 	      struct semaphore sem = MUTEX_LOCKED;
 
@@ -387,7 +387,8 @@ void scan_scsis (struct Scsi_Host * shpnt)
 
 
 	  if(SCpnt->result) {
-	    if ((driver_byte(SCpnt->result)  & DRIVER_SENSE) &&
+	    if (((driver_byte(SCpnt->result) & DRIVER_SENSE) ||
+		 (status_byte(SCpnt->result) & CHECK_CONDITION)) &&
 		((SCpnt->sense_buffer[0] & 0x70) >> 4) == 7) {
 	      if (SCpnt->sense_buffer[2] &0xe0)
 		continue; /* No devices here... */
@@ -420,7 +421,7 @@ void scan_scsis (struct Scsi_Host * shpnt)
 		       256,  scan_scsis_done, SCSI_TIMEOUT, 3);
 
 	  if (current == task[0])
-	      while (SCpnt->request.dev != 0xfffe);
+	      while (SCpnt->request.dev != 0xfffe) barrier();
 	  else if (SCpnt->request.dev != 0xfffe) {
 	      struct semaphore sem = MUTEX_LOCKED;
 
@@ -454,11 +455,17 @@ void scan_scsis (struct Scsi_Host * shpnt)
 			scsi_result[1] |= 0x80;  /* removable */
 		}
 
-	      SDpnt->manufacturer = SCSI_MAN_UNKNOWN;
-	      if (!strncmp(scsi_result+8,"NEC",3))
-		SDpnt->manufacturer = SCSI_MAN_NEC;
-	      if (!strncmp(scsi_result+8,"TOSHIBA",7))
-		SDpnt->manufacturer = SCSI_MAN_TOSHIBA;
+	      if (!strncmp(scsi_result+8,"NEC",3)) {
+		  if (!strncmp(scsi_result+16,"CD-ROM DRIVE:84 ",16) ||
+		      !strncmp(scsi_result+16,"CD-ROM DRIVE:25",15) ||
+		      !strncmp(scsi_result+16,"CD-ROM DRIVE:83",15))
+		      SDpnt->manufacturer = SCSI_MAN_NEC_OLDCDR;
+		  else
+		      SDpnt->manufacturer = SCSI_MAN_NEC;
+	      } else if (!strncmp(scsi_result+8,"TOSHIBA",7))
+		  SDpnt->manufacturer = SCSI_MAN_TOSHIBA;
+	      else
+		  SDpnt->manufacturer = SCSI_MAN_UNKNOWN;
 
 	      SDpnt->removable = (0x80 &
 				  scsi_result[1]) >> 7;
@@ -578,7 +585,7 @@ void scan_scsis (struct Scsi_Host * shpnt)
 				 SCSI_TIMEOUT, 3);
 
 		    if (current == task[0])
-			while (SCpnt->request.dev != 0xfffe);
+			while (SCpnt->request.dev != 0xfffe) barrier();
 		    else if (SCpnt->request.dev != 0xfffe) {
 			struct semaphore sem = MUTEX_LOCKED;
 
@@ -1545,7 +1552,8 @@ int scsi_abort (Scsi_Cmnd * SCpnt, int why, int pid)
 		if (SCpnt->internal_timeout & IN_ABORT)
 			{
 			restore_flags(flags);
-			while (SCpnt->internal_timeout & IN_ABORT);
+			while (SCpnt->internal_timeout & IN_ABORT)
+				barrier();
 			}
 		else
 			{
@@ -1638,7 +1646,8 @@ int scsi_reset (Scsi_Cmnd * SCpnt)
 		if (SCpnt->internal_timeout & IN_RESET)
 			{
 			restore_flags(flags);
-			while (SCpnt->internal_timeout & IN_RESET);
+			while (SCpnt->internal_timeout & IN_RESET)
+				barrier();
 			}
 		else
 			{

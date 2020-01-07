@@ -69,26 +69,34 @@ asmlinkage struct pt_regs * save_v86_state(struct vm86_regs * regs)
 
 static void mark_screen_rdonly(struct task_struct * tsk)
 {
-	pgd_t *pg_dir;
+	pgd_t *pgd;
+	pmd_t *pmd;
+	pte_t *pte;
+	int i;
 
-	pg_dir = PAGE_DIR_OFFSET(tsk, 0);
-	if (!pgd_none(*pg_dir)) {
-		pte_t *pg_table;
-		int i;
-
-		if (pgd_bad(*pg_dir)) {
-			printk("vm86: bad page table directory entry %08lx\n", pgd_val(*pg_dir));
-			pgd_clear(pg_dir);
-			return;
-		}
-		pg_table = (pte_t *) pgd_page(*pg_dir);
-		pg_table += 0xA0000 >> PAGE_SHIFT;
-		for (i = 0 ; i < 32 ; i++) {
-			if (pte_present(*pg_table))
-				*pg_table = pte_wrprotect(*pg_table);
-			pg_table++;
-		}
+	pgd = pgd_offset(tsk, 0xA0000);
+	if (pgd_none(*pgd))
+		return;
+	if (pgd_bad(*pgd)) {
+		printk("vm86: bad pgd entry [%p]:%08lx\n", pgd, pgd_val(*pgd));
+		pgd_clear(pgd);
+		return;
 	}
+	pmd = pmd_offset(pgd, 0xA0000);
+	if (pmd_none(*pmd))
+		return;
+	if (pmd_bad(*pmd)) {
+		printk("vm86: bad pmd entry [%p]:%08lx\n", pmd, pmd_val(*pmd));
+		pmd_clear(pmd);
+		return;
+	}
+	pte = pte_offset(pmd, 0xA0000);
+	for (i = 0; i < 32; i++) {
+		if (pte_present(*pte))
+			*pte = pte_wrprotect(*pte);
+		pte++;
+	}
+	invalidate();
 }
 
 asmlinkage int sys_vm86(struct vm86_struct * v86)
@@ -209,6 +217,8 @@ static inline unsigned long get_vflags(struct vm86_regs * regs)
 
 static inline int is_revectored(int nr, struct revectored_struct * bitmap)
 {
+	if (verify_area(VERIFY_READ, bitmap, 256/8) < 0)
+		return 1;
 	__asm__ __volatile__("btl %2,%%fs:%1\n\tsbbl %0,%0"
 		:"=r" (nr)
 		:"m" (*bitmap),"r" (nr));
@@ -290,22 +300,32 @@ __res; })
 
 static void do_int(struct vm86_regs *regs, int i, unsigned char * ssp, unsigned long sp)
 {
-	unsigned short seg = get_fs_word((void *) ((i<<2)+2));
+	unsigned short *intr_ptr, seg;
 
-	if (seg == BIOSSEG || regs->cs == BIOSSEG ||
-	    is_revectored(i, &current->tss.vm86_info->int_revectored))
-		return_to_32bit(regs, VM86_INTx + (i << 8));
+	if (regs->cs == BIOSSEG)
+		goto cannot_handle;
+	if (is_revectored(i, &current->tss.vm86_info->int_revectored))
+		goto cannot_handle;
 	if (i==0x21 && is_revectored(AH(regs),&current->tss.vm86_info->int21_revectored))
-		return_to_32bit(regs, VM86_INTx + (i << 8));
+		goto cannot_handle;
+	intr_ptr = (unsigned short *) (i << 2);
+	if (verify_area(VERIFY_READ, intr_ptr, 4) < 0)
+		goto cannot_handle;
+	seg = get_fs_word(intr_ptr+1);
+	if (seg == BIOSSEG)
+		goto cannot_handle;
 	pushw(ssp, sp, get_vflags(regs));
 	pushw(ssp, sp, regs->cs);
 	pushw(ssp, sp, IP(regs));
 	regs->cs = seg;
 	SP(regs) -= 6;
-	IP(regs) = get_fs_word((void *) (i<<2));
+	IP(regs) = get_fs_word(intr_ptr+0);
 	clear_TF(regs);
 	clear_IF(regs);
 	return;
+
+cannot_handle:
+	return_to_32bit(regs, VM86_INTx + (i << 8));
 }
 
 void handle_vm86_debug(struct vm86_regs * regs, long error_code)
@@ -348,6 +368,14 @@ void handle_vm86_fault(struct vm86_regs * regs, long error_code)
 		case 0x9d:
 			SP(regs) += 4;
 			IP(regs) += 2;
+			set_vflags_long(popl(ssp, sp), regs);
+			return;
+
+		/* iretd */
+		case 0xcf:
+			SP(regs) += 12;
+			IP(regs) = (unsigned short)popl(ssp, sp);
+			regs->cs = (unsigned short)popl(ssp, sp);
 			set_vflags_long(popl(ssp, sp), regs);
 			return;
 		}

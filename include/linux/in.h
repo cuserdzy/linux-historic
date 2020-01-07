@@ -24,6 +24,7 @@ enum {
   IPPROTO_IP = 0,		/* Dummy protocol for TCP		*/
   IPPROTO_ICMP = 1,		/* Internet Control Message Protocol	*/
   IPPROTO_IGMP = 2,		/* Internet Gateway Management Protocol */
+  IPPROTO_IPIP = 4,		/* IPIP tunnels (older KA9Q tunnels use 94) */
   IPPROTO_TCP = 6,		/* Transmission Control Protocol	*/
   IPPROTO_EGP = 8,		/* Exterior Gateway Protocol		*/
   IPPROTO_PUP = 12,		/* PUP protocol				*/
@@ -80,7 +81,7 @@ struct sockaddr_in {
 #define	IN_CLASSB_HOST		(0xffffffff & ~IN_CLASSB_NET)
 #define	IN_CLASSB_MAX		65536
 
-#define	IN_CLASSC(a)		((((long int) (a)) & 0xc0000000) == 0xc0000000)
+#define	IN_CLASSC(a)		((((long int) (a)) & 0xe0000000) == 0xc0000000)
 #define	IN_CLASSC_NET		0xffffff00
 #define	IN_CLASSC_NSHIFT	8
 #define	IN_CLASSC_HOST		(0xffffffff & ~IN_CLASSC_NET)

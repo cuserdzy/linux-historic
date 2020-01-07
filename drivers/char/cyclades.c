@@ -182,6 +182,7 @@ static char rcsid[] =
 #include <linux/cyclades.h>
 #include <linux/delay.h>
 #include <linux/major.h>
+#include <linux/mm.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
@@ -1908,7 +1909,7 @@ cy_ioctl(struct tty_struct *tty, struct file * file,
 	    ret_val = tty_check_change(tty);
 	    if (ret_val)
 		return ret_val;
-            wait_until_sent(tty,0);
+            tty_wait_until_sent(tty,0);
             if (!arg)
                 send_break(info, HZ/4); /* 1/4 second */
             break;
@@ -1916,7 +1917,7 @@ cy_ioctl(struct tty_struct *tty, struct file * file,
 	    ret_val = tty_check_change(tty);
 	    if (ret_val)
 		return ret_val;
-            wait_until_sent(tty,0);
+            tty_wait_until_sent(tty,0);
             send_break(info, arg ? arg*(HZ/10) : HZ/4);
             break;
         case TIOCMBIS:
@@ -2059,7 +2060,7 @@ cy_close(struct tty_struct * tty, struct file * filp)
     if (info->flags & ASYNC_CALLOUT_ACTIVE)
 	info->callout_termios = *tty->termios;
     if (info->flags & ASYNC_INITIALIZED)
-	wait_until_sent(tty, 3000); /* 30 seconds timeout */
+	tty_wait_until_sent(tty, 3000); /* 30 seconds timeout */
     shutdown(info);
     if (tty->driver.flush_buffer)
 	tty->driver.flush_buffer(tty);
@@ -2456,7 +2457,7 @@ scrn[1] = '\0';
     memset(&cy_serial_driver, 0, sizeof(struct tty_driver));
     cy_serial_driver.magic = TTY_DRIVER_MAGIC;
     cy_serial_driver.name = "ttyC";
-    cy_serial_driver.major = 19 /* TTY_MAJOR */;
+    cy_serial_driver.major = CYCLADES_MAJOR;
     cy_serial_driver.minor_start = 32;
     cy_serial_driver.num = NR_PORTS;
     cy_serial_driver.type = TTY_DRIVER_TYPE_SERIAL;
@@ -2491,7 +2492,7 @@ scrn[1] = '\0';
      */
     cy_callout_driver = cy_serial_driver;
     cy_callout_driver.name = "cub";
-    cy_callout_driver.major = 20 /* TTYAUX_MAJOR */;
+    cy_callout_driver.major = CYCLADESAUX_MAJOR;
     cy_callout_driver.subtype = SERIAL_TYPE_CALLOUT;
 
     if (tty_register_driver(&cy_serial_driver))
@@ -2500,6 +2501,7 @@ scrn[1] = '\0';
 	    panic("Couldn't register Cyclom callout driver\n");
 
     bh_base[CYCLADES_BH].routine = do_cyclades_bh;
+    enable_bh(CYCLADES_BH);
 
     for (index = 0; index < 16; index++) {
 	    IRQ_cards[index] = 0;

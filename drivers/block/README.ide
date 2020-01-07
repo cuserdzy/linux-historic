@@ -1,4 +1,4 @@
-README.ide -- Information regarding ide.c and ide-cd.c
+README.ide -- Information regarding ide.c and ide-cd.c (IDE driver in 1.1.95)
 ================================================================================
 Supported by:  mlord@bnr.ca           -- disks, interfaces, probing
                snyder@fnald0.fnal.gov -- cdroms, ATAPI, audio
@@ -12,13 +12,13 @@ Major features of ide.c & ide-cd.c:
 	- support for reading IDE ATAPI cdrom drives (NEC, MITSUMI, VERSA, SONY)
 	- support for audio functions on FX400,NEC-260 cdrom drives (others?)
 	- auto-detection of interfaces, drives, IRQs, and disk geometries
+	  -- "single" drives should be jumpered as "master", not "slave"
 	- support for BIOSs which report "more than 16 heads" on disk drives
 	- uses LBA (slightly faster) on disk drives which support it
 	- support for lots of fancy (E)IDE drive functions with hdparm utility
 	- optional (compile time) support for 32-bit VLB data transfers
 	- support for IDE multiple (block) mode (same as hd.c)
 	- support for interrupt unmasking during I/O (better than hd.c)
-	- auto detection/use of multiple (block) mode settings from BIOS
 	- improved handshaking and error detection/recovery
 	- can co-exist with hd.c to control only the secondary interface
 
@@ -26,6 +26,7 @@ Under construction:
 
 	- support for interface speed selection on jumperless interfaces
 	- improved detection of non-standard IDE ATAPI cdrom drives
+	- support for non-standard 3rd/4th drive interface on Promise cards
 
 To access devices on the second interface, device entries must first be
 created in /dev for them.  To create such entries, simply run the included
@@ -66,6 +67,11 @@ or
 	hdc=768,16,32
 	hdc=noprobe
 
+Note that when only one IDE device is attached to an interface,
+it must be jumpered as "single" or "master", *not* "slave".
+Many folks have had "trouble" with cdroms because of this requirement
+of the ATA (IDE) standard.
+
 Courtesy of Scott Snyder, the driver now supports ATAPI cdrom drives
 such as the NEC-260 and the new MITSUMI triple/quad speed drives.
 Such drives will be identified at boot time, as hda,hdb,hdc or hdd,
@@ -96,10 +102,55 @@ mlord@bnr.ca
 snyder@fnald0.fnal.gov
 ================================================================================
 
-How To Use *Big* IDE drives with Linux/DOS
+Some Terminology
+----------------
+IDE = Integrated Drive Electronics, meaning that each drive has a built-in
+controller, which is why an "IDE interface card" is not a "controller card".
+
+IDE drives are designed to attach almost directly to the ISA bus of an AT-style
+computer.  The typical IDE interface card merely provides I/O port address
+decoding and tri-state buffers, although several newer localbus cards go much
+beyond the basics.  When purchasing a localbus IDE interface, avoid cards with
+an onboard BIOS and those which require special drivers.  Instead, look for a
+card which uses hardware switches/jumpers to select the interface timing speed,
+to allow much faster data transfers than the original 8Mhz ISA bus allows.
+
+ATA = AT (the old IBM 286 computer) Attachment Interface, a draft American
+National Standard for connecting hard drives to PCs.  This is the official
+name for "IDE".
+
+The latest standards define some enhancements, known as the ATA-2 spec,
+which grew out of vendor-specific "Enhanced IDE" (EIDE) implementations.
+
+ATAPI = ATA Packet Interface, a new protocol for controlling the drives,
+similar to SCSI protocols, created at the same time as the ATA2 standard.
+ATAPI is currently used for controlling CDROM and TAPE devices, and will
+likely also soon be used for Floppy drives, removable R/W cartridges,
+and for high capacity hard disk drives.
+
+How To Use *Big* ATA/IDE drives with Linux
 ------------------------------------------
-All IDE drives larger than 504MB ("528Meg") use a "physical" geometry which
-has more than 1024 cylinders.  This presents two problems to most systems:
+The ATA Interface spec for IDE disk drives allows a total of 28 bits
+(8 bits for sector, 16 bits for cylinder, and 4 bits for head) for addressing
+individual disk sectors of 512 bytes each (in "Linear Block Address" (LBA)
+mode, there is still only a total of 28 bits available in the hardware).
+This "limits" the capacity of an IDE drive to no more than 128GB (Giga-bytes).
+All current day IDE drives are somewhat smaller than this upper limit, and
+within a few years, ATAPI disk drives will raise the limit considerably.
+
+All IDE disk drives "suffer" from a "16-heads" limitation:  the hardware has
+only a four bit field for head selection, restricting the number of "physical"
+heads to 16 or less.  Since the BIOS usually has a 63 sectors/track limit,
+this means that all IDE drivers larger than 504MB (528Meg) must use a "physical"
+geometry with more than 1024 cylinders.
+
+   (1024cyls * 16heads * 63sects * 512bytes/sector) / (1024 * 1024) == 504MB
+
+(Some BIOSs (and controllers with onboard BIOS) pretend to allow "32" or "64"
+ heads per drive (discussed below), but can only do so by playing games with
+ the real (hidden) geometry, which is always limited to 16 or fewer heads).
+
+This presents two problems to most systems:
 
 	1. The INT13 interface to the BIOS only allows 10-bits for cylinder
 	addresses, giving a limit of 1024cyls for programs which use it.
@@ -181,6 +232,11 @@ by doing the following after installing slackware (or whatever):
         4. Move /boot to /dos/boot with:  cp -a /boot /dos ; rm -r /boot
         5. Create a symlink for LILO to use with:  ln -s /dos/boot /boot
         6. Re-run LILO with:  lilo
+
+	A danger with this approach is that whenever an MS-DOS "defragmentation"
+	program is run (like Norton "speeddisk"), it may move the Linux boot
+	files around, confusing LILO and making the (Linux) system unbootable.
+	Be sure to keep a kernel "boot floppy" at hand for such circumstances.
 
 If you "don't do DOS", then partition as you please, but remember to create
 a small partition to hold the /boot directory (and vmlinuz) as described above

@@ -40,6 +40,7 @@
    is, give me time.
 */
 
+#include <asm/cprefix.h>
 #include <asm/head.h>
 #include <asm/version.h>
 #include <asm/asi.h>
@@ -51,11 +52,11 @@
 
 /* First thing to go in the data segment is the interrupt stack. */
 
-        .globl  _intstack
-        .globl  _eintstack
-_intstack:
+        .globl  C_LABEL(intstack)
+        .globl  C_LABEL(eintstack)
+C_LABEL(intstack):
         .skip   4 * PAGE_SIZE                ! 16k = 128 128-byte stack frames
-_eintstack:
+C_LABEL(eintstack):
 
 
 
@@ -64,12 +65,12 @@ _eintstack:
    the cpu-type 
 */
 
-        .globl  _cputyp
+        .globl  C_LABEL(cputyp)
 
-_cputyp:
+C_LABEL(cputyp):
         .word   1
 
-_cputypval:
+C_LABEL(cputypval):
 	.asciz "sun4c"
 	.ascii "     "
 
@@ -82,17 +83,17 @@ _cputypval:
 /* Uh, actually Linus it is I who cannot spell. Too much murky
  * Sparc assembly will do this to ya.
  */
-_cputypvar:
+C_LABEL(cputypvar):
 	.asciz "compatability"
 
-_cputypvallen = _cputypvar - _cputypval
+C_LABEL(cputypvallen) = C_LABEL(cputypvar) - C_LABEL(cputypval)
 
 /* This hold the prom-interface-version number for either v0 or v2. */
 
 	.align 4
-	.globl 	_prom_iface_vers
+	.globl 	C_LABEL(prom_iface_vers)
 
-_prom_iface_vers:	.skip 4
+C_LABEL(prom_iface_vers):	.skip 4
 
 /* WARNING: evil messages follow */
 
@@ -154,18 +155,18 @@ current_node:	.skip 4
 boot_msg:	
 	.ascii "Booting Sparc-Linux V0.00PRE-ALPHA "
 	.ascii WHO_COMPILED_ME 
-	.asciz " \n"
+	.ascii "\r\n"
 	.align 4
 
 	.globl boot_msg2
 
 boot_msg2:
-	.asciz "Booting Sparclinux V0.00 PRE-ALPHA on a (SUN4C)\n\n"
+	.asciz "Booting Sparclinux V0.00 PRE-ALPHA on a (SUN4C)\r\n\n"
 
 	.align 4
 
 pstring1:
-	.asciz "Prom Magic Cookie: 0x%x  "
+	.asciz "Prom Magic Cookie: 0x%x  \n"
 	.align 4
 
 pstring2:
@@ -182,18 +183,14 @@ pstring4:
 	.align 4
 
 
-newline:
-	.asciz "\n"
-	.align 4
-
 	.text
 
-        .globl  _msgbuf
+        .globl  C_LABEL(msgbuf)
 msgbufsize = PAGE_SIZE                       ! 1 page for msg buffer
-_msgbuf =  PAGE_SIZE
+C_LABEL(msgbuf) =  PAGE_SIZE
 
 
-IE_reg_addr = _msgbuf + msgbufsize      ! this page not used; points to IEreg
+IE_reg_addr = C_LABEL(msgbuf) + msgbufsize   ! this page not used; points to IEreg
 
 	
 /* Ok, things start to get interesting. We get linked such that 'start'
@@ -227,16 +224,18 @@ IE_reg_addr = _msgbuf + msgbufsize      ! this page not used; points to IEreg
 */
 
 	.globl	start
-	.globl  _trapbase
+	.globl 	_start  /* warning, solaris hack */
+	.globl  C_LABEL(trapbase)
+_start:   /* danger danger */
 start:
-_trapbase:
-	b gokernel; WRITE_PAUSE		! we never get trap #0 it is special
+C_LABEL(trapbase):
+	b gokernel; nop; nop; nop;	! we never get trap #0 it is special 
 
 	TRAP_ENTRY(0x1, my_trap_handler) /* Instruction Access Exception */
 	TRAP_ENTRY(0x2, my_trap_handler) /* Illegal Instruction */
 	TRAP_ENTRY(0x3, my_trap_handler) /* Privileged Instruction */
 	TRAP_ENTRY(0x4, my_trap_handler) /* Floating Point Disabled */
-	TRAP_ENTRY(0x5, spill_window_entry) /* Window Overflow */
+	TRAP_ENTRY(0x5, spill_window_entry)   /* Window Overflow */
 	TRAP_ENTRY(0x6, fill_window_entry)  /* Window Underflow */
 	TRAP_ENTRY(0x7, my_trap_handler) /* Memory Address Not Aligned */
 	TRAP_ENTRY(0x8, my_trap_handler) /* Floating Point Exception */
@@ -251,20 +250,20 @@ _trapbase:
 
 /* Level'd interrupt entry points, see macro defs above */
 
-        TRAP_ENTRY_INTERRUPT_SOFT(1, 0x101) /* Interrupt Level 1  */
-        TRAP_ENTRY_INTERRUPT(2)             /* Interrupt Level 2  */
-        TRAP_ENTRY_INTERRUPT(3)             /* Interrupt Level 3  */
-        TRAP_ENTRY_INTERRUPT_SOFT(4, 0x104) /* Interrupt Level 4  */
-        TRAP_ENTRY_INTERRUPT(5)             /* Interrupt Level 5  */
-        TRAP_ENTRY_INTERRUPT_SOFT(6, 0x106) /* Interrupt Level 6  */
-        TRAP_ENTRY_INTERRUPT(7)             /* Interrupt Level 7  */
-        TRAP_ENTRY_INTERRUPT(8)             /* Interrupt Level 8  */
-        TRAP_ENTRY_INTERRUPT(9)             /* Interrupt Level 9  */
-        TRAP_ENTRY_INTERRUPT(10)            /* Interrupt Level 10 */
-        TRAP_ENTRY_INTERRUPT(11)            /* Interrupt Level 11 */
-        TRAP_ENTRY_INTERRUPT(12)            /* Interrupt Level 12 */
-        TRAP_ENTRY_INTERRUPT(13)            /* Interrupt Level 13 */
-        TRAP_ENTRY_INTERRUPT(14)            /* Interrupt Level 14 */
+        TRAP_ENTRY_INTERRUPT_SOFT(1, 0x101) /* IRQ Software/SBUS Level 1  */
+        TRAP_ENTRY_INTERRUPT(2)             /* IRQ SBUS Level 2           */
+        TRAP_ENTRY_INTERRUPT(3)             /* IRQ SCSI/DMA/SBUS Level 3  */
+        TRAP_ENTRY_INTERRUPT_SOFT(4, 0x104) /* IRQ Software Level 4       */
+        TRAP_ENTRY_INTERRUPT(5)             /* IRQ SBUS/Ethernet Level 5  */
+        TRAP_ENTRY_INTERRUPT_SOFT(6, 0x106) /* IRQ Software Level 6       */
+        TRAP_ENTRY_INTERRUPT(7)             /* IRQ Video/SBUS Level 5     */
+        TRAP_ENTRY_INTERRUPT(8)             /* IRQ SBUS Level 6           */
+        TRAP_ENTRY_INTERRUPT(9)             /* IRQ SBUS Level 7           */
+        TRAP_ENTRY_INTERRUPT(10)            /* IRQ Timer #1               */
+        TRAP_ENTRY_INTERRUPT(11)            /* IRQ Floppy Intr.           */
+        TRAP_ENTRY_INTERRUPT(12)            /* IRQ Zilog serial chip      */
+        TRAP_ENTRY_INTERRUPT(13)            /* IRQ Audio Intr.            */
+        TRAP_ENTRY_TIMER                    /* IRQ Timer #2 (one we use)  */
         TRAP_ENTRY_INTERRUPT_NMI(15, linux_trap_nmi) /* Level 15 (nmi) */
 
 	TRAP_ENTRY(0x20, my_trap_handler)   /* General Register Access Error */
@@ -371,7 +370,7 @@ _trapbase:
 	TRAP_ENTRY(0x85, my_trap_handler)   /* Software Trap                 */
 	TRAP_ENTRY(0x86, my_trap_handler)   /* Fix Unaligned Access Trap XXX */
 	TRAP_ENTRY(0x87, my_trap_handler)   /* Integer Overflow Trap XXX     */
-	TRAP_ENTRY(0x88, my_trap_handler)   /* Software Trap                 */
+	TRAP_ENTRY(0x88, my_trap_handler)   /* Slowaris System Call          */
 	TRAP_ENTRY(0x89, my_trap_handler)   /* NetBSD System Call            */
 	TRAP_ENTRY(0x8a, my_trap_handler)   /* Software Trap                 */
 	TRAP_ENTRY(0x8b, my_trap_handler)   /* Software Trap                 */
@@ -492,7 +491,9 @@ _trapbase:
 	TRAP_ENTRY(0xfe, my_trap_handler)   /* Software Trap                 */
 	TRAP_ENTRY(0xff, my_trap_handler)   /* Software Trap                 */	
 
-_msgbufmapped:
+	.skip 4096
+
+C_LABEL(msgbufmapped):
         .word   1
 
 
@@ -503,8 +504,8 @@ _msgbufmapped:
 */
 
 gokernel:	or	%g0, %o0, %g7
-		sethi	%hi(_prom_vector_p), %g1
-		st	%o0, [%g1 + %lo(_prom_vector_p)]   ! we will need it later
+		sethi	%hi( C_LABEL(prom_vector_p) ), %g1
+		st	%o0, [%g1 + %lo( C_LABEL(prom_vector_p) )]   ! we will need it later
 		rd	%psr, %l2
 		rd	%wim, %l3
 		rd	%tbr, %l4
@@ -522,23 +523,32 @@ gokernel:	or	%g0, %o0, %g7
  * I figure out and store nwindows later on.
  */
 
-nosmp:		sethi	%hi(_boot_psr), %l1
-		st	%l2, [%l1 + %lo(_boot_psr)]
-		sethi	%hi(_boot_wim), %l1
-		st	%l3, [%l1 + %lo(_boot_wim)]
-		sethi	%hi(_boot_tbr), %l1
-		st	%l4, [%l1 + %lo(_boot_tbr)]
-		sethi	%hi(_boot_smp_ptr), %l1
-		st	%l5, [%l1 + %lo(_boot_smp_ptr)]
+nosmp:		sethi	%hi( C_LABEL(boot_psr) ), %l1
+		st	%l2, [%l1 + %lo( C_LABEL(boot_psr) )]
+		sethi	%hi( C_LABEL(boot_wim) ), %l1
+		st	%l3, [%l1 + %lo( C_LABEL(boot_wim) )]
+		sethi	%hi( C_LABEL(boot_tbr) ), %l1
+		st	%l4, [%l1 + %lo( C_LABEL(boot_tbr) )]
+		sethi	%hi( C_LABEL(boot_smp_ptr) ), %l1
+		st	%l5, [%l1 + %lo( C_LABEL(boot_smp_ptr) )]
 
 		or	%g0, %o0, %g7
-		sethi	%hi(_prom_vector_p), %g5
-		st	%o0, [%g5 + %lo(_prom_vector_p)]   ! we will need it later
+		sethi	%hi( C_LABEL(prom_vector_p) ), %g5
+		st	%o0, [%g5 + %lo( C_LABEL(prom_vector_p) )]   ! we will need it later
 
 		ld	[%g7 + 0x4], %o3
 		subcc	%o3, 0x2, %g0			! a v2 prom?
 		be	found_v2
 		nop
+
+		/* paul@sfe.com.au */
+		subcc	%o3, 0x3, %g0			! a v3 prom?
+		or	%g0, 0x3, %o5
+		sethi	%hi(C_LABEL(prom_iface_vers) ), %g1
+		st	%o5, [%g1 + %lo( C_LABEL(prom_iface_vers) )]
+		be	not_v2
+		nop
+
 
 /* Old sun4's pass our load address into %o0 instead of the prom
    pointer. On sun4's you have to hard code the romvec pointer into
@@ -551,15 +561,15 @@ nosmp:		sethi	%hi(_boot_psr), %l1
 		be	no_sun4_here
 		nop
 
-		sethi	%hi(_prom_iface_vers), %g1
-		st	%g0, [%g1 + %lo(_prom_iface_vers)]
+		sethi	%hi( C_LABEL(prom_iface_vers) ), %g1
+		st	%g0, [%g1 + %lo( C_LABEL(prom_iface_vers) )]
 		b	not_v2
 		nop
 
 found_v2:
 		or	%g0, 0x2, %o5
-		sethi	%hi(_prom_iface_vers), %g1
-		st	%o5, [%g1 + %lo(_prom_iface_vers)]
+		sethi	%hi( C_LABEL(prom_iface_vers) ), %g1
+		st	%o5, [%g1 + %lo( C_LABEL(prom_iface_vers) )]
 
 not_v2:
 
@@ -584,10 +594,10 @@ not_v2:
 		call 	%l0
 		or	%g0, %g0, %o0		! next_node(0) = first_node
 
-		sethi	%hi(_cputypvar), %o1	! first node has cpu-arch
-		or	%o1, %lo(_cputypvar), %o1
-		sethi	%hi(_cputypval), %o2	! information, the string
-		or	%o2, %lo(_cputypval), %o2
+		sethi	%hi( C_LABEL(cputypvar) ), %o1	! first node has cpu-arch
+		or	%o1, %lo( C_LABEL(cputypvar) ), %o1
+		sethi	%hi( C_LABEL(cputypval) ), %o2	! information, the string
+		or	%o2, %lo( C_LABEL(cputypval) ), %o2
 		ld	[%l1], %l0		! 'compatibility' tells
 		ld	[%l0 + 0xc], %l0	! that we want 'sun4x' where
 		call	%l0			! x is one of '', 'c', 'm',
@@ -595,8 +605,8 @@ not_v2:
 						! to a buf where above string
 						! will get stored by the prom.
 
-		sethi	%hi(_cputypval), %o2	! better safe than sorry
-		or	%o2, %lo(_cputypval), %o2
+		sethi	%hi( C_LABEL(cputypval) ), %o2	! better safe than sorry
+		or	%o2, %lo( C_LABEL(cputypval) ), %o2
 		ldub	[%o2 + 0x4], %o0
 		subcc	%o0, 'c', %g0		! we already know we are not
 		be	is_sun4c		! on a plain sun4 because of
@@ -653,20 +663,21 @@ is_sun4c:					! OK, this is a sun4c, yippie
  * as the prom expects.
  */
 
+/* paul@sfe.com.au */
+/* V3 doesnt have printf.. And I dont really feel like doing the formatting
+ * myself.. So we miss out on some messages (for now).
+ */
+		ld	[%g7 + 0x4], %o0
+		subcc	%o3, 0x3, %g0
+		be	v3_bootmsg
+		nop
+
 		sethi	%hi(boot_msg), %o0	
 		or	%o0, %lo(boot_msg), %o0
 		sethi	%hi(prom_printf), %o1
 		ld	[%o1 + %lo(prom_printf)], %o1
 		ld	[%o1], %o1
 		call	%o1  			! print boot message #1
-		nop
-
-_newline:	sethi	%hi(newline), %o0
-		or	%o0, %lo(newline), %o0
-		sethi	%hi(prom_printf), %o1
-		ld	[%o1 + %lo(prom_printf)], %o1
-		ld	[%o1], %o1
-		call	%o1
 		nop
 
 		sethi	%hi(pstring1), %o0
@@ -678,19 +689,43 @@ _newline:	sethi	%hi(newline), %o0
 		ld	[%o1 + %lo(prom_magic)], %o1
 		ld	[%o1], %o1
 		call	%o2
+		nop
 
 		sethi	%hi(pstring2), %o0
 		or	%o0, %lo(pstring2), %o0
 		sethi	%hi(prom_printf), %o2
 		ld	[%o2 + %lo(prom_printf)], %o2
 		ld	[%o2], %o2
-		sethi	%hi(_prom_iface_vers), %o1
-		ld	[%o1 + %lo(_prom_iface_vers)], %o1
+		sethi	%hi( C_LABEL(prom_iface_vers) ), %o1
+		ld	[%o1 + %lo( C_LABEL(prom_iface_vers) )], %o1
 		ld	[%o1], %o1
 		call 	%o2
-
-		b	halt_me
 		nop
+
+		b	rest_of_boot
+		nop
+
+v3_bootmsg:
+		ld	[%g7 + 0x94], %o0
+		ld	[%o0], %o0
+		sethi	%hi(boot_msg), %o1
+		or	%o1, %lo(boot_msg), %o1
+		mov	BOOT_MSG_LEN, %o2
+		ld	[%g7 + 0xb8], %o4
+		call	%o4
+		nop
+ 
+		ld	[%g7 + 0x94], %o0
+		ld	[%o0], %o0
+		sethi	%hi(boot_msg2), %o1
+		or	%o1, %lo(boot_msg2), %o1
+		mov	BOOT_MSG2_LEN, %o2
+		ld	[%g7 + 0xb8], %o4
+		call	%o4
+		nop
+		b	rest_of_boot
+		nop
+
 
 no_sun4_here:
 		ld	[%g7 + 0x68], %o1
@@ -719,18 +754,23 @@ rest_of_boot:
  * to all its routines which allows some sanity during bootup.
  */
 
-#if 0 /* paranoid, need to fix this routine now */
 		sethi	%hi(IE_reg_addr), %l0
 		or	%l0, %lo(IE_reg_addr), %l0
+
+		set	0xf4000000, %l3
 		sethi	%hi(INT_ENABLE_REG_PHYSADR), %l2
 		or	%l2, %lo(INT_ENABLE_REG_PHYSADR), %l2
-		srl	%l2, %g5, %l1
+		srl	%l2, %g5, %l2
+		or	%l2, %l3, %l1		
 
+#ifndef CONFIG_SRMMU
 		sta	%l1, [%l0] ASI_PTE
-		mov	INTS_ALL_ENAB, %l1
-		stb	%l1, [%l0]
-#endif /* paranoid, see above */
+#endif
 	
+		or	%g0, 0x1, %l1
+		stb	%l1, [%l0]
+	
+
 /* Aieee, now set PC and nPC, enable traps, give ourselves a stack and it's
  * show-time!
  */
@@ -741,20 +781,20 @@ rest_of_boot:
 		nop
 
 		.align 4
-1:		sethi	%hi(_cputyp), %o0
-		st	%g4, [%o0 + %lo(_cputyp)]
+1:		sethi	%hi( C_LABEL(cputyp) ), %o0
+		st	%g4, [%o0 + %lo( C_LABEL(cputyp) )]
 
-		sethi	%hi(_pgshift), %o0
-		st	%g5, [%o0 + %lo(_pgshift)]
+		sethi	%hi( C_LABEL(pgshift) ), %o0
+		st	%g5, [%o0 + %lo( C_LABEL(pgshift) )]
 
 		mov	1, %o0
 		sll	%o0, %g5, %g5
-		sethi	%hi(_nbpg), %o0
-		st	%g5, [%o0 + %lo(_nbpg)]
+		sethi	%hi( C_LABEL(nbpg) ), %o0
+		st	%g5, [%o0 + %lo( C_LABEL(nbpg) )]
 
 		sub	%g5, 1, %g5
-		sethi	%hi(_pgofset), %o0
-		st	%g5, [%o0 + %lo(_pgofset)]
+		sethi	%hi( C_LABEL(pgofset) ), %o0
+		st	%g5, [%o0 + %lo( C_LABEL(pgofset) )]
 
 
 		rd	%psr, %g3
@@ -767,7 +807,6 @@ rest_of_boot:
 		wr	%g0, 0x0, %wim		! magical invalid window reg
 		WRITE_PAUSE			! see above
 
-	
 /* I keep the timer interrupt on so that BogoMIPS works and the prom
  * keeps updating it's "jiffies" counter. 100HZ clock on sparcstations.
  */	
@@ -776,48 +815,53 @@ rest_of_boot:
  * write. ;-( like this (PSR_PS | PSR_S | PSR_PIL)...
  */
 
-		wr	%g0, (0xfc0), %psr
+		sethi	%hi(PSR_PS | PSR_S | PSR_PIL | PSR_EF), %g2
+		or	%g2, %lo(PSR_PS | PSR_S | PSR_PIL | PSR_EF), %g2
+		wr	%g2, 0x0, %psr
 		WRITE_PAUSE
 
 		wr	%g0, 0x2, %wim		! window 1 invalid
 		WRITE_PAUSE
+
 		or	%g0, 0x1, %g1
-		sethi	%hi(_current + THREAD_WIM), %g2
-		st	%g1, [%g2 + %lo(_current + THREAD_WIM)]
+		sethi	%hi( C_LABEL(current) + THREAD_WIM), %g2
+		st	%g1, [%g2 + %lo( C_LABEL(current) + THREAD_WIM)]
 
 /* I want a kernel stack NOW! */
 
-		set	USRSTACK - C_STACK, %fp	
-		set	USRSTACK - C_STACK + 80, %sp
+		set	( C_LABEL(init_user_stack) + 4092 - 96 - 80), %fp	
+		set	( C_LABEL(init_user_stack) + 4092), %sp
+
+/* now out stack is set up similarly to the way it is on the i386 */
+
 		rd	%psr, %l0
 		wr	%l0, PSR_ET, %psr
 		WRITE_PAUSE
-
 
 /*
  * Maybe the prom zeroes out our BSS section, maybe it doesn't. I certainly 
  * don't know, do you?
  */
 
-		set	_edata, %o0
-		set	_end, %o1
+		set	C_LABEL(edata) , %o0
+		set	C_LABEL(end) , %o1
 		sub	%o1, %o0, %g2
-		sethi	%hi(_kernel_bss_len), %g3
-		st	%g2, [%g3 + %lo(_kernel_bss_len)]
-		sethi	%hi(_trapbase), %g3
-		or	%g3, %lo(_trapbase), %g3
-		sethi	%hi(_etext), %g4
-		or	%g4, %lo(_etext), %g4			
+		sethi	%hi( C_LABEL(kernel_bss_len) ), %g3
+		st	%g2, [%g3 + %lo( C_LABEL(kernel_bss_len) )]
+		sethi	%hi( C_LABEL(trapbase) ), %g3
+		or	%g3, %lo( C_LABEL(trapbase) ), %g3
+		sethi	%hi( C_LABEL(etext) ), %g4
+		or	%g4, %lo( C_LABEL(etext) ), %g4			
 		sub	%g4, %g3, %g2
-		sethi	%hi(_kernel_text_len), %g3
-		st	%g2, [%g3 + %lo(_kernel_text_len)]
-		sethi	%hi(_etext), %g4
-		or	%g4, %lo(_etext), %g4
-		sethi	%hi(_edata), %g3
-		or	%g3, %lo(_edata), %g3
+		sethi	%hi( C_LABEL(kernel_text_len) ), %g3
+		st	%g2, [%g3 + %lo( C_LABEL(kernel_text_len) )]
+		sethi	%hi( C_LABEL(etext) ), %g4
+		or	%g4, %lo( C_LABEL(etext) ), %g4
+		sethi	%hi( C_LABEL(edata) ), %g3
+		or	%g3, %lo( C_LABEL(edata) ), %g3
 		sub	%g3, %g4, %g2
-		sethi	%hi(_kernel_data_len), %g3
-		st	%g2, [%g3 + %lo(_kernel_data_len)]
+		sethi	%hi( C_LABEL(kernel_data_len) ), %g3
+		st	%g2, [%g3 + %lo( C_LABEL(kernel_data_len) )]
 		or	%g0, %g0, %g1
 
 1:	
@@ -845,53 +889,32 @@ rest_of_boot:
 		subcc	%g1, 0x0, %g0			! bit set
 		bne	1b
 		add	%g3, 0x1, %g3
-		sethi	%hi(_nwindows), %g4
-		st	%g3, [%g4 + %lo(_nwindows)]	! store final value
+		sethi	%hi( C_LABEL(nwindows) ), %g4
+		st	%g3, [%g4 + %lo( C_LABEL(nwindows) )]	! store final value
 		sub	%g3, 0x1, %g3
-		sethi	%hi(_nwindowsm1), %g4
-		st	%g3, [%g4 + %lo(_nwindowsm1)]
+		sethi	%hi( C_LABEL(nwindowsm1) ), %g4
+		st	%g3, [%g4 + %lo( C_LABEL(nwindowsm1) )]
 
 
 /* Here we go */
 
-/* start_kernel() wants the command line args at empty_zero_page, copy
- * the boot command line from the prom data struct here...
- */
-
-/* I still haven't gotten this right yet... hack hack hack */
-	
-#if 0
-		sethi	%hi(prom_v0bootline), %g6
-		ld	[%g6 + %lo(prom_v0bootline)], %g6
-		ld	[%g6], %g6
-		ld	[%g6], %g6
-		sethi	%hi(_empty_zero_page + 2048), %g2
-		ld	[%g2 + %lo(_empty_zero_page + 2048)], %g2
-		ld	[%g6], %g3      ! argv[0]		
-		or	%g0, 0x8, %g1   ! argv counter
-1:		ld	[%g3], %g4
-		st	%g4, [%g2]
-		add	%g3, 0x4, %g3
-		cmp	%g4, 0
-		bne,a	1b
-		add	%g2, 0x4, %g2
-
-		or	%g0, %lo(' '), %g4
-		st	%g4, [%g2]
-		sub	%g1, 0x1, %g1
-		add	%g3, 0x4, %g3
-		cmp	%g1, 0
-		bne	1b
-		add	%g2, 0x4, %g2
+#ifndef CONFIG_SUN4M
+		/* paul@sfe.com.au */
+		/* Look into traps later :( */
+		set	C_LABEL(trapbase), %g3
+		wr	%g3, 0x0, %tbr
+		WRITE_PAUSE
 #endif
 
+
 /* First we call init_prom() to set up romvec, then off to start_kernel() */
+/* XXX put this in arch_init() */
 
-		sethi	%hi(_prom_vector_p), %g5
-		call	_init_prom
-		ld	[%g5 + %lo(_prom_vector_p)], %o0   /* delay slot */
+		sethi	%hi( C_LABEL(prom_vector_p) ), %g5
+		call	C_LABEL(init_prom)
+		ld	[%g5 + %lo( C_LABEL(prom_vector_p) )], %o0   /* delay slot */
 
-		call 	_start_kernel
+		call 	C_LABEL(start_kernel)
 		nop
 	
 		call	halt_me
@@ -921,9 +944,9 @@ halt_me:
  * gets initialized in c-code so all routines can use it.
  */
 
-			.globl _prom_vector_p
+			.globl C_LABEL(prom_vector_p)
 
-_prom_vector_p:		.skip 4
+C_LABEL(prom_vector_p):	.skip 4
 prom_magic:  		.skip 4			! magic mushroom, beware...
 prom_rom_vers: 		.skip 4			! interface version (v0 or v2)
 prom_pluginvers:	.skip 4			! XXX help help help ???
@@ -958,58 +981,65 @@ prom_sync:		.skip 4			! hook in prom for sync func
  * code uses these to keep track of the register windows.
  */
 
-	.globl _nwindows
-	.globl _nwindowsm1
-_nwindows:	.skip 4
-_nwindowsm1:	.skip 4
+	.globl C_LABEL(nwindows)
+	.globl C_LABEL(nwindowsm1)
+C_LABEL(nwindows):	.skip 4
+C_LABEL(nwindowsm1):	.skip 4
 
 	.align 4
 /* Boot time privileged register values, plus magic %o2 value */
 
-	.globl _boot_wim
-	.globl _boot_psr
-	.globl _boot_tbr
-	.globl _boot_smp_ptr
-_boot_wim:		.skip 4
-_boot_psr:		.skip 4
-_boot_tbr:		.skip 4
-_boot_smp_ptr:		.skip 4
+	.globl C_LABEL(boot_wim)
+	.globl C_LABEL(boot_psr)
+	.globl C_LABEL(boot_tbr)
+	.globl C_LABEL(boot_smp_ptr)
+C_LABEL(boot_wim):		.skip 4
+C_LABEL(boot_psr):		.skip 4
+C_LABEL(boot_tbr):		.skip 4
+C_LABEL(boot_smp_ptr):		.skip 4
 
 
 	.align 4
 /* Miscellaneous pieces of information saved at kernel startup. */
-	.globl _kernel_text_len, _kernel_data_len, _kernel_bss_len
-_kernel_text_len:	.word 0
-_kernel_data_len:	.word 0
-_kernel_bss_len:	.word 0
+	.globl C_LABEL(kernel_text_len)
+	.globl C_LABEL(kernel_data_len)
+	.globl C_LABEL(kernel_bss_len)
+C_LABEL(kernel_text_len):	.word 0
+C_LABEL(kernel_data_len):	.word 0
+C_LABEL(kernel_bss_len):	.word 0
 
 /* These are for page alignment/offset information as they change from
    machine to machine.
 */
 
-        .globl  _pgshift, _nbpg, _pgofset
+        .globl  C_LABEL(pgshift)
+	.globl 	C_LABEL(nbpg)
+	.globl	C_LABEL(pgofset)
 
 	.align 4
-_pgshift:
+C_LABEL(pgshift):
         .word   1
-_nbpg:
+C_LABEL(nbpg):
         .word   1
-_pgofset:
+C_LABEL(pgofset):
         .word   1
 
 /* Just to get the kernel through the compiler for now */
-	.globl _swapper_pg_dir,_pg0
-	.globl _empty_bad_page
-	.globl _empty_bad_page_table
-	.globl _empty_zero_page
-	.globl _floppy_track_buffer
-_floppy_track_buffer:
+	.globl C_LABEL(swapper_pg_dir), C_LABEL(pg0)
+	.globl C_LABEL(empty_bad_page)
+	.globl C_LABEL(empty_bad_page_table)
+	.globl C_LABEL(empty_zero_page)
+	.globl C_LABEL(floppy_track_buffer)
+C_LABEL(floppy_track_buffer):
 	.fill 512*2*36,1,0
 
 	.align 4
-_swapper_pg_dir:	.skip 0x1000
-_pg0:			.skip 0x1000
-_empty_bad_page:	.skip 0x1000
-_empty_bad_page_table:	.skip 0x1000
-_empty_zero_page:	.skip 0x1000
+C_LABEL(swapper_pg_dir):		.skip 0x1000
+C_LABEL(pg0):				.skip 0x1000
+C_LABEL(empty_bad_page):		.skip 0x1000
+C_LABEL(empty_bad_page_table):		.skip 0x1000
+C_LABEL(empty_zero_page):		.skip 0x1000
 
+		.align 4
+diagstr:	.asciz	"DIAG\n"
+		.align 4

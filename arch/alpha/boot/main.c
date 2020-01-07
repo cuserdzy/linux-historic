@@ -8,11 +8,11 @@
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/version.h>
+#include <linux/mm.h>
 
 #include <asm/system.h>
 #include <asm/console.h>
 #include <asm/hwrpb.h>
-#include <asm/page.h>
 
 #include <stdarg.h>
 
@@ -75,13 +75,13 @@ struct pcb_struct * find_pa(unsigned long *vptb, struct pcb_struct * pcb)
 #define new_vptb (0xfffffffe00000000UL)
 void pal_init(void)
 {
-	unsigned long i, rev;
-	unsigned long *L1;
+	unsigned long i, rev, sum;
+	unsigned long *L1, *l;
 	struct percpu_struct * percpu;
 	struct pcb_struct * pcb_pa;
 
 	/* Find the level 1 page table and duplicate it in high memory */
-	L1 = (unsigned long *) 0x200802000UL;
+	L1 = (unsigned long *) 0x200802000UL; /* (1<<33 | 1<<23 | 1<<13) */
 	L1[1023] = L1[1];
 
 	percpu = (struct percpu_struct *) (hwrpb.processor_offset + (unsigned long) &hwrpb),
@@ -113,7 +113,15 @@ void pal_init(void)
 		halt();
 	}
 	rev = percpu->pal_revision = percpu->palcode_avail[2];
+
 	hwrpb.vptb = new_vptb;
+
+	/* update checksum: */
+	sum = 0;
+	for (l = (unsigned long *) &hwrpb; l < (unsigned long *) &hwrpb.chksum; ++l)
+		sum += *l;
+	hwrpb.chksum = sum;
+
 	printk("Ok (rev %lx)\n", rev);
 	/* remove the old virtual page-table mapping */
 	L1[1] = 0;
@@ -153,23 +161,18 @@ static inline long load(long dev, unsigned long addr, unsigned long count)
 	return dispatch(CCB_READ, dev, count, addr, BOOT_SIZE/512 + 1);
 }
 
+/*
+ * Start the kernel.
+ */
 static void runkernel(void)
 {
-	struct pcb_struct * init_pcb = (struct pcb_struct *) INIT_PCB;
-
-	*init_pcb = *pcb_va;
-	init_pcb->ksp = PAGE_SIZE + INIT_STACK;
-	
 	__asm__ __volatile__(
+		"bis %1,%1,$30\n\t"
 		"bis %0,%0,$26\n\t"
-		"bis %1,%1,$16\n\t"
-		".long %2\n\t"
 		"ret ($26)"
 		: /* no outputs: it doesn't even return */
 		: "r" (START_ADDR),
-		  "r" (init_pcb),
-		  "i" (PAL_swpctx)
-		: "$16","$26");
+		  "r" (PAGE_SIZE + INIT_STACK));
 }
 
 void start_kernel(void)

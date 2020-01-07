@@ -10,39 +10,92 @@
 #include <asm/asi.h>        /* for get/set segmap/pte routines */
 #include <asm/contregs.h>   /* for switch_to_context */
 
+#define PAGE_SHIFT   12             /* This is the virtual page... */
+
+#ifndef __ASSEMBLY__
+#define PAGE_SIZE    (1UL << PAGE_SHIFT)
+
+/* to mask away the intra-page address bits */
+#define PAGE_MASK         (~(PAGE_SIZE-1))
+
+#ifdef __KERNEL__
+
+/* The following structure is used to hold the physical
+ * memory configuration of the machine.  This is filled
+ * in probe_memory() and is later used by mem_init() to
+ * set up mem_map[].  We statically allocate 14 of these
+ * structs, this is arbitrary.  The entry after the last
+ * valid one has num_bytes==0.
+ */
+
+struct sparc_phys_banks {
+  unsigned long base_addr;
+  unsigned long num_bytes;
+};
+
+#define CONFIG_STRICT_MM_TYPECHECKS
+
+#ifdef CONFIG_STRICT_MM_TYPECHECKS
+/*
+ * These are used to make use of C type-checking..
+ */
+typedef struct { unsigned long pte; } pte_t;
+typedef struct { unsigned long pmd; } pmd_t;
+typedef struct { unsigned long pgd; } pgd_t;
+typedef struct { unsigned long pgprot; } pgprot_t;
+
+#define pte_val(x)	((x).pte)
+#define pmd_val(x)      ((x).pmd)
+#define pgd_val(x)	((x).pgd)
+#define pgprot_val(x)	((x).pgprot)
+
+#define __pte(x)	((pte_t) { (x) } )
+#define __pmd(x)        ((pmd_t) { (x) } )
+#define __pgd(x)	((pgd_t) { (x) } )
+#define __pgprot(x)	((pgprot_t) { (x) } )
+
+#else
+/*
+ * .. while these make it easier on the compiler
+ */
+typedef unsigned long pte_t;
+typedef unsigned long pmd_t;
+typedef unsigned long pgd_t;
+typedef unsigned long pgprot_t;
+
+#define pte_val(x)	(x)
+#define pmd_val(x)      (x)
+#define pgd_val(x)	(x)
+#define pgprot_val(x)	(x)
+
+#define __pte(x)	(x)
+#define __pmd(x)        (x)
+#define __pgd(x)	(x)
+#define __pgprot(x)	(x)
+
+#endif
+
 /* The current va context is global and known, so all that is needed to
  * do an invalidate is flush the VAC.
  */
 
 #define invalidate() flush_vac_context()  /* how conveeeiiiiinnnient :> */
 
-
-#define PAGE_SHIFT   12             /* This is the virtual page... */
-#define PGDIR_SHIFT  18             /* This is the virtual segment */
-#define PAGE_SIZE    4096
-#define PGDIR_SIZE   (1UL << PGDIR_SHIFT)
-
-#ifdef __KERNEL__
-
-#define BITS_PER_PTR      (8*sizeof(unsigned long))   /* better check this stuff */
-#define PAGE_MASK         (~(PAGE_SIZE-1))
-#define PGDIR_MASK        (~(PGDIR_SIZE-1))
+/* to align the pointer to the (next) page boundary */
 #define PAGE_ALIGN(addr)  (((addr)+PAGE_SIZE-1)&PAGE_MASK)
-#define PGDIR_ALIGN(addr) (((addr)+PGDIR_SIZE-1)&PGDIR_MASK)
-#define PTR_MASK          (~(sizeof(void*)-1))
+
+#define PAGE_OFFSET    0
+#define MAP_NR(addr) (((unsigned long)(addr)) >> PAGE_SHIFT)
+#define MAP_PAGE_RESERVED (1<<15)
 
 
-#define SIZEOF_PTR_LOG2   2
+#endif /* !(__ASSEMBLY__) */
 
 /* The rest is kind of funky because on the sparc, the offsets into the mmu 
  * entries are encoded in magic alternate address space tables. I will 
  * probably find some nifty inline assembly routines to do the equivalent. 
  * Much thought must go into this code.   (davem@caip.rutgers.edu)
  */
-
-#define PAGE_DIR_OFFSET(base, address)   ((unsigned long *) 0)
-#define PAGE_PTR(address)                ((unsigned long) 0)
-#define PTRS_PER_PAGE                    (64)  /* 64 pte's per phys_seg */
 
 /* Bitfields within a Sparc sun4c PTE (page table entry). */
 
@@ -61,26 +114,21 @@
 #define PTE_RESV  0x00f80000   /* reserved bits */
 #define PTE_PHYPG 0x0007ffff   /* phys pg number, sun4c only uses 16bits */
 
-/* termed a 'page table' in the linux kernel, a segmap entry is obtained
- * with the following macro
- */
-
-#ifndef __ASSEMBLY__ /* for head.S */
 extern __inline__ unsigned long get_segmap(unsigned long addr)
 {
   register unsigned long entry;
 
-  __asm__ __volatile__("lduha [%1] 0x3, %0" : 
+  __asm__ __volatile__("lduba [%1] 0x3, %0" : 
 		       "=r" (entry) :
-		       "r" (addr)); 
+		       "r" (addr));
 
-  return entry;
+  return (entry&0x7f);
 }
 
-extern __inline__ void put_segmap(unsigned long* addr, unsigned long entry)
+extern __inline__ void put_segmap(unsigned long addr, unsigned long entry)
 {
 
-  __asm__ __volatile__("stha %1, [%0] 0x3" : : "r" (addr), "r" (entry));
+  __asm__ __volatile__("stba %1, [%0] 0x3" : : "r" (addr), "r" (entry&0x7f));
 
   return;
 }
@@ -124,16 +172,7 @@ extern __inline__ int get_context(void)
   return ctx;
 }
 
-/* to set the page-dir
- *
- * On the Sparc this is a nop for now. It will set the proper segmap
- * in the real implementation.
- */
-
-#define SET_PAGE_DIR(tsk,pgdir)
-
-
-#endif /* !(__ASSEMBLY__) */
+typedef unsigned short mem_map_t;
 
 #endif /* __KERNEL__ */
 

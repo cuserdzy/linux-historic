@@ -12,6 +12,8 @@
  *		Donald Becker, <becker@super.org>
  *		Alan Cox, <gw4pts@gw4pts.ampr.org>
  *		Richard Underwood
+ *		Stefan Becker, <stefanb@yello.ping.de>
+ *		
  *
  * Fixes:
  *		Alan Cox	:	Commented a couple of minor bits of surplus code
@@ -63,6 +65,10 @@
  *		Alan Cox	:	Multicast loopback error for 224.0.0.1
  *		Alan Cox	:	IP_MULTICAST_LOOP option.
  *		Alan Cox	:	Use notifiers.
+ *		Bjorn Ekwall	:	Removed ip_csum (from slhc.c too)
+ *		Bjorn Ekwall	:	Moved ip_fast_csum to ip.h (inline!)
+ *		Stefan Becker   :       Send out ICMP HOST REDIRECT
+ *  
  *
  * To Fix:
  *		IP option processing is mostly not needed. ip_forward needs to know about routing rules
@@ -86,6 +92,7 @@
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
+#include <linux/mm.h>
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/config.h>
@@ -107,7 +114,7 @@
 #include "arp.h"
 #include "icmp.h"
 #include "raw.h"
-#include "igmp.h"
+#include <linux/igmp.h>
 #include <linux/ip_fw.h>
 
 #define CONFIG_IP_DEFRAG
@@ -335,10 +342,6 @@ int ip_build_header(struct sk_buff *skb, unsigned long saddr, unsigned long dadd
 #ifdef Not_Yet_Avail
 	build_options(iph, opt);
 #endif
-#ifdef CONFIG_IP_FIREWALL
-	if(!ip_fw_chk(iph,ip_fw_blk_chain))
-		return -EPERM;
-#endif		
 
 	return(20 + tmp);	/* IP header plus MAC header size */
 }
@@ -492,35 +495,6 @@ do_options(struct iphdr *iph, struct options *opt)
 }
 
 /*
- *	This is a version of ip_compute_csum() optimized for IP headers, which
- *	always checksum on 4 octet boundaries.
- */
-
-static inline unsigned short ip_fast_csum(unsigned char * buff, int wlen)
-{
-	unsigned long sum = 0;
-
-	if (wlen)
-	{
-	unsigned long bogus;
-	 __asm__("clc\n"
-		"1:\t"
-		"lodsl\n\t"
-		"adcl %3, %0\n\t"
-		"decl %2\n\t"
-		"jne 1b\n\t"
-		"adcl $0, %0\n\t"
-		"movl %0, %3\n\t"
-		"shrl $16, %3\n\t"
-		"addw %w3, %w0\n\t"
-		"adcw $0, %w0"
-	    : "=r" (sum), "=S" (buff), "=r" (wlen), "=a" (bogus)
-	    : "0"  (sum),  "1" (buff),  "2" (wlen));
-	}
-	return (~sum) & 0xffff;
-}
-
-/*
  * This routine does all the checksum computations that don't
  * require anything special (like copying or special headers).
  */
@@ -567,15 +541,6 @@ unsigned short ip_compute_csum(unsigned char * buff, int len)
 	}
 	sum =~sum;
 	return(sum & 0xffff);
-}
-
-/*
- *	Check the header of an incoming IP datagram.  This version is still used in slhc.c.
- */
-
-int ip_csum(struct iphdr *iph)
-{
-	return ip_fast_csum((unsigned char *)iph, iph->ihl);
 }
 
 /*
@@ -727,7 +692,7 @@ static void ip_expire(unsigned long arg)
 	/* This if is always true... shrug */
 	if(qp->fragments!=NULL)
 		icmp_send(qp->fragments->skb,ICMP_TIME_EXCEEDED,
-				ICMP_EXC_FRAGTIME, qp->dev);
+				ICMP_EXC_FRAGTIME, 0, qp->dev);
 
 	/*
 	 *	Nuke the fragment queue.
@@ -1152,8 +1117,11 @@ void ip_fragment(struct sock *sk, struct sk_buff *skb, struct device *dev, int i
 
 	if (ntohs(iph->frag_off) & IP_DF)
 	{
+		/*
+		 *	Reply giving the MTU of the failed hop.
+		 */
 		ip_statistics.IpFragFails++;
-		icmp_send(skb,ICMP_DEST_UNREACH, ICMP_FRAG_NEEDED, dev);
+		icmp_send(skb,ICMP_DEST_UNREACH, ICMP_FRAG_NEEDED, dev->mtu, dev);
 		return;
 	}
 
@@ -1166,7 +1134,7 @@ void ip_fragment(struct sock *sk, struct sk_buff *skb, struct device *dev, int i
 	if(mtu<8)
 	{
 		/* It's wrong but its better than nothing */
-		icmp_send(skb,ICMP_DEST_UNREACH,ICMP_FRAG_NEEDED,dev);
+		icmp_send(skb,ICMP_DEST_UNREACH,ICMP_FRAG_NEEDED,dev->mtu, dev);
 		ip_statistics.IpFragFails++;
 		return;
 	}
@@ -1294,14 +1262,18 @@ static void ip_forward(struct sk_buff *skb, struct device *dev, int is_frag)
 	struct rtable *rt;	/* Route we use */
 	unsigned char *ptr;	/* Data pointer */
 	unsigned long raddr;	/* Router IP address */
-
+	
 	/* 
 	 *	See if we are allowed to forward this.
 	 */
 
 #ifdef CONFIG_IP_FIREWALL
-	if(!ip_fw_chk(skb->h.iph, ip_fw_fwd_chain))
+	int err;
+	
+	if((err=ip_fw_chk(skb->h.iph, dev, ip_fw_fwd_chain, ip_fw_fwd_policy))!=1)
 	{
+		if(err==-1)
+			icmp_send(skb, ICMP_DEST_UNREACH, ICMP_HOST_UNREACH, 0, dev);
 		return;
 	}
 #endif
@@ -1321,7 +1293,7 @@ static void ip_forward(struct sk_buff *skb, struct device *dev, int is_frag)
 	if (iph->ttl <= 0)
 	{
 		/* Tell the sender its packet died... */
-		icmp_send(skb, ICMP_TIME_EXCEEDED, ICMP_EXC_TTL, dev);
+		icmp_send(skb, ICMP_TIME_EXCEEDED, ICMP_EXC_TTL, 0, dev);
 		return;
 	}
 
@@ -1345,7 +1317,7 @@ static void ip_forward(struct sk_buff *skb, struct device *dev, int is_frag)
 		 *	Tell the sender its packet cannot be delivered. Again
 		 *	ICMP is screened later.
 		 */
-		icmp_send(skb, ICMP_DEST_UNREACH, ICMP_NET_UNREACH, dev);
+		icmp_send(skb, ICMP_DEST_UNREACH, ICMP_NET_UNREACH, 0, dev);
 		return;
 	}
 
@@ -1372,7 +1344,7 @@ static void ip_forward(struct sk_buff *skb, struct device *dev, int is_frag)
 			/*
 			 *	Tell the sender its packet cannot be delivered...
 			 */
-			icmp_send(skb, ICMP_DEST_UNREACH, ICMP_HOST_UNREACH, dev);
+			icmp_send(skb, ICMP_DEST_UNREACH, ICMP_HOST_UNREACH, 0, dev);
 			return;
 		}
 		if (rt->rt_gateway != 0)
@@ -1388,14 +1360,17 @@ static void ip_forward(struct sk_buff *skb, struct device *dev, int is_frag)
 	dev2 = rt->rt_dev;
 
 	/*
-	 *	In IP you never forward a frame on the interface that it arrived
-	 *	upon. We should generate an ICMP HOST REDIRECT giving the route
+	 *	In IP you never have to forward a frame on the interface that it 
+	 *	arrived upon. We now generate an ICMP HOST REDIRECT giving the route
 	 *	we calculated.
-	 *	For now just dropping the packet is an acceptable compromise.
 	 */
-
+#ifdef IP_NO_ICMP_REDIRECT
 	if (dev == dev2)
 		return;
+#else
+	if (dev == dev2)
+		icmp_send(skb, ICMP_REDIRECT, ICMP_REDIR_HOST, raddr, dev);
+#endif		
 
 	/*
 	 * We now allocate a new buffer, and copy the datagram into it.
@@ -1454,7 +1429,7 @@ static void ip_forward(struct sk_buff *skb, struct device *dev, int is_frag)
 			 *	Count mapping we shortcut
 			 */
 			 
-			ip_acct_cnt(iph,ip_acct_chain,1);
+			ip_acct_cnt(iph,dev,ip_acct_chain);
 #endif			
 			
 			/*
@@ -1491,6 +1466,9 @@ int ip_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 				take up stack space. */
 	int brd=IS_MYADDR;
 	int is_frag=0;
+#ifdef CONFIG_IP_FIREWALL
+	int err;
+#endif	
 
 	ip_statistics.IpInReceives++;
 
@@ -1522,8 +1500,10 @@ int ip_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 
 #ifdef	CONFIG_IP_FIREWALL
 	
-	if(!LOOPBACK(iph->daddr) && !ip_fw_chk(iph,ip_fw_blk_chain))
+	if ((err=ip_fw_chk(iph,dev,ip_fw_blk_chain,ip_fw_blk_policy))!=1)
 	{
+		if(err==-1)
+			icmp_send(skb, ICMP_DEST_UNREACH, ICMP_PORT_UNREACH, 0, dev);
 		kfree_skb(skb, FREE_WRITE);
 		return 0;	
 	}
@@ -1637,7 +1617,7 @@ int ip_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 	 */
 	 
 #ifdef CONFIG_IP_ACCT
-	ip_acct_cnt(iph,ip_acct_chain,1);
+	ip_acct_cnt(iph,dev, ip_acct_chain);
 #endif	
 
 	/*
@@ -1747,7 +1727,7 @@ int ip_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 	else if (!flag)		/* Free and report errors */
 	{
 		if (brd != IS_BROADCAST && brd!=IS_MULTICAST)
-			icmp_send(skb, ICMP_DEST_UNREACH, ICMP_PROT_UNREACH, dev);
+			icmp_send(skb, ICMP_DEST_UNREACH, ICMP_PROT_UNREACH, 0, dev);
 		kfree_skb(skb, FREE_WRITE);
 	}
 
@@ -1934,7 +1914,7 @@ void ip_queue_xmit(struct sock *sk, struct device *dev,
 	 
 	ip_statistics.IpOutRequests++;
 #ifdef CONFIG_IP_ACCT
-	ip_acct_cnt(iph,ip_acct_chain,1);
+	ip_acct_cnt(iph,dev, ip_acct_chain);
 #endif	
 	
 #ifdef CONFIG_IP_MULTICAST	
@@ -2080,19 +2060,6 @@ int ip_setsockopt(struct sock *sk, int level, int optname, char *optval, int opt
 	if(level!=SOL_IP)
 		return -EOPNOTSUPP;
 
-#ifdef CONFIG_IP_MULTICAST
-	if(optname==IP_MULTICAST_TTL)
-	{
-		unsigned char ucval;
-		ucval=get_fs_byte((unsigned char *)optval);
-		printk("MC TTL %d\n", ucval);
-		if(ucval<1||ucval>255)
-	 		return -EINVAL;
-		sk->ip_mc_ttl=(int)ucval;
-		return 0;
-	}
-#endif
-
 	switch(optname)
 	{
 		case IP_TOS:
@@ -2110,19 +2077,16 @@ int ip_setsockopt(struct sock *sk, int level, int optname, char *optval, int opt
 			sk->ip_ttl=val;
 			return 0;
 #ifdef CONFIG_IP_MULTICAST
-#ifdef GCC_WORKS
 		case IP_MULTICAST_TTL: 
 		{
 			unsigned char ucval;
 
 			ucval=get_fs_byte((unsigned char *)optval);
-			printk("MC TTL %d\n", ucval);
 			if(ucval<1||ucval>255)
                                 return -EINVAL;
 			sk->ip_mc_ttl=(int)ucval;
 	                return 0;
 		}
-#endif
 		case IP_MULTICAST_LOOP: 
 		{
 			unsigned char ucval;
@@ -2309,8 +2273,12 @@ int ip_setsockopt(struct sock *sk, int level, int optname, char *optval, int opt
 		case IP_FW_DEL_FWD:
 		case IP_FW_CHK_BLK:
 		case IP_FW_CHK_FWD:
-		case IP_FW_FLUSH:
-		case IP_FW_POLICY:
+		case IP_FW_FLUSH_BLK:
+		case IP_FW_FLUSH_FWD:
+		case IP_FW_ZERO_BLK:
+		case IP_FW_ZERO_FWD:
+		case IP_FW_POLICY_BLK:
+		case IP_FW_POLICY_FWD:
 			if(!suser())
 				return -EPERM;
 			if(optlen>sizeof(tmp_fw) || optlen<1)

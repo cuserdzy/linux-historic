@@ -10,6 +10,7 @@
  * should be easier.
  */
 
+#include <linux/config.h>
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/kernel_stat.h>
@@ -21,6 +22,7 @@
 #include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/bitops.h>
+#include <asm/dma.h>
 
 static unsigned char cache_21 = 0xff;
 static unsigned char cache_A1 = 0xff;
@@ -102,6 +104,40 @@ int get_irq_list(char *buf)
 	return len;
 }
 
+static inline void ack_irq(int irq)
+{
+	/* ACK the interrupt making it the lowest priority */
+	/*  First the slave .. */
+	if (irq > 7) {
+		outb(0xE0 | (irq - 8), 0xa0);
+		irq = 2;
+	}
+	/* .. then the master */
+	outb(0xE0 | irq, 0x20);
+}
+
+static inline void mask_irq(int irq)
+{
+	if (irq < 8) {
+		cache_21 |= 1 << irq;
+		outb(cache_21, 0x21);
+	} else {
+		cache_A1 |= 1 << (irq - 8);
+		outb(cache_A1, 0xA1);
+	}
+}
+
+static inline void unmask_irq(unsigned long irq)
+{
+	if (irq < 8) {
+		cache_21 &= ~(1 << irq);
+		outb(cache_21, 0x21);
+	} else {
+		cache_A1 &= ~(1 << (irq - 8));
+		outb(cache_A1, 0xA1);
+	}
+}
+
 int request_irq(unsigned int irq, void (*handler)(int, struct pt_regs *),
 	unsigned long irqflags, const char * devname)
 {
@@ -122,8 +158,10 @@ int request_irq(unsigned int irq, void (*handler)(int, struct pt_regs *),
 	action->mask = 0;
 	action->name = devname;
 	if (irq < 8) {
-		cache_21 &= ~(1<<irq);
-		outb(cache_21,0x21);
+		if (irq) {
+			cache_21 &= ~(1<<irq);
+			outb(cache_21,0x21);
+		}
 	} else {
 		cache_21 &= ~(1<<2);
 		cache_A1 &= ~(1<<(irq-8));
@@ -136,56 +174,38 @@ int request_irq(unsigned int irq, void (*handler)(int, struct pt_regs *),
 
 void free_irq(unsigned int irq)
 {
-	halt();
-}
-
-static void handle_irq(int irq, struct pt_regs * regs)
-{
 	struct irqaction * action = irq + irq_action;
+	unsigned long flags;
 
-	kstat.interrupts[irq]++;
-	if (action->handler)
-		action->handler(irq, regs);
-}
-
-/*
- * I don't have any good documentation on the EISA hardware interrupt
- * stuff: I don't know the mapping between the interrupt vector and the
- * EISA interrupt number.
- *
- * It *seems* to be 0x8X0 for EISA interrupt X, and 0x9X0 for the
- * local motherboard interrupts..
- *
- *	0x660 - NMI?
- *
- *	0x800 - ??? I've gotten this, but EISA irq0 shouldn't happen
- *		as the timer is not on the EISA bus
- *
- *	0x860 - ??? floppy disk (EISA irq6)
- *
- *	0x900 - ??? I get this at autoprobing when the EISA serial
- *		lines com3/com4 don't exist. It keeps coming after
- *		that..
- *
- *	0x980 - keyboard
- *	0x990 - mouse
- *
- * We'll see..
- */
-static void device_interrupt(unsigned long vector, struct pt_regs * regs)
-{
-	int i;
-	static int nr = 0;
-
-	if (vector == 0x980 && irq_action[1].handler) {
-		handle_irq(1, regs);
+	if (irq > 15) {
+		printk("Trying to free IRQ%d\n", irq);
 		return;
 	}
-
-	if (nr > 3)
+	if (!action->handler) {
+		printk("Trying to free free IRQ%d\n", irq);
 		return;
-	nr++;
-	printk("IO device interrupt, vector = %lx\n", vector);
+	}
+	save_flags(flags);
+	cli();
+	mask_irq(irq);
+	action->handler = NULL;
+	action->flags = 0;
+	action->mask = 0;
+	action->name = NULL;
+	restore_flags(flags);
+}
+
+static void handle_nmi(struct pt_regs * regs)
+{
+	printk("Whee.. NMI received. Probable hardware error\n");
+	printk("61=%02x, 461=%02x\n", inb(0x61), inb(0x461));
+}
+
+static void unexpected_irq(int irq, struct pt_regs * regs)
+{
+	int i;
+
+	printk("IO device interrupt, irq = %d\n", irq);
 	printk("PC = %016lx PS=%04lx\n", regs->pc, regs->ps);
 	printk("Expecting: ");
 	for (i = 0; i < 16; i++)
@@ -194,7 +214,160 @@ static void device_interrupt(unsigned long vector, struct pt_regs * regs)
 	printk("\n");
 	printk("64=%02x, 60=%02x, 3fa=%02x 2fa=%02x\n",
 		inb(0x64), inb(0x60), inb(0x3fa), inb(0x2fa));
-	printk("61=%02x, 461=%02x\n", inb(0x61), inb(0x461));
+	outb(0x0c, 0x3fc);
+	outb(0x0c, 0x2fc);
+	outb(0,0x61);
+	outb(0,0x461);
+}
+
+static inline void handle_irq(int irq, struct pt_regs * regs)
+{
+	struct irqaction * action = irq + irq_action;
+
+	kstat.interrupts[irq]++;
+	if (!action->handler) {
+		unexpected_irq(irq, regs);
+		return;
+	}
+	action->handler(irq, regs);
+}
+
+static void local_device_interrupt(unsigned long vector, struct pt_regs * regs)
+{
+	switch (vector) {
+		/* com1: map to irq 4 */
+		case 0x900:
+			handle_irq(4, regs);
+			return;
+
+		/* com2: map to irq 3 */
+		case 0x920:
+			handle_irq(3, regs);
+			return;
+
+		/* keyboard: map to irq 1 */
+		case 0x980:
+			handle_irq(1, regs);
+			return;
+
+		/* mouse: map to irq 12 */
+		case 0x990:
+			handle_irq(12, regs);
+			return;
+		default:
+			printk("Unknown local interrupt %lx\n", vector);
+	}
+}
+
+/*
+ * The vector is 0x8X0 for EISA interrupt X, and 0x9X0 for the local
+ * motherboard interrupts.. This is for the Jensen.
+ *
+ *	0x660 - NMI
+ *
+ *	0x800 - IRQ0  interval timer (not used, as we use the RTC timer)
+ *	0x810 - IRQ1  line printer (duh..)
+ *	0x860 - IRQ6  floppy disk
+ *	0x8E0 - IRQ14 SCSI controller
+ *
+ *	0x900 - COM1
+ *	0x920 - COM2
+ *	0x980 - keyboard
+ *	0x990 - mouse
+ *
+ * The PCI version is more sane: it doesn't have the local interrupts at
+ * all, and has only normal PCI interrupts from devices. Happily it's easy
+ * enough to do a sane mapping from the Jensen.. Note that this means
+ * that we may have to do a hardware "ack" to a different interrupt than
+ * we report to the rest of the world..
+ */
+static void device_interrupt(unsigned long vector, struct pt_regs * regs)
+{
+	int irq, ack;
+	struct irqaction * action;
+
+	if (vector == 0x660) {
+		handle_nmi(regs);
+		return;
+	}
+
+	ack = irq = (vector - 0x800) >> 4;
+#ifndef CONFIG_PCI
+	if (vector >= 0x900) {
+		local_device_interrupt(vector, regs);
+		return;
+	}
+	/* irq1 is supposed to be the keyboard, silly Jensen */
+	if (irq == 1)
+		irq = 7;
+#endif
+	kstat.interrupts[irq]++;
+	action = irq_action + irq;
+	/* quick interrupts get executed with no extra overhead */
+	if (action->flags & SA_INTERRUPT) {
+		action->handler(irq, regs);
+		ack_irq(ack);
+		return;
+	}
+	/*
+	 * For normal interrupts, we mask it out, and then ACK it.
+	 * This way another (more timing-critical) interrupt can
+	 * come through while we're doing this one.
+	 *
+	 * Note! A irq without a handler gets masked and acked, but
+	 * never unmasked. The autoirq stuff depends on this (it looks
+	 * at the masks before and after doing the probing).
+	 */
+	mask_irq(ack);
+	ack_irq(ack);
+	if (!action->handler)
+		return;
+	action->handler(irq, regs);
+	unmask_irq(ack);
+}
+
+/*
+ * Start listening for interrupts..
+ */
+unsigned int probe_irq_on(void)
+{
+	unsigned int i, irqs = 0, irqmask;
+	unsigned long delay;
+
+	for (i = 15; i > 0; i--) {
+		if (!irq_action[i].handler) {
+			enable_irq(i);
+			irqs |= (1 << i);
+		}
+	}
+
+	/* wait for spurious interrupts to mask themselves out again */
+	for (delay = jiffies + HZ/10; delay > jiffies; )
+		/* about 100 ms delay */;
+	
+	/* now filter out any obviously spurious interrupts */
+	irqmask = (((unsigned int)cache_A1)<<8) | (unsigned int) cache_21;
+	irqs &= ~irqmask;
+	return irqs;
+}
+
+/*
+ * Get the result of the IRQ probe.. A negative result means that
+ * we have several candidates (but we return the lowest-numbered
+ * one).
+ */
+int probe_irq_off(unsigned int irqs)
+{
+	unsigned int i, irqmask;
+	
+	irqmask = (((unsigned int)cache_A1)<<8) | (unsigned int)cache_21;
+	irqs &= irqmask;
+	if (!irqs)
+		return 0;
+	i = ffz(~irqs);
+	if (irqs != (1 << i))
+		i = -i;
+	return i;
 }
 
 static void machine_check(unsigned long vector, unsigned long la_ptr, struct pt_regs * regs)
@@ -202,8 +375,9 @@ static void machine_check(unsigned long vector, unsigned long la_ptr, struct pt_
 	printk("Machine check\n");
 }
 
-asmlinkage void do_entInt(unsigned long type, unsigned long vector,
-	unsigned long la_ptr, struct pt_regs *regs)
+asmlinkage void do_entInt(unsigned long type, unsigned long vector, unsigned long la_ptr,
+	unsigned long a3, unsigned long a4, unsigned long a5,
+	struct pt_regs regs)
 {
 	switch (type) {
 		case 0:
@@ -211,13 +385,13 @@ asmlinkage void do_entInt(unsigned long type, unsigned long vector,
 			break;
 		case 1:
 			/* timer interrupt.. */
-			handle_irq(0, regs);
+			handle_irq(0, &regs);
 			return;
 		case 2:
-			machine_check(vector, la_ptr, regs);
+			machine_check(vector, la_ptr, &regs);
 			break;
 		case 3:
-			device_interrupt(vector, regs);
+			device_interrupt(vector, &regs);
 			return;
 		case 4:
 			printk("Performance counter interrupt\n");
@@ -225,7 +399,7 @@ asmlinkage void do_entInt(unsigned long type, unsigned long vector,
 		default:
 			printk("Hardware intr %ld %lx? Huh?\n", type, vector);
 	}
-	printk("PC = %016lx PS=%04lx\n", regs->pc, regs->ps);
+	printk("PC = %016lx PS=%04lx\n", regs.pc, regs.ps);
 }
 
 extern asmlinkage void entInt(void);
@@ -233,4 +407,8 @@ extern asmlinkage void entInt(void);
 void init_IRQ(void)
 {
 	wrent(entInt, 0);
+	dma_outb(0, DMA1_RESET_REG);
+	dma_outb(0, DMA2_RESET_REG);
+	dma_outb(0, DMA1_CLR_MASK_REG);
+	dma_outb(0, DMA2_CLR_MASK_REG);
 }

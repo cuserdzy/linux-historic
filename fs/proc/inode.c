@@ -139,7 +139,24 @@ void proc_read_inode(struct inode * inode)
 		return;
 	}
 
-	/* files within /proc/net */
+#ifdef CONFIG_IP_ACCT
+	/* this file may be opened R/W by root to reset the accounting */
+	if (ino == PROC_NET_IPACCT) {
+		inode->i_mode = S_IFREG | S_IRUGO | S_IWUSR;
+		inode->i_op = &proc_net_inode_operations;
+		return;
+	}
+#endif
+#ifdef CONFIG_IP_FIREWALL
+	/* these files may be opened R/W by root to reset the counters */
+	if ((ino == PROC_NET_IPFWFWD) || (ino == PROC_NET_IPFWBLK)) {
+		inode->i_mode = S_IFREG | S_IRUGO | S_IWUSR;
+		inode->i_op = &proc_net_inode_operations;
+		return;
+	}
+#endif
+
+	/* other files within /proc/net */
 	if ((ino >= PROC_NET_UNIX) && (ino < PROC_NET_LAST)) {
 		inode->i_mode = S_IFREG | S_IRUGO;
 		inode->i_op = &proc_net_inode_operations;
@@ -202,12 +219,18 @@ void proc_read_inode(struct inode * inode)
 			inode->i_nlink = 2;
 			return;
 		case PROC_PID_ENVIRON:
+			inode->i_mode = S_IFREG | S_IRUSR;
+			inode->i_op = &proc_array_inode_operations;
+			return;
 		case PROC_PID_CMDLINE:
 		case PROC_PID_STAT:
 		case PROC_PID_STATM:
-		case PROC_PID_MAPS:
 			inode->i_mode = S_IFREG | S_IRUGO;
 			inode->i_op = &proc_array_inode_operations;
+			return;
+		case PROC_PID_MAPS:
+			inode->i_mode = S_IFIFO | S_IRUGO;
+			inode->i_op = &proc_arraylong_inode_operations;
 			return;
 	}
 	switch (ino >> 8) {

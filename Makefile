@@ -1,6 +1,6 @@
 VERSION = 1
 PATCHLEVEL = 1
-SUBLEVEL = 82
+SUBLEVEL = 95
 
 ARCH = i386
 
@@ -165,6 +165,7 @@ include/linux/version.h: $(CONFIGURATION) Makefile newversion
 	   echo \#define LINUX_COMPILE_DOMAIN \"`domainname`\"; \
 	 fi >> include/linux/version.h
 	@echo \#define LINUX_COMPILER \"`$(HOSTCC) -v 2>&1 | tail -1`\" >> include/linux/version.h
+	@echo \#define LINUX_VERSION_CODE `expr $(VERSION) \\* 65536 + $(PATCHLEVEL) \\* 256 + $(SUBLEVEL)` >> include/linux/version.h
 
 init/version.o: init/version.c include/linux/version.h
 	$(CC) $(CFLAGS) -DUTS_MACHINE='"$(ARCH)"' -c -o init/version.o init/version.c
@@ -193,9 +194,32 @@ drivers: dummy
 net: dummy
 	$(MAKE) linuxsubdirs SUBDIRS=net
 
-modules: dummy
-	@set -e; for i in $(SUBDIRS); do $(MAKE) -C $$i CFLAGS="$(CFLAGS) -DMODULE" modules; done
+ifdef CONFIG_MODVERSIONS
+MODV = -DCONFIG_MODVERSIONS
+endif
+
+modules: include/linux/version.h
+	@set -e; for i in $(SUBDIRS); do $(MAKE) -C $$i CFLAGS="$(CFLAGS) -DMODULE $(MODV)" modules; done
 	
+modules_install:
+	@( \
+	MODLIB=/lib/modules/$(VERSION).$(PATCHLEVEL).$(SUBLEVEL); \
+	cd modules; \
+	MODULES=""; \
+	inst_mod() { These="`cat $$1`"; MODULES="$$MODULES $$These"; \
+		mkdir -p $$MODLIB/$$2; cp -p $$These $$MODLIB/$$2; \
+		echo Installing modules under $$MODLIB/$$2; \
+	}; \
+	\
+	if [ -f NET_MODULES  ]; then inst_mod NET_MODULES  net;  fi; \
+	if [ -f SCSI_MODULES ]; then inst_mod SCSI_MODULES scsi; fi; \
+	if [ -f FS_MODULES   ]; then inst_mod FS_MODULES   fs;   fi; \
+	\
+	ls *.o > .allmods; \
+	echo $$MODULES | tr ' ' '\n' | sort | comm -23 .allmods - > .misc; \
+	if [ -s .misc ]; then inst_mod .misc misc; fi; \
+	rm -f .misc .allmods; \
+	)
 
 clean:	archclean
 	rm -f kernel/ksyms.lst
@@ -203,6 +227,7 @@ clean:	archclean
 	rm -f core `find . -name 'core' -print`
 	rm -f vmlinux System.map
 	rm -f .tmp* drivers/sound/configure
+	rm -fr modules/*
 
 mrproper: clean
 	rm -f include/linux/autoconf.h include/linux/version.h
@@ -210,6 +235,10 @@ mrproper: clean
 	rm -f .version .config* config.in config.old
 	rm -f include/asm
 	rm -f .depend `find . -name .depend -print`
+ifdef CONFIG_MODVERSIONS
+	rm -f $(TOPDIR)/include/linux/modversions.h
+	rm -f $(TOPDIR)/include/linux/modules/*
+endif
 
 distclean: mrproper
 
@@ -223,6 +252,12 @@ depend dep: archdep
 	set -e; for i in $(SUBDIRS); do $(MAKE) -C $$i dep; done
 	rm -f include/linux/version.h
 	mv .tmpdepend .depend
+ifdef CONFIG_MODVERSIONS
+	@echo updating $(TOPDIR)/include/linux/modversions.h
+	@(cd $(TOPDIR)/include/linux/modules; for f in *.ver;\
+	do echo "#include <linux/modules/$${f}>"; done) \
+	> $(TOPDIR)/include/linux/modversions.h
+endif
 
 ifdef CONFIGURATION
 ..$(CONFIGURATION):

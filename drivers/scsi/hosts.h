@@ -243,10 +243,11 @@ struct Scsi_Host
 		   that should be locked out of performing I/O while we have an active
 		   command on this host. */
 		struct Scsi_Host * block;
+		unsigned wish_block:1;
 
 		/* These parameters should be set by the detect routine */
 		unsigned char *base;
-		short unsigned int io_port;
+		unsigned int io_port;
 		unsigned char n_io_port;
 		unsigned char irq;
 		unsigned char dma_channel;
@@ -303,6 +304,7 @@ extern int scsi_loadable_module_flag;
 unsigned int scsi_init(void);
 extern struct Scsi_Host * scsi_register(Scsi_Host_Template *, int j);
 extern void scsi_unregister(struct Scsi_Host * i);
+extern int scsicam_bios_param (Disk *, int, int *);
 
 #define BLANK_HOST {"", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 
@@ -354,3 +356,19 @@ extern void scsi_unregister_module(int, void *);
 #define SG_EXTRA_DEVS (SD_EXTRA_DEVS + SR_EXTRA_DEVS + ST_EXTRA_DEVS)
 
 #endif
+/*
+ * Overrides for Emacs so that we follow Linus's tabbing style.
+ * Emacs will notice this stuff at the end of the file and automatically
+ * adjust the settings for this buffer only.  This must remain at the end
+ * of the file.
+ * ---------------------------------------------------------------------------
+ * Local variables:
+ * c-indent-level: 8
+ * c-brace-imaginary-offset: 0
+ * c-brace-offset: -8
+ * c-argdecl-indent: 8
+ * c-label-offset: -8
+ * c-continued-statement-offset: 8
+ * c-continued-brace-offset: 0
+ * End:
+ */

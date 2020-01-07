@@ -20,6 +20,7 @@
 #include <linux/user.h>
 #include <linux/a.out.h>
 #include <linux/tty.h>
+#include <linux/ioport.h>
 
 #include <asm/segment.h>
 #include <asm/system.h>
@@ -54,7 +55,7 @@ struct screen_info screen_info;
 unsigned char aux_device_present;
 extern int ramdisk_size;
 extern int root_mountflags;
-extern int end;
+extern int etext, edata, end;
 
 extern char empty_zero_page[PAGE_SIZE];
 
@@ -95,6 +96,10 @@ void setup_arch(char **cmdline_p,
 	if (MOUNT_ROOT_RDONLY)
 		root_mountflags |= MS_RDONLY;
 	memory_start = (unsigned long) &end;
+	init_task.mm->start_code = TASK_SIZE;
+	init_task.mm->end_code = TASK_SIZE + (unsigned long) &etext;
+	init_task.mm->end_data = TASK_SIZE + (unsigned long) &edata;
+	init_task.mm->brk = TASK_SIZE + (unsigned long) &end;
 
 	for (;;) {
 		if (c == ' ' && *(unsigned long *)from == *(unsigned long *)"mem=") {
@@ -118,4 +123,12 @@ void setup_arch(char **cmdline_p,
 	*cmdline_p = command_line;
 	*memory_start_p = memory_start;
 	*memory_end_p = memory_end;
+	/* request io space for devices used on all i[345]86 PC'S */
+	request_region(0x00,0x20,"dma1");
+	request_region(0x40,0x20,"timer");
+	request_region(0x70,0x10,"rtc");
+	request_region(0x80,0x20,"dma page reg");
+	request_region(0xc0,0x20,"dma2");
+	request_region(0xf0,0x2,"npu");
+	request_region(0xf8,0x8,"npu");
 }

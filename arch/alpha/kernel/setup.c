@@ -29,12 +29,6 @@
 unsigned char aux_device_present;
 
 /*
- * XXXXX!! Warning Will Robinson.
- * Danger! Danger! This is bogus, I'll get it to link if it kills me
- */
-unsigned char floppy_track_buffer[256];
-
-/*
  * The format of "screen_info" is strange, and due to early
  * i386-setup code. This is just enough to make the console
  * code think we're on a EGA+ colour display.
@@ -65,12 +59,12 @@ static unsigned long find_end_memory(void)
 	cluster = memdesc->cluster;
 	for (i = memdesc->numclusters ; i > 0; i--, cluster++) {
 		unsigned long tmp;
-		if (cluster->usage & 1)
-			continue;
 		tmp = (cluster->start_pfn + cluster->numpages) << PAGE_SHIFT;
 		if (tmp > high)
 			high = tmp;
 	}
+	/* round it up to an even number of pages.. */
+	high = (high + PAGE_SIZE) & (PAGE_MASK*2);
 	return PAGE_OFFSET + high;
 }
 
@@ -80,6 +74,7 @@ void setup_arch(char **cmdline_p,
 	static char cmdline[] = "";
 	extern int _end;
 
+	ROOT_DEV = 0x0200;	/* fd0 */
 	aux_device_present = 0xaa;
 	*cmdline_p = cmdline;
 	*memory_start_p = (unsigned long) &_end;

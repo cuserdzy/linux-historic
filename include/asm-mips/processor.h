@@ -68,17 +68,19 @@ __asm__ __volatile__(            \
  */
 extern int EISA_bus;
 #define MCA_bus 0
+#define MCA_bus__is_a_macro /* for versions in ksyms.c */
 
 /*
  * MIPS has no problems with write protection
  */
 #define wp_works_ok 1
+#define wp_works_ok__is_a_macro /* for versions in ksyms.c */
 
 /*
  * User space process size: 2GB. This is hardcoded into a few places,
  * so don't change it unless you know what you are doing.
  */
-#define TASK_SIZE	0x80000000
+#define TASK_SIZE	(0x80000000UL)
 
 /*
  * Size of io_bitmap in longwords: 32 is ports 0-0x3ff.

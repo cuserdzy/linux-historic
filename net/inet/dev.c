@@ -28,6 +28,7 @@
  *		Alan Cox	:	100 backlog just doesn't cut it when
  *					you start doing multicast video 8)
  *		Alan Cox	:	Rewrote net_bh and list manager.
+ *		Alan Cox	: 	Fix ETH_P_ALL echoback lengths.
  *
  *	Cleaned up and recommented by Alan Cox 2nd April 1994. I hope to have
  *	the rest as well commented in the end.
@@ -388,11 +389,21 @@ void dev_queue_xmit(struct sk_buff *skb, struct device *dev, int pri)
 	{
 		for (nitcount= dev_nit, ptype = ptype_base; nitcount > 0 && ptype != NULL; ptype = ptype->next) 
 		{
-			if (ptype->type == htons(ETH_P_ALL) && (ptype->dev==dev || !ptype->dev)) 
+			/* Never send packets back to the socket
+			 * they originated from - MvS (miquels@drinkel.ow.org)
+			 */
+			if (ptype->type == htons(ETH_P_ALL) &&
+			   (ptype->dev == dev || !ptype->dev) &&
+			   ((struct sock *)ptype->data != skb->sk))
 			{
 				struct sk_buff *skb2;
 				if ((skb2 = skb_clone(skb, GFP_ATOMIC)) == NULL)
 					break;
+				/*
+				 *	The protocol knows this has (for other paths) been taken off
+				 *	and adds it back.
+				 */
+				skb2->len-=skb->dev->hard_header_len;
 				ptype->func(skb2, skb->dev, ptype);
 				nitcount--;
 			}

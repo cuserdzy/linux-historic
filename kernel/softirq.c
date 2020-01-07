@@ -14,6 +14,7 @@
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/interrupt.h>
+#include <linux/mm.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
@@ -26,7 +27,7 @@
 unsigned long intr_count = 0;
 
 unsigned long bh_active = 0;
-unsigned long bh_mask = ~0UL;
+unsigned long bh_mask = 0;
 struct bh_struct bh_base[32];
 
 

@@ -266,10 +266,10 @@ struct file {
 };
 
 struct file_lock {
-	struct file_lock *fl_next;	/* singly linked list */
-	struct file_lock *fl_nextlink;
-	struct task_struct *fl_owner;	/* NULL if on free list, for sanity checks */
-        unsigned int fl_fd;             /* File descriptor for this lock */
+	struct file_lock *fl_next;	/* singly linked list for this inode  */
+	struct file_lock *fl_nextlink;	/* doubly linked list of all locks */
+	struct file_lock *fl_prevlink;	/* used to simplify lock removal */
+	struct task_struct *fl_owner;
 	struct wait_queue *fl_wait;
 	char fl_type;
 	char fl_whence;

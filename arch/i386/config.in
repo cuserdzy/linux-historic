@@ -9,7 +9,8 @@ bool 'Kernel math emulation' CONFIG_MATH_EMULATION n
 bool 'Normal floppy disk support' CONFIG_BLK_DEV_FD y
 bool 'Normal (MFM/RLL) disk and IDE disk/cdrom support' CONFIG_ST506 y
 if [ "$CONFIG_ST506" = "y" ]; then
-  bool '   Use old (reliable) disk-only driver for primary i/f' CONFIG_BLK_DEV_HD y
+  comment 'Please see drivers/block/README.ide for help/info on IDE drives'
+  bool '   Use old disk-only driver for primary i/f' CONFIG_BLK_DEV_HD n
   if [ "$CONFIG_BLK_DEV_HD" = "y" ]; then
     bool '   Include new IDE driver for secondary i/f support' CONFIG_BLK_DEV_IDE n
   else
@@ -34,12 +35,15 @@ bool 'Kernel support for ELF binaries' CONFIG_BINFMT_ELF y
 bool 'Use -m486 flag for 486-specific optimizations' CONFIG_M486 y
 #fi
 
+comment 'Loadable module support'
+bool 'Set version information on all symbols for modules' CONFIG_MODVERSIONS n
+
 if [ "$CONFIG_NET" = "y" ]; then
 comment 'Networking options'
 bool 'TCP/IP networking' CONFIG_INET y
-if [ "$CONFIG_INET" "=" "y" ]; then
+if [ "$CONFIG_INET" = "y" ]; then
 bool 'IP forwarding/gatewaying' CONFIG_IP_FORWARD n
-bool 'IP multicasting (ALPHA)' CONFIG_IP_MULTICAST n
+bool 'IP multicasting' CONFIG_IP_MULTICAST n
 bool 'IP firewalling' CONFIG_IP_FIREWALL n
 bool 'IP accounting' CONFIG_IP_ACCT n
 comment '(it is safe to leave these untouched)'
@@ -49,6 +53,7 @@ bool 'Assume subnets are local' CONFIG_INET_SNARL y
 bool 'Disable NAGLE algorithm (normally enabled)' CONFIG_TCP_NAGLE_OFF n
 fi
 bool 'The IPX protocol' CONFIG_IPX n
+#bool 'Appletalk DDP' CONFIG_ATALK n
 #bool 'Amateur Radio AX.25 Level 2' CONFIG_AX25 n
 fi
 
@@ -105,7 +110,7 @@ if [ "$CONFIG_NETDEVICES" = "n" ]; then
 comment 'Skipping network driver configuration options...'
 
 else
-bool 'Dummy net driver support' CONFIG_DUMMY n
+bool 'Dummy net driver support' CONFIG_DUMMY y
 bool 'SLIP (serial line) support' CONFIG_SLIP n
 if [ "$CONFIG_SLIP" = "y" ]; then
   bool ' CSLIP compressed headers' CONFIG_SLIP_COMPRESSED y
@@ -114,7 +119,6 @@ if [ "$CONFIG_SLIP" = "y" ]; then
 fi
 bool 'PPP (point-to-point) support' CONFIG_PPP n
 bool 'PLIP (parallel port) support' CONFIG_PLIP n
-bool 'Load balancing support (experimental)' CONFIG_SLAVE_BALANCING n
 bool 'Do you want to be offered ALPHA test drivers' CONFIG_NET_ALPHA n
 bool 'Western Digital/SMC cards' CONFIG_NET_VENDOR_SMC n
 if [ "$CONFIG_NET_VENDOR_SMC" = "y" ]; then
@@ -144,6 +148,7 @@ if [ "$CONFIG_NET_ISA" = "y" ]; then
 		bool 'EtherExpress support' CONFIG_EEXPRESS n
 		bool 'NI5210 support' CONFIG_NI52 n
 		bool 'NI6510 support' CONFIG_NI65 n
+		bool 'WaveLAN support' CONFIG_WAVELAN n
 	fi
 	bool 'HP PCLAN+ (27247B and 27252A) support' CONFIG_HPLAN_PLUS n
 	bool 'HP PCLAN (27245 and other 27xxx series) support' CONFIG_HPLAN n
@@ -156,6 +161,7 @@ if [ "$CONFIG_NET_EISA" = "y" ]; then
 		bool 'Ansel Communications EISA 3200 support' CONFIG_AC3200 n
 	fi
 	bool 'Apricot Xen-II on board ethernet' CONFIG_APRICOT n
+	bool 'DE425, DE434, DE435 support' CONFIG_DE4X5 n
 #	bool 'DEC 21040 PCI support' CONFIG_DEC_ELCP n
 #	bool 'LPL T100V 100Mbs support' CONFIG_LPL_T100 n
 #	bool 'PCnet32 (32 bit VLB and PCI LANCE) support' CONFIG_PCNET32 n
@@ -187,6 +193,8 @@ if [ "$CONFIG_SBPCD" = "y" ]; then
     fi
   fi
 fi
+bool 'Aztech/Orchid/Okano/Wearnes (non IDE) CDROM support' CONFIG_AZTCD n
+bool 'Sony CDU535 CDROM driver support' CONFIG_CDU535 n
 
 comment 'Filesystems'
 
@@ -202,7 +210,7 @@ bool '/proc filesystem support' CONFIG_PROC_FS y
 if [ "$CONFIG_INET" = "y" ]; then
 bool 'NFS filesystem support' CONFIG_NFS_FS y
 fi
-if [ "$CONFIG_BLK_DEV_SR" = "y" -o "$CONFIG_CDU31A" = "y" -o "$CONFIG_MCD" = "y" -o "$CONFIG_SBPCD" = "y" -o "$CONFIG_BLK_DEV_IDECD" = "y" ]; then
+if [ "$CONFIG_BLK_DEV_SR" = "y" -o "$CONFIG_CDU31A" = "y" -o "$CONFIG_MCD" = "y" -o "$CONFIG_SBPCD" = "y" -o "$CONFIG_BLK_DEV_IDECD" = "y" -o "$CONFIG_AZTCD" = "y" -o "$CONFIG_CDU535" = "y" ]; then
 	bool 'ISO9660 cdrom filesystem support' CONFIG_ISO9660_FS y
 else
 	bool 'ISO9660 cdrom filesystem support' CONFIG_ISO9660_FS n
@@ -221,7 +229,6 @@ bool 'C&T 82C710 mouse port support (as on TI Travelmate)' CONFIG_82C710_MOUSE y
 fi
 bool 'Microsoft busmouse support' CONFIG_MS_BUSMOUSE n
 bool 'ATIXL busmouse support' CONFIG_ATIXL_BUSMOUSE n
-bool 'Selection (cut and paste for virtual consoles)' CONFIG_SELECTION n
 
 
 bool 'QIC-02 tape support' CONFIG_QIC02_TAPE n

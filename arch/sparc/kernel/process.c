@@ -39,10 +39,19 @@ asmlinkage int sys_idle(void)
 	/* endless idle loop with no priority at all */
 	current->counter = -100;
 	for (;;) {
-		if (!need_resched)
-			__asm__("nop");
 		schedule();
 	}
+}
+
+void hard_reset_now(void)
+{
+	halt();
+}
+
+void show_regs(struct pt_regs * regs)
+{
+        printk("\nSP: %08lx PC: %08lx NPC: %08lx\n", regs->sp, regs->pc,
+	       regs->npc);
 }
 
 /*
@@ -59,23 +68,24 @@ void start_thread(struct pt_regs * regs, unsigned long sp, unsigned long fp)
  */
 void exit_thread(void)
 {
-  return; /* i'm getting to it */
+  halt();
 }
 
 void flush_thread(void)
 {
-  return;
+  halt();
 }
 
-unsigned long copy_thread(int nr, unsigned long clone_flags, struct task_struct * p, struct pt_regs * regs)
+void copy_thread(int nr, unsigned long clone_flags, unsigned long sp, struct task_struct * p, struct pt_regs * regs)
 {
 	struct pt_regs * childregs;
 
 	childregs = ((struct pt_regs *) (p->kernel_stack_page + PAGE_SIZE)) - 1;
 	p->tss.usp = (unsigned long) childregs;
 	*childregs = *regs;
+	childregs->sp = sp;
 	p->tss.psr = regs->psr; /* for condition codes */
-	return clone_flags;
+	return;
 }
 
 /*
@@ -86,24 +96,17 @@ void dump_thread(struct pt_regs * regs, struct user * dump)
   return; /* solaris does this enough */
 }
 
+asmlinkage int sys_fork(struct pt_regs regs)
+{
+	return do_fork(COPYVM | SIGCHLD, regs.sp, &regs);
+}
+
 /*
  * sys_execve() executes a new program.
  */
 asmlinkage int sys_execve(struct pt_regs regs)
 {
-	int error;
-	char * filename;
-
-	error = do_execve(filename, (char **) regs.u_regs[0], 
-			  (char **) regs.u_regs[1], &regs);
-	putname(filename);
-	return error;
+  halt();
+  return 0;
 }
 
-/*
- * Bogon bios32 stuff...
- */
-unsigned long bios32_init(unsigned long memory_start, unsigned long memory_end)
-{
-  return memory_start;
-}

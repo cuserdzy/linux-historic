@@ -21,9 +21,23 @@
 #include <linux/a.out.h>
 
 #include <asm/segment.h>
+#include <asm/pgtable.h>
 #include <asm/system.h>
+#include <asm/io.h>
 
 asmlinkage void ret_from_sys_call(void) __asm__("ret_from_sys_call");
+
+static int hlt_counter=0;
+
+void disable_hlt(void)
+{
+	hlt_counter++;
+}
+
+void enable_hlt(void)
+{
+	hlt_counter--;
+}
 
 /*
  * The idle loop on a i386..
@@ -37,24 +51,66 @@ asmlinkage int sys_idle(void)
 
 	/* Map out the low memory: it's no longer needed */
 	for (i = 0 ; i < 768 ; i++)
-		swapper_pg_dir[i] = 0;
+		pgd_clear(swapper_pg_dir + i);
 
 	/* endless idle loop with no priority at all */
 	current->counter = -100;
 	for (;;) {
-		if (hlt_works_ok && !need_resched)
+		if (hlt_works_ok && !hlt_counter && !need_resched)
 			__asm__("hlt");
 		schedule();
 	}
 }
 
 /*
- * Do necessary setup to start up a newly executed thread.
+ * This routine reboots the machine by asking the keyboard
+ * controller to pulse the reset-line low. We try that for a while,
+ * and if it doesn't work, we do some other stupid things.
  */
-void start_thread(struct pt_regs * regs, unsigned long eip, unsigned long esp)
+static long no_idt[2] = {0, 0};
+
+static inline void kb_wait(void)
 {
-	regs->eip = eip;
-	regs->esp = esp;
+	int i;
+
+	for (i=0; i<0x10000; i++)
+		if ((inb_p(0x64) & 0x02) == 0)
+			break;
+}
+
+void hard_reset_now(void)
+{
+	int i, j;
+
+	sti();
+/* rebooting needs to touch the page at absolute addr 0 */
+	pg0[0] = 7;
+	*((unsigned short *)0x472) = 0x1234;
+	for (;;) {
+		for (i=0; i<100; i++) {
+			kb_wait();
+			for(j = 0; j < 100000 ; j++)
+				/* nothing */;
+			outb(0xfe,0x64);	 /* pulse reset low */
+		}
+		__asm__ __volatile__("\tlidt %0": "=m" (no_idt));
+	}
+}
+
+void show_regs(struct pt_regs * regs)
+{
+	printk("\n");
+	printk("EIP: %04x:%08lx",0xffff & regs->cs,regs->eip);
+	if (regs->cs & 3)
+		printk(" ESP: %04x:%08lx",0xffff & regs->ss,regs->esp);
+	printk(" EFLAGS: %08lx\n",regs->eflags);
+	printk("EAX: %08lx EBX: %08lx ECX: %08lx EDX: %08lx\n",
+		regs->eax,regs->ebx,regs->ecx,regs->edx);
+	printk("ESI: %08lx EDI: %08lx EBP: %08lx",
+		regs->esi, regs->edi, regs->ebp);
+	printk(" DS: %04x ES: %04x FS: %04x GS: %04x\n",
+		0xffff & regs->ds,0xffff & regs->es,
+		0xffff & regs->fs,0xffff & regs->gs);
 }
 
 /*
@@ -94,9 +150,8 @@ void flush_thread(void)
 		current->debugreg[i] = 0;
 }
 
-#define IS_CLONE (regs->orig_eax == __NR_clone)
-
-unsigned long copy_thread(int nr, unsigned long clone_flags, struct task_struct * p, struct pt_regs * regs)
+void copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
+	struct task_struct * p, struct pt_regs * regs)
 {
 	int i;
 	struct pt_regs * childregs;
@@ -115,15 +170,9 @@ unsigned long copy_thread(int nr, unsigned long clone_flags, struct task_struct 
 	p->tss.eip = (unsigned long) ret_from_sys_call;
 	*childregs = *regs;
 	childregs->eax = 0;
+	childregs->esp = esp;
 	p->tss.back_link = 0;
 	p->tss.eflags = regs->eflags & 0xffffcfff;	/* iopl is always 0 for a new process */
-	if (IS_CLONE) {
-		if (regs->ebx)
-			childregs->esp = regs->ebx;
-		clone_flags = regs->ecx;
-		if (childregs->esp == regs->esp)
-			clone_flags |= COPYVM;
-	}
 	p->tss.ldt = _LDT(nr);
 	if (p->ldt) {
 		p->ldt = (struct desc_struct*) vmalloc(LDT_ENTRIES*LDT_ENTRY_SIZE);
@@ -140,7 +189,6 @@ unsigned long copy_thread(int nr, unsigned long clone_flags, struct task_struct 
 		p->tss.io_bitmap[i] = ~0;
 	if (last_task_used_math == current)
 		__asm__("clts ; fnsave %0 ; frstor %0":"=m" (p->tss.i387));
-	return clone_flags;
 }
 
 /*
@@ -180,6 +228,29 @@ void dump_thread(struct pt_regs * regs, struct user * dump)
 		   convert it into standard 387 format first.. */
 		dump->u_fpvalid = 0;
 	}
+}
+
+asmlinkage int sys_fork(struct pt_regs regs)
+{
+	return do_fork(COPYVM | SIGCHLD, regs.esp, &regs);
+}
+
+asmlinkage int sys_clone(struct pt_regs regs)
+{
+#ifdef CLONE_ACTUALLY_WORKS_OK
+	unsigned long clone_flags;
+	unsigned long newsp;
+
+	newsp = regs.ebx;
+	clone_flags = regs.ecx;
+	if (!newsp)
+		newsp = regs.esp;
+	if (newsp == regs.esp)
+		clone_flags |= COPYVM;
+	return do_fork(clone_flags, newsp, &regs);
+#else
+	return -ENOSYS;
+#endif
 }
 
 /*

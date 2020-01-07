@@ -16,10 +16,11 @@
 #include <linux/signal.h>
 #include <linux/tty.h>
 #include <linux/time.h>
+#include <linux/mm.h>
 
 #include <asm/segment.h>
 
-extern void fcntl_remove_locks(struct task_struct *, struct file *, unsigned int fd);
+extern void fcntl_remove_locks(struct task_struct *, struct file *);
 
 asmlinkage int sys_ustat(int dev, struct ustat * ubuf)
 {
@@ -410,10 +411,10 @@ int do_open(const char * filename,int flags,int mode)
 	struct file * f;
 	int flag,error,fd;
 
-	for(fd=0 ; fd<NR_OPEN ; fd++)
+	for(fd=0; fd<NR_OPEN && fd<current->rlim[RLIMIT_NOFILE].rlim_cur; fd++)
 		if (!current->files->fd[fd])
 			break;
-	if (fd>=NR_OPEN)
+	if (fd>=NR_OPEN || fd>=current->rlim[RLIMIT_NOFILE].rlim_cur)
 		return -EMFILE;
 	FD_CLR(fd,&current->files->close_on_exec);
 	f = get_empty_filp();
@@ -476,7 +477,7 @@ asmlinkage int sys_creat(const char * pathname, int mode)
 	return sys_open(pathname, O_CREAT | O_WRONLY | O_TRUNC, mode);
 }
 
-int close_fp(struct file *filp, unsigned int fd)
+int close_fp(struct file *filp)
 {
 	struct inode *inode;
 
@@ -486,7 +487,7 @@ int close_fp(struct file *filp, unsigned int fd)
 	}
 	inode = filp->f_inode;
 	if (inode)
-		fcntl_remove_locks(current, filp, fd);
+		fcntl_remove_locks(current, filp);
 	if (filp->f_count > 1) {
 		filp->f_count--;
 		return 0;
@@ -510,7 +511,7 @@ asmlinkage int sys_close(unsigned int fd)
 	if (!(filp = current->files->fd[fd]))
 		return -EBADF;
 	current->files->fd[fd] = NULL;
-	return (close_fp (filp, fd));
+	return (close_fp (filp));
 }
 
 /*

@@ -165,6 +165,7 @@
 #include <linux/bios32.h>
 #include <linux/pci.h>
 #include <linux/string.h>
+#include <linux/mm.h>
 #include "../block/blk.h"
 #include "scsi.h"
 #include "hosts.h"
@@ -2809,7 +2810,7 @@ static void intr_scsi (struct Scsi_Host *host, struct NCR53c7x0_cmd *cmd) {
 
     /* 250ms selection timeout */
     if ((((hostdata->chip / 100) == 8) && (sist1 & SIST1_800_STO)) || 
-        (((hostdata->chip / 100) != 8) && sstat0_sist0 && SSTAT0_700_STO)) {
+        (((hostdata->chip / 100) != 8) && (sstat0_sist0 & SSTAT0_700_STO))) {
 	fatal = 1;
 	if (hostdata->options & OPTION_DEBUG_INTR) {
 	    printk ("scsi%d : Selection Timeout\n", host->host_no);

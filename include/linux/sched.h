@@ -17,6 +17,7 @@ extern unsigned long event;
 #include <linux/binfmts.h>
 #include <linux/personality.h>
 #include <linux/tasks.h>
+#include <linux/kernel.h>
 #include <asm/system.h>
 
 /*
@@ -51,7 +52,6 @@ extern unsigned long avenrun[];		/* Load averages */
 
 #include <linux/head.h>
 #include <linux/fs.h>
-#include <linux/mm.h>
 #include <linux/signal.h>
 #include <linux/time.h>
 #include <linux/param.h>
@@ -120,9 +120,8 @@ struct mm_struct {
 	unsigned long dec_flt;		/* page fault count of the last time */
 	unsigned long swap_cnt;		/* number of pages to swap on next pass */
 	struct vm_area_struct * mmap;
+	struct vm_area_struct * mmap_avl;
 };
-
-#define INIT_MMAP { &init_task, 0, 0x40000000, PAGE_SHARED, }
 
 #define INIT_MM { \
 		0, \
@@ -133,7 +132,7 @@ struct mm_struct {
 /* ?_flt */	0, 0, 0, 0, \
 		0, \
 /* swap */	0, 0, 0, 0, \
-		&init_mmap }
+		&init_mmap, &init_mmap }
 
 struct task_struct {
 /* these are hardcoded - don't touch */
@@ -179,6 +178,7 @@ struct task_struct {
 	struct tty_struct *tty; /* NULL if no tty */
 /* ipc stuff */
 	struct sem_undo *semundo;
+	struct sem_queue *semsleeping;
 /* ldt for this task - used by Wine.  If NULL, default_ldt is used */
 	struct desc_struct *ldt;
 /* tss for this task */
@@ -226,11 +226,12 @@ struct task_struct {
 /* timeout */	0,0,0,0,0,0,0,0,0,0,0,0, \
 /* rlimits */   { {LONG_MAX, LONG_MAX}, {LONG_MAX, LONG_MAX},  \
 		  {LONG_MAX, LONG_MAX}, {LONG_MAX, LONG_MAX},  \
-		  {       0, LONG_MAX}, {LONG_MAX, LONG_MAX}}, \
+		  {       0, LONG_MAX}, {LONG_MAX, LONG_MAX}, \
+		  {MAX_TASKS_PER_USER, MAX_TASKS_PER_USER}, {NR_OPEN, NR_OPEN}}, \
 /* math */	0, \
 /* comm */	"swapper", \
 /* fs info */	0,NULL, \
-/* ipc */	NULL, \
+/* ipc */	NULL, NULL, \
 /* ldt */	NULL, \
 /* tss */	INIT_TSS, \
 /* fs */	{ INIT_FS }, \
@@ -265,12 +266,12 @@ extern int request_irq(unsigned int irq,void (*handler)(int, struct pt_regs *),
 	unsigned long flags, const char *device);
 extern void free_irq(unsigned int irq);
 
-extern unsigned long copy_thread(int, unsigned long, struct task_struct *, struct pt_regs *);
-extern void start_thread(struct pt_regs *, unsigned long pc, unsigned long sp);
+extern void copy_thread(int, unsigned long, unsigned long, struct task_struct *, struct pt_regs *);
 extern void flush_thread(void);
 extern void exit_thread(void);
 
 extern int do_execve(char *, char **, char **, struct pt_regs *);
+extern int do_fork(unsigned long, unsigned long, struct pt_regs *);
 asmlinkage int do_signal(unsigned long, struct pt_regs *);
 
 /*

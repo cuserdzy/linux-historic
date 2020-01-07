@@ -25,7 +25,7 @@
 /* Configuration method #1 */
 #define PCI_CONFIG1_ADDRESS_REG  0xcf8
 #define PCI_CONFIG1_ENABLE 0x80000000
-#define PCI_CONFIG1_TUPPLE (bus, device, function, register)	\
+#define PCI_CONFIG1_TUPPLE(bus, device, function, register)	\
         (PCI_CONFIG1_ENABLE | ((bus) << 16) & 0xff0000 |	\
         ((device) << 11) & 0xf800 | ((function) << 8) & 0x700 | \
         ((register) << 2) & 0xfc)
@@ -34,7 +34,7 @@
 /* Configuration method #2, deprecated */
 #define PCI_CONFIG2_ENABLE_REG	0xcf8
 #define PCI_CONFIG2_ENABLE	0xf0
-#define PCI_CONFIG2_TUPPLE (function)				\
+#define PCI_CONFIG2_TUPPLE(function)				\
 	(PCI_CONFIG2_ENABLE | ((function) << 1) & 0xe)
 #define PCI_CONFIG2_FORWARD_REG	0xcfa
 
@@ -208,7 +208,8 @@ struct pci_class_type {
 #define PCI_DEVICE_ID_S3_864_1		0x88c0
 #define PCI_DEVICE_ID_S3_864_2		0x88c1
 #define PCI_DEVICE_ID_S3_928		0x88b0
-#define PCI_DEVICE_ID_S3_964		0x88d0
+#define PCI_DEVICE_ID_S3_964_1		0x88d0
+#define PCI_DEVICE_ID_S3_964_2		0x88d1
 #define PCI_DEVICE_ID_S3_811		0x8811
 
 #define PCI_VENDOR_ID_OPTI		0x1045
@@ -225,8 +226,11 @@ struct pci_class_type {
 #define PCI_DEVICE_ID_DEC_TULIP		0x0002
 #define PCI_DEVICE_ID_DEC_TULIP_FAST	0x0009
 #define PCI_DEVICE_ID_DEC_FDDI		0x000F
+#define PCI_DEVICE_ID_DEC_BRD		0x0001
 
 #define PCI_VENDOR_ID_MATROX		0x102B
+#define PCI_DEVICE_ID_MATROX_MGA_2	0x0518
+#define PCI_DEVICE_ID_MATROX_MGA_IMP	0x0d10
 
 #define PCI_VENDOR_ID_INTEL		0x8086
 #define PCI_DEVICE_ID_INTEL_82378	0x0484
@@ -252,17 +256,23 @@ struct pci_class_type {
 #define PCI_DEVICE_ID_CIRRUS_6729	0x1100
 
 #define PCI_VENDOR_ID_BUSLOGIC		0x104B
-#define PCI_DEVICE_ID_BUSLOGIC_946C	0x0140
+#define PCI_DEVICE_ID_BUSLOGIC_946C	0x1040
 
 #define PCI_VENDOR_ID_N9		0x105D
 #define PCI_DEVICE_ID_N9_I128		0x2309
 
-#define PCI_VENDOR_ID_ALI		0x1025
-#define PCI_DEVICE_ID_ALI_M1435		0x1435
+#define PCI_VENDOR_ID_AI		0x1025
+#define PCI_DEVICE_ID_AI_M1435		0x1435
+
+#define PCI_VENDOR_ID_AL		0x10b9
+#define PCI_DEVICE_ID_AL_M1449		0x1449
+#define PCI_DEVICE_ID_AL_M1451		0x1451
 
 #define PCI_VENDOR_ID_TSENG		0x100c
 #define PCI_DEVICE_ID_TSENG_W32P_2	0x3202
-#define PCI_DEVICE_ID_TSENG_W32P_5	0x3205
+#define PCI_DEVICE_ID_TSENG_W32P_b	0x3205
+#define PCI_DEVICE_ID_TSENG_W32P_c	0x3206
+#define PCI_DEVICE_ID_TSENG_W32P_d	0x3207
 
 #define PCI_VENDOR_ID_CMD		0x1095
 #define PCI_DEVICE_ID_CMD_640		0x0640
@@ -272,18 +282,49 @@ struct pci_class_type {
 
 #define PCI_VENDOR_ID_AMD		0x1022
 #define PCI_DEVICE_ID_AMD_LANCE		0x2000
+#define PCI_DEVICE_ID_AMD_SCSI		0x2020
 
 #define PCI_VENDOR_ID_VLSI		0x1004
 #define PCI_DEVICE_ID_VLSI_82C593	0x0006
 
-#define PCI_VENDOR_ID_AL		0x1005
-#define PCI_DEVICE_ID_AL_2301		0x2301
+#define PCI_VENDOR_ID_ADL		0x1005
+#define PCI_DEVICE_ID_ADL_2301		0x2301
 
 #define PCI_VENDOR_ID_SYMPHONY		0x1c1c
 #define PCI_DEVICE_ID_SYMPHONY_101	0x0001
 
 #define PCI_VENDOR_ID_TRIDENT		0x1023
 #define PCI_DEVICE_ID_TRIDENT_9420	0x9420
+#define PCI_DEVICE_ID_TRIDENT_9440	0x9440
+
+#define PCI_VENDOR_ID_CONTAQ		0x1080
+#define PCI_DEVICE_ID_CONTAQ_82C599	0x0600
+
+#define PCI_VENDOR_ID_NS		0x100b
+#define PCI_DEVICE_ID_NS_87410		0xd001
+
+#define PCI_VENDOR_ID_VIA		0x1106
+#define PCI_DEVICE_ID_VIA_82C505	0x0505
+
+#define PCI_VENDOR_ID_SI		0x1039
+#define PCI_DEVICE_ID_SI_496		0x0496
+#define PCI_DEVICE_ID_SI_501		0x0406
+#define PCI_DEVICE_ID_SI_503		0x0008
+
+#define PCI_VENDOR_ID_LEADTEK		0x107d
+#define PCI_DEVICE_ID_LEADTEK_805	0x0000
+
+#define PCI_VENDOR_ID_IMS		0x10e0
+#define PCI_DEVICE_ID_IMS_8849		0x8849
+
+#define PCI_VENDOR_ID_ZEINET		0x1193
+#define PCI_DEVICE_ID_ZEINET_1221	0x0001
+
+#define PCI_VENDOR_ID_EF		0x111a
+#define PCI_DEVICE_ID_EF_ATM		0x0000
+
+#define PCI_VENDOR_ID_HER		0xedd8
+#define PCI_DEVICE_ID_HER_STING		0xa091
 
 struct pci_vendor_type {
 	unsigned short vendor_id;
@@ -291,7 +332,7 @@ struct pci_vendor_type {
 };
 
 
-#define PCI_VENDOR_NUM 24
+#define PCI_VENDOR_NUM 34
 #define PCI_VENDOR_TYPE { \
 	{PCI_VENDOR_ID_NCR,		"NCR"}, \
 	{PCI_VENDOR_ID_ADAPTEC,		"Adaptec"}, \
@@ -307,16 +348,26 @@ struct pci_vendor_type {
 	{PCI_VENDOR_ID_WEITEK,		"Weitek"}, \
 	{PCI_VENDOR_ID_CIRRUS,		"Cirrus Logic"}, \
 	{PCI_VENDOR_ID_BUSLOGIC,	"Bus Logic"}, \
-	{PCI_VENDOR_ID_N9,		"Number #9"}, \
-	{PCI_VENDOR_ID_ALI,		"ALI"}, \
+	{PCI_VENDOR_ID_N9,		"Number Nine"}, \
+	{PCI_VENDOR_ID_AI,		"Acer Incorporated"}, \
+	{PCI_VENDOR_ID_AL,		"Acer Labs"}, \
 	{PCI_VENDOR_ID_TSENG,		"Tseng'Lab"}, \
 	{PCI_VENDOR_ID_CMD,		"CMD"}, \
 	{PCI_VENDOR_ID_VISION,		"Vision"}, \
 	{PCI_VENDOR_ID_AMD,		"AMD"}, \
 	{PCI_VENDOR_ID_VLSI,		"VLSI"}, \
-	{PCI_VENDOR_ID_AL,		"Advance Logic"}, \
+	{PCI_VENDOR_ID_ADL,		"Advance Logic"}, \
 	{PCI_VENDOR_ID_SYMPHONY,	"Symphony"}, \
-	{PCI_VENDOR_ID_TRIDENT,		"Trident"} \
+	{PCI_VENDOR_ID_TRIDENT,		"Trident"}, \
+	{PCI_VENDOR_ID_CONTAQ,		"Contaq"}, \
+	{PCI_VENDOR_ID_NS,		"NS"}, \
+	{PCI_VENDOR_ID_VIA,		"VIA Technologies"}, \
+	{PCI_VENDOR_ID_SI,		"Silicon Integrated"}, \
+	{PCI_VENDOR_ID_LEADTEK,		"Leadtek Research"}, \
+	{PCI_VENDOR_ID_IMS,		"IMS"}, \
+	{PCI_VENDOR_ID_ZEINET,		"ZeiNet"}, \
+	{PCI_VENDOR_ID_EF,		"Efficient Networks"}, \
+	{PCI_VENDOR_ID_HER,		"Hercules"} \
 }
 
 
@@ -335,7 +386,7 @@ struct pci_device_type {
 	char *device_name;
 };
 
-#define PCI_DEVICE_NUM 45
+#define PCI_DEVICE_NUM 66
 #define PCI_DEVICE_TYPE { \
 	{0xff,	PCI_VENDOR_ID_NCR,	PCI_DEVICE_ID_NCR_53C810,	"53c810"}, \
 	{0xff,	PCI_VENDOR_ID_NCR,	PCI_DEVICE_ID_NCR_53C815,	"53c815"}, \
@@ -346,8 +397,9 @@ struct pci_device_type {
 	{0xff,	PCI_VENDOR_ID_S3,	PCI_DEVICE_ID_S3_864_1,		"Vision 864-P"}, \
 	{0xff,	PCI_VENDOR_ID_S3,	PCI_DEVICE_ID_S3_864_2,		"Vision 864-P"}, \
 	{0xff,	PCI_VENDOR_ID_S3,	PCI_DEVICE_ID_S3_928,		"Vision 928-P"}, \
-	{0xff,	PCI_VENDOR_ID_S3,	PCI_DEVICE_ID_S3_964,		"Vision 964-P"}, \
-	{0xff,	PCI_VENDOR_ID_S3,	PCI_DEVICE_ID_S3_811,		"Trio64"}, \
+	{0xff,	PCI_VENDOR_ID_S3,	PCI_DEVICE_ID_S3_964_1,		"Vision 964-P"}, \
+	{0xff,	PCI_VENDOR_ID_S3,	PCI_DEVICE_ID_S3_964_2,		"Vision 964-P"}, \
+	{0xff,	PCI_VENDOR_ID_S3,	PCI_DEVICE_ID_S3_811,		"Trio32/Trio64"}, \
 	{0x02,	PCI_VENDOR_ID_OPTI,	PCI_DEVICE_ID_OPTI_82C822,	"82C822"}, \
 	{0xff,	PCI_VENDOR_ID_OPTI,	PCI_DEVICE_ID_OPTI_82C621,	"82C621"}, \
 	{0xff,	PCI_VENDOR_ID_UMC,	PCI_DEVICE_ID_UMC_UM8881F,	"UM8881F"}, \
@@ -357,10 +409,13 @@ struct pci_device_type {
 	{0xff,	PCI_VENDOR_ID_DEC,	PCI_DEVICE_ID_DEC_TULIP,	"DC21040"}, \
 	{0xff,	PCI_VENDOR_ID_DEC,	PCI_DEVICE_ID_DEC_TULIP_FAST,	"DC21040"}, \
 	{0xff,	PCI_VENDOR_ID_DEC,	PCI_DEVICE_ID_DEC_FDDI,		"DEFPA"}, \
+	{0xff,	PCI_VENDOR_ID_DEC,	PCI_DEVICE_ID_DEC_BRD,		"DC21050"}, \
+	{0xff,	PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_MGA_2,	"Atlas PX2085"}, \
+	{0xff,	PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_MGA_IMP,	"MGA Impression"}, \
 	{0xff,	PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82378,	"82378IB"}, \
 	{0x00,	PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82424,	"82424ZX Saturn"}, \
 	{0xff,	PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82375,	"82375EB"}, \
-	{0x00,	PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82434,	"82434LX Mercury/Netpune"}, \
+	{0x00,	PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82434,	"82434LX Mercury/Neptune"}, \
 	{0xff,	PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82430,	"82430ZX Aries"}, \
 	{0xff,	PCI_VENDOR_ID_SMC,	PCI_DEVICE_ID_SMC_37C665,	"FDC 37C665"}, \
 	{0xff,	PCI_VENDOR_ID_ATI,	PCI_DEVICE_ID_ATI_M32,		"Mach 32"}, \
@@ -372,20 +427,37 @@ struct pci_device_type {
 	{0xff,	PCI_VENDOR_ID_CIRRUS,	PCI_DEVICE_ID_CIRRUS_6729,	"CL 6729"}, \
 	{0xff,	PCI_VENDOR_ID_BUSLOGIC,PCI_DEVICE_ID_BUSLOGIC_946C,	"946C"}, \
 	{0xff,	PCI_VENDOR_ID_N9,	PCI_DEVICE_ID_N9_I128,		"Imagine 128"}, \
-	{0xff,	PCI_VENDOR_ID_ALI,	PCI_DEVICE_ID_ALI_M1435,	"M1435"}, \
+	{0xff,	PCI_VENDOR_ID_AI,	PCI_DEVICE_ID_AI_M1435,		"M1435"}, \
+	{0xff,	PCI_VENDOR_ID_AL,	PCI_DEVICE_ID_AL_M1449,		"M1449"}, \
+	{0xff,	PCI_VENDOR_ID_AL,	PCI_DEVICE_ID_AL_M1451,		"M1451"}, \
 	{0xff,	PCI_VENDOR_ID_TSENG,	PCI_DEVICE_ID_TSENG_W32P_2,	"ET4000W32P"}, \
-	{0xff,	PCI_VENDOR_ID_TSENG,	PCI_DEVICE_ID_TSENG_W32P_5,	"ET4000W32P"}, \
+	{0xff,	PCI_VENDOR_ID_TSENG,	PCI_DEVICE_ID_TSENG_W32P_b,	"ET4000W32P rev B"}, \
+	{0xff,	PCI_VENDOR_ID_TSENG,	PCI_DEVICE_ID_TSENG_W32P_c,	"ET4000W32P rev C"}, \
+	{0xff,	PCI_VENDOR_ID_TSENG,	PCI_DEVICE_ID_TSENG_W32P_d,	"ET4000W32P rev D"}, \
 	{0xff,	PCI_VENDOR_ID_CMD,	PCI_DEVICE_ID_CMD_640,		"640A"}, \
 	{0xff,	PCI_VENDOR_ID_VISION,	PCI_DEVICE_ID_VISION_QD8500,	"QD-8500PCI"}, \
 	{0xff,	PCI_VENDOR_ID_AMD,	PCI_DEVICE_ID_AMD_LANCE,	"79C970"}, \
+	{0xff,	PCI_VENDOR_ID_AMD,	PCI_DEVICE_ID_AMD_SCSI,		"53C974"}, \
 	{0xff,	PCI_VENDOR_ID_VLSI,	PCI_DEVICE_ID_VLSI_82C593,	"82C593-FC1"}, \
-	{0xff,	PCI_VENDOR_ID_AL,	PCI_DEVICE_ID_AL_2301,		"2301"}, \
+	{0xff,	PCI_VENDOR_ID_ADL,	PCI_DEVICE_ID_ADL_2301,		"2301"}, \
 	{0xff,	PCI_VENDOR_ID_SYMPHONY,	PCI_DEVICE_ID_SYMPHONY_101,	"82C101"}, \
-	{0xff,	PCI_VENDOR_ID_TRIDENT,	PCI_DEVICE_ID_TRIDENT_9420,	"TG 9420"} \
+	{0xff,	PCI_VENDOR_ID_TRIDENT,	PCI_DEVICE_ID_TRIDENT_9420,	"TG 9420"}, \
+	{0xff,	PCI_VENDOR_ID_TRIDENT,	PCI_DEVICE_ID_TRIDENT_9440,	"TG 9440"}, \
+	{0xff,	PCI_VENDOR_ID_CONTAQ,	PCI_DEVICE_ID_CONTAQ_82C599,	"82C599"}, \
+	{0xff,	PCI_VENDOR_ID_NS,	PCI_DEVICE_ID_NS_87410,		"87410"}, \
+	{0xff,	PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C505,	"VT 82C505"}, \
+	{0xff,	PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_496,		"85C496"}, \
+	{0xff,	PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_501,		"85C501"}, \
+	{0xff,	PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_503,		"85C503"}, \
+	{0xff,	PCI_VENDOR_ID_LEADTEK,	PCI_DEVICE_ID_LEADTEK_805,	"S3 805"}, \
+	{0xff,	PCI_VENDOR_ID_IMS,	PCI_DEVICE_ID_IMS_8849,		"8849"}, \
+	{0xff,	PCI_VENDOR_ID_ZEINET,	PCI_DEVICE_ID_ZEINET_1221,	"1221"}, \
+	{0xff,	PCI_VENDOR_ID_EF,	PCI_DEVICE_ID_EF_ATM,		"155P-MF1"}, \
+	{0xff,	PCI_VENDOR_ID_HER,	PCI_DEVICE_ID_HER_STING,	"Stingray"} \
 }
 
 /* An item of this structure has the following meaning	*/
-/* For each optimisation, the register adress, the mask	*/
+/* For each optimisation, the register address, the mask	*/
 /* and value to write to turn it on.			*/
 /* There are 5 optimizations for the moment :		*/
 /* Cache L2 write back best than write through		*/
@@ -414,7 +486,7 @@ struct optimisation_type {
 }
 
 struct bridge_mapping_type {
-	unsigned char	adress;
+	unsigned char	address;
 	unsigned char	mask;
 	unsigned char	value;
 };
@@ -430,7 +502,7 @@ struct bridge_mapping_type {
 /*	This is a dummy entry for my tests.	*/
 /*	I have this chipset and no docs....	*/   
 
-/* I'am gathering docs. If you can help......	*/
+/* I'm gathering docs. If you can help......	*/
 
 #define BRIDGE_MAPPING_NUM 3
 #define BRIDGE_MAPPING_TYPE { \
@@ -453,38 +525,6 @@ struct bridge_mapping_type {
 	{0x0	,0x0	,0x0	}  \
 }
 
+#include <linux/bios32.h>
 
-/* PCI BIOS */
-
-extern int pcibios_present (void);
-
-#define PCIBIOS_SUCCESSFUL		0x00
-#define PCIBIOS_FUNC_NOT_SUPPORTED	0x81
-#define PCIBIOS_BAD_VENDOR_ID		0x83
-#define PCIBIOS_DEVICE_NOT_FOUND	0x86
-#define PCIBIOS_BAD_REGISTER_NUMBER	0x87
-
-/*
- * The PCIBIOS calls all bit-field the device_function variable such that 
- * the bit fielding matches that of the bl register used in the actual
- * calls.
- */
-
-extern int pcibios_find_class (unsigned long class_code, unsigned short index, 
-    unsigned char *bus, unsigned char *device_fn);
-extern int pcibios_find_device (unsigned short vendor, unsigned short device_id, 
-    unsigned short index, unsigned char *bus, unsigned char *device_fn);
-extern int pcibios_read_config_byte (unsigned char bus,
-    unsigned char device_fn, unsigned char where, unsigned char *value);
-extern int pcibios_read_config_word (unsigned char bus,
-    unsigned char device_fn, unsigned char where, unsigned short *value);
-extern int pcibios_read_config_dword (unsigned char bus,
-    unsigned char device_fn, unsigned char where, unsigned long *value);
-extern char *pcibios_strerror (int error);
-extern int pcibios_write_config_byte (unsigned char bus,
-    unsigned char device_fn, unsigned char where, unsigned char value);
-extern int pcibios_write_config_word (unsigned char bus,
-    unsigned char device_fn, unsigned char where, unsigned short value);
-extern pcibios_write_config_dword (unsigned char bus,
-    unsigned char device_fn, unsigned char where, unsigned long value);
 #endif /* ndef PCI_H */

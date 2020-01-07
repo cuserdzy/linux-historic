@@ -1,5 +1,5 @@
 #
-# Makefile for the linux i386-specific parts of the memory manager.
+# Makefile for the linux mips-specific parts of the memory manager.
 #
 # Note! Dependencies are done automagically by 'make dep', which also
 # removes any old dependencies. DON'T put your own dependencies here
@@ -14,7 +14,7 @@
 .c.s:
 	$(CC) $(CFLAGS) -S $<
 
-OBJS	= fault.o
+OBJS	= fault.o init.o
 
 mm.o: $(OBJS)
 	$(LD) -r -o mm.o $(OBJS)
@@ -22,7 +22,7 @@ mm.o: $(OBJS)
 modules:
 
 dep:
-	$(CPP) $(CFLAGS) -M *.c > .depend
+	$(CPP) -M *.c > .depend
 
 #
 # include a dependency file if one exists

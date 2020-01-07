@@ -75,6 +75,10 @@
  *    unfinished, questionable, or wrong.
  */
 
+#ifdef MODULE
+#include <linux/module.h>
+#endif
+
 #include <linux/string.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -1408,10 +1412,7 @@ int buslogic_abort(Scsi_Cmnd *scpnt)
 			" - attempting to recover...\n",
 			scpnt->host->irq);
 	{
-	    int intval[3];
-
-	    intval[0] = scpnt->host->irq;
-	    buslogic_interrupt((int)&intval[2]);
+	    buslogic_interrupt(scpnt->host->irq, NULL);
 	    return SCSI_ABORT_SUCCESS;
 	}
     }

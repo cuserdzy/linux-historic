@@ -68,7 +68,7 @@ __res; })
 static char * number(char * str, long num, int base, int size, int precision
 	,int type)
 {
-	char c,sign,tmp[36];
+	char c,sign,tmp[66];
 	const char *digits="0123456789abcdefghijklmnopqrstuvwxyz";
 	int i;
 
@@ -217,11 +217,8 @@ int vsprintf(char *buf, const char *fmt, va_list args)
 			s = va_arg(args, char *);
 			if (!s)
 				s = "<NULL>";
-			len = strlen(s);
-			if (precision < 0)
-				precision = len;
-			else if (len > precision)
-				len = precision;
+
+			len = strnlen(s, precision);
 
 			if (!(flags & LEFT))
 				while (len < field_width--)

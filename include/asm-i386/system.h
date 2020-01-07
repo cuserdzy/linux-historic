@@ -3,21 +3,6 @@
 
 #include <asm/segment.h>
 
-#define move_to_user_mode() \
-__asm__ __volatile__ ("movl %%esp,%%eax\n\t" \
-	"pushl %0\n\t" \
-	"pushl %%eax\n\t" \
-	"pushfl\n\t" \
-	"pushl %1\n\t" \
-	"pushl $1f\n\t" \
-	"iret\n" \
-	"1:\tmovl %0,%%eax\n\t" \
-	"mov %%ax,%%ds\n\t" \
-	"mov %%ax,%%es\n\t" \
-	"mov %%ax,%%fs\n\t" \
-	"mov %%ax,%%gs" \
-	: /* no outputs */ :"i" (USER_DS), "i" (USER_CS):"ax")
-
 /*
  * Entry into gdt where to find first TSS. GDT layout:
  *   0 - nul
@@ -248,5 +233,12 @@ __asm__ __volatile__ ("movw $" #limit ",%1\n\t" \
  * something other than this.
  */
 extern struct desc_struct default_ldt;
+
+/*
+ * disable hlt during certain critical i/o operations
+ */
+#define HAVE_DISABLE_HLT
+void disable_hlt(void);
+void enable_hlt(void);
 
 #endif

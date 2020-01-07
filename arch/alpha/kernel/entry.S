@@ -63,31 +63,155 @@
 .text
 .set noat
 
-.align 5
+.align 3
 .globl	entInt
 .ent	entInt
 entInt:
 	SAVE_ALL
-	bis	$30,$30,$19
+/* start atomic operation with respect to software interrupts */
+	lda	$0,intr_count
+	ldq	$1,0($0)
+	addq	$1,1,$1
+	stq	$1,0($0)
+/* set up the arguments to the C interrupt handler */
 	lda	$27,do_entInt
 	jsr	$26,($27),do_entInt
+/* ok, check if we need to do software interrupts */
+1:	lda	$0,intr_count
+	ldq	$1,0($0)
+	subq	$1,1,$1
+	bne	$1,2f		/* interrupt within interrupt: return now */
+	lda	$2,bh_active
+	ldq	$3,0($2)
+	lda	$2,bh_mask
+	ldq	$2,0($2)
+	and	$2,$3,$2
+	bne	$2,3f
+2:	stq	$1,0($0)
 	RESTORE_ALL
 	rti
+.align 3
+3:	lda	$27,do_bottom_half
+	jsr	$26,($27),do_bottom_half
+	br	$31,1b
 .end entInt
 
-.align 5
+.align 3
 .globl	entMM
 .ent	entMM
 entMM:
 	SAVE_ALL
-	bis	$30,$30,$19
 	lda	$27,do_page_fault
 	jsr	$26,($27),do_page_fault
 	RESTORE_ALL
 	rti
 .end entMM
 
-	.align 5
+.align 3
+.globl	entArith
+.ent	entArith
+entArith:
+	SAVE_ALL
+	lda	$27,do_entArith
+	jsr	$26,($27),do_entArith
+	RESTORE_ALL
+	rti
+.end entArith
+
+.align 3
+.globl	entIF
+.ent	entIF
+entIF:
+	SAVE_ALL
+	lda	$27,do_entIF
+	jsr	$26,($27),do_entIF
+	RESTORE_ALL
+	rti
+.end entIF
+
+.align 3
+.globl	entUna
+.ent	entUna
+entUna:
+	SAVE_ALL
+	lda	$27,do_entUna
+	jsr	$26,($27),do_entUna
+	RESTORE_ALL
+	rti
+.end entUna
+
+/*
+ * Fork() is one of the special system calls: it needs to
+ * save the callee-saved regs so that the regs can be found
+ * for the new process.. We save them in the "context switch"
+ * stack format (see arch/alpha/kernel/process.c).
+ *
+ * Also, for the kernel fork, we need to fake the system call
+ * stack buildup, as we can't do system calls from kernel space.
+ */
+.align 3
+.globl	kernel_fork
+.ent	kernel_fork
+kernel_fork:
+	subq $30,6*8,$30
+	stq $31,0($30)
+	stq $26,8($30)
+	stq $29,16($30)
+	stq $16,24($30)
+	stq $17,32($30)
+	stq $18,40($30)
+	SAVE_ALL
+	lda $27,sys_fork
+	jsr $26,($27),sys_fork
+	br ret_from_sys_call
+.end	kernel_fork
+
+.align 3
+.globl	sys_fork
+.ent	sys_fork
+sys_fork:
+	subq $30,64,$30
+	stq  $9,0($30)
+	stq $10,8($30)
+	stq $11,16($30)
+	stq $12,24($30)
+	stq $13,32($30)
+	stq $14,40($30)
+	stq $15,48($30)
+	stq $26,56($30)
+
+	bis $30,$30,$16
+	lda $27,alpha_fork
+	jsr $26,($27),alpha_fork
+	
+	ldq  $9,0($30)
+	ldq $10,8($30)
+	ldq $11,16($30)
+	ldq $12,24($30)
+	ldq $13,32($30)
+	ldq $14,40($30)
+	ldq $15,48($30)
+	ldq $26,56($30)
+	ldq $0,64($30)
+	addq $30,64,$30
+	ret $31,($26),1
+.end	sys_fork
+
+.align 3
+.globl	entSys
+.globl	ret_from_sys_call
+.ent	entSys
+entSys:
+	SAVE_ALL
+	lda	$27,do_entSys
+	jsr	$26,($27),do_entSys
+	stq	$0,0($30)
+ret_from_sys_call:
+	RESTORE_ALL
+	rti
+.end entSys
+
+	.align 3
 	.globl sys_call_table
 sys_call_table:
 	.quad 0

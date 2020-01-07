@@ -1,3 +1,4 @@
+#define THREE_LEVEL
 /*
  *	linux/mm/mprotect.c
  *
@@ -15,41 +16,76 @@
 
 #include <asm/segment.h>
 #include <asm/system.h>
+#include <asm/pgtable.h>
 
-static void change_protection(unsigned long start, unsigned long end, int prot)
+static inline void change_pte_range(pmd_t * pmd, unsigned long address,
+	unsigned long size, pgprot_t newprot)
 {
-	unsigned long *page_table, *dir;
-	unsigned long page, offset;
-	int nr;
+	pte_t * pte;
+	unsigned long end;
 
-	dir = PAGE_DIR_OFFSET(current, start);
-	offset = (start >> PAGE_SHIFT) & (PTRS_PER_PAGE-1);
-	nr = (end - start) >> PAGE_SHIFT;
-	while (nr > 0) {
-		page = *dir;
-		dir++;
-		if (!(page & PAGE_PRESENT)) {
-			nr = nr - PTRS_PER_PAGE + offset;
-			offset = 0;
-			continue;
-		}
-		page_table = offset + (unsigned long *) (page & PAGE_MASK);
-		offset = PTRS_PER_PAGE - offset;
-		if (offset > nr)
-			offset = nr;
-		nr = nr - offset;
-		do {
-			page = *page_table;
-			if (page & PAGE_PRESENT)
-				*page_table = (page & PAGE_CHG_MASK) | prot;
-			++page_table;
-		} while (--offset);
+	if (pmd_none(*pmd))
+		return;
+	if (pmd_bad(*pmd)) {
+		printk("change_pte_range: bad pmd (%08lx)\n", pmd_val(*pmd));
+		pmd_clear(pmd);
+		return;
 	}
+	pte = pte_offset(pmd, address);
+	address &= ~PMD_MASK;
+	end = address + size;
+	if (end > PMD_SIZE)
+		end = PMD_SIZE;
+	do {
+		pte_t entry = *pte;
+		if (pte_present(entry))
+			*pte = pte_modify(entry, newprot);
+		address += PAGE_SIZE;
+		pte++;
+	} while (address < end);
+}
+
+static inline void change_pmd_range(pgd_t * pgd, unsigned long address,
+	unsigned long size, pgprot_t newprot)
+{
+	pmd_t * pmd;
+	unsigned long end;
+
+	if (pgd_none(*pgd))
+		return;
+	if (pgd_bad(*pgd)) {
+		printk("change_pmd_range: bad pgd (%08lx)\n", pgd_val(*pgd));
+		pgd_clear(pgd);
+		return;
+	}
+	pmd = pmd_offset(pgd, address);
+	address &= ~PGDIR_MASK;
+	end = address + size;
+	if (end > PGDIR_SIZE)
+		end = PGDIR_SIZE;
+	do {
+		change_pte_range(pmd, address, end - address, newprot);
+		address = (address + PMD_SIZE) & PMD_MASK;
+		pmd++;
+	} while (address < end);
+}
+
+static void change_protection(unsigned long start, unsigned long end, pgprot_t newprot)
+{
+	pgd_t *dir;
+
+	dir = pgd_offset(current, start);
+	while (start < end) {
+		change_pmd_range(dir, start, end - start, newprot);
+		start = (start + PGDIR_SIZE) & PGDIR_MASK;
+		dir++;
+	}
+	invalidate();
 	return;
 }
 
 static inline int mprotect_fixup_all(struct vm_area_struct * vma,
-	int newflags, int prot)
+	int newflags, pgprot_t prot)
 {
 	vma->vm_flags = newflags;
 	vma->vm_page_prot = prot;
@@ -58,7 +94,7 @@ static inline int mprotect_fixup_all(struct vm_area_struct * vma,
 
 static inline int mprotect_fixup_start(struct vm_area_struct * vma,
 	unsigned long end,
-	int newflags, int prot)
+	int newflags, pgprot_t prot)
 {
 	struct vm_area_struct * n;
 
@@ -81,7 +117,7 @@ static inline int mprotect_fixup_start(struct vm_area_struct * vma,
 
 static inline int mprotect_fixup_end(struct vm_area_struct * vma,
 	unsigned long start,
-	int newflags, int prot)
+	int newflags, pgprot_t prot)
 {
 	struct vm_area_struct * n;
 
@@ -104,7 +140,7 @@ static inline int mprotect_fixup_end(struct vm_area_struct * vma,
 
 static inline int mprotect_fixup_middle(struct vm_area_struct * vma,
 	unsigned long start, unsigned long end,
-	int newflags, int prot)
+	int newflags, pgprot_t prot)
 {
 	struct vm_area_struct * left, * right;
 
@@ -140,39 +176,32 @@ static inline int mprotect_fixup_middle(struct vm_area_struct * vma,
 static int mprotect_fixup(struct vm_area_struct * vma, 
 	unsigned long start, unsigned long end, unsigned int newflags)
 {
-	int prot, error;
+	pgprot_t newprot;
+	int error;
 
 	if (newflags == vma->vm_flags)
 		return 0;
-	prot = PAGE_PRESENT;
-	if (newflags & (VM_READ | VM_EXEC))
-		prot |= PAGE_READONLY;
-	if (newflags & VM_WRITE)
-		if (newflags & VM_SHARED)
-			prot |= PAGE_SHARED;
-		else
-			prot |= PAGE_COPY;
-
+	newprot = protection_map[newflags & 0xf];
 	if (start == vma->vm_start)
 		if (end == vma->vm_end)
-			error = mprotect_fixup_all(vma, newflags, prot);
+			error = mprotect_fixup_all(vma, newflags, newprot);
 		else
-			error = mprotect_fixup_start(vma, end, newflags, prot);
+			error = mprotect_fixup_start(vma, end, newflags, newprot);
 	else if (end == vma->vm_end)
-		error = mprotect_fixup_end(vma, start, newflags, prot);
+		error = mprotect_fixup_end(vma, start, newflags, newprot);
 	else
-		error = mprotect_fixup_middle(vma, start, end, newflags, prot);
+		error = mprotect_fixup_middle(vma, start, end, newflags, newprot);
 
 	if (error)
 		return error;
 
-	change_protection(start, end, prot);
+	change_protection(start, end, newprot);
 	return 0;
 }
 
 asmlinkage int sys_mprotect(unsigned long start, size_t len, unsigned long prot)
 {
-	unsigned long end, tmp;
+	unsigned long nstart, end, tmp;
 	struct vm_area_struct * vma, * next;
 	int error;
 
@@ -186,19 +215,14 @@ asmlinkage int sys_mprotect(unsigned long start, size_t len, unsigned long prot)
 		return -EINVAL;
 	if (end == start)
 		return 0;
-	for (vma = current->mm->mmap ; ; vma = vma->vm_next) {
-		if (!vma)
-			return -EFAULT;
-		if (vma->vm_end > start)
-			break;
-	}
-	if (vma->vm_start > start)
+	vma = find_vma(current, start);
+	if (!vma || vma->vm_start > start)
 		return -EFAULT;
 
-	for ( ; ; ) {
+	for (nstart = start ; ; ) {
 		unsigned int newflags;
 
-		/* Here we know that  vma->vm_start <= start < vma->vm_end. */
+		/* Here we know that  vma->vm_start <= nstart < vma->vm_end. */
 
 		newflags = prot | (vma->vm_flags & ~(PROT_READ | PROT_WRITE | PROT_EXEC));
 		if ((newflags & ~(newflags >> 4)) & 0xf) {
@@ -207,22 +231,22 @@ asmlinkage int sys_mprotect(unsigned long start, size_t len, unsigned long prot)
 		}
 
 		if (vma->vm_end >= end) {
-			error = mprotect_fixup(vma, start, end, newflags);
+			error = mprotect_fixup(vma, nstart, end, newflags);
 			break;
 		}
 
 		tmp = vma->vm_end;
 		next = vma->vm_next;
-		error = mprotect_fixup(vma, start, tmp, newflags);
+		error = mprotect_fixup(vma, nstart, tmp, newflags);
 		if (error)
 			break;
-		start = tmp;
+		nstart = tmp;
 		vma = next;
-		if (!vma || vma->vm_start != start) {
+		if (!vma || vma->vm_start != nstart) {
 			error = -EFAULT;
 			break;
 		}
 	}
-	merge_segments(current->mm->mmap);
+	merge_segments(current, start, end);
 	return error;
 }

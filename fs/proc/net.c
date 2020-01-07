@@ -19,6 +19,8 @@
  *	      Dusted off the code and added IPX. Fixed the 4K limit.
  * Erik Schoenfelder (schoenfr@ibr.cs.tu-bs.de)
  *	      /proc/net/snmp.
+ * Alan Cox (gw4pts@gw4pts.ampr.org) 1/95
+ *	      Added Appletalk slots
  *
  *  proc net directory handling functions
  */
@@ -30,7 +32,9 @@
 #include <linux/sched.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
+#include <linux/fcntl.h>
 #include <linux/config.h>
+#include <linux/mm.h>
 
 /* forward references */
 static int proc_readnet(struct inode * inode, struct file * file,
@@ -52,14 +56,23 @@ extern int dev_get_info(char *, char **, off_t, int);
 extern int rt_get_info(char *, char **, off_t, int);
 extern int snmp_get_info(char *, char **, off_t, int);
 extern int afinet_get_info(char *, char **, off_t, int);
-extern int ip_acct_procinfo(char *, char **, off_t, int);
-extern int ip_fw_blk_procinfo(char *, char **, off_t, int);
-extern int ip_fw_fwd_procinfo(char *, char **, off_t, int);
+#if	defined(CONFIG_WAVELAN)
+extern int wavelan_get_info(char *, char **, off_t, int);
+#endif	/* defined(CONFIG_WAVELAN) */
+#ifdef CONFIG_IP_ACCT
+extern int ip_acct_procinfo(char *, char **, off_t, int, int);
+#endif /* CONFIG_IP_ACCT */
+#ifdef CONFIG_IP_FIREWALL
+extern int ip_fw_blk_procinfo(char *, char **, off_t, int, int);
+extern int ip_fw_fwd_procinfo(char *, char **, off_t, int, int);
+#endif /* CONFIG_IP_FIREWALL */
+extern int ip_msqhst_procinfo(char *, char **, off_t, int);
 extern int ip_mc_procinfo(char *, char **, off_t, int);
 #endif /* CONFIG_INET */
 #ifdef CONFIG_IPX
 extern int ipx_get_info(char *, char **, off_t, int);
 extern int ipx_rt_get_info(char *, char **, off_t, int);
+extern int ipx_get_interface_info(char *, char **, off_t , int);
 #endif /* CONFIG_IPX */
 #ifdef CONFIG_AX25
 extern int ax25_get_info(char *, char **, off_t, int);
@@ -70,6 +83,11 @@ extern int nr_nodes_get_info(char *, char **, off_t, int);
 extern int nr_neigh_get_info(char *, char **, off_t, int);
 #endif /* CONFIG_NETROM */
 #endif /* CONFIG_AX25 */
+#ifdef CONFIG_ATALK
+extern int atalk_get_info(char *, char **, off_t, int);
+extern int atalk_rt_get_info(char *, char **, off_t, int);
+extern int atalk_if_get_info(char *, char **, off_t, int);
+#endif
 
 
 static struct file_operations proc_net_operations = {
@@ -127,15 +145,22 @@ static struct proc_dir_entry net_dir[] = {
 #endif
 #ifdef CONFIG_IP_FIREWALL
 	{ PROC_NET_IPFWFWD,	10, "ip_forward"},
-	{ PROC_NET_IPBLFWD,	8,  "ip_block"},
+	{ PROC_NET_IPFWBLK,	8,  "ip_block"},
+#endif
+#ifdef CONFIG_IP_MASQUERADE
+	{ PROC_NET_IPMSQHST,	13, "ip_masquerade"},
 #endif
 #ifdef CONFIG_IP_ACCT
 	{ PROC_NET_IPACCT,	7,  "ip_acct"},
 #endif
+#if	defined(CONFIG_WAVELAN)
+	{ PROC_NET_WAVELAN,	7, "wavelan" },
+#endif	/* defined(CONFIG_WAVELAN) */
 #endif	/* CONFIG_INET */
 #ifdef CONFIG_IPX
 	{ PROC_NET_IPX_ROUTE,	9, "ipx_route" },
 	{ PROC_NET_IPX,		3, "ipx" },
+	{ PROC_NET_IPX_INTERFACE, 13, "ipx_interface" },
 #endif /* CONFIG_IPX */
 #ifdef CONFIG_AX25
 	{ PROC_NET_AX25_ROUTE,	10, "ax25_route" },
@@ -146,6 +171,11 @@ static struct proc_dir_entry net_dir[] = {
 	{ PROC_NET_NR,		2, "nr" },
 #endif /* CONFIG_NETROM */
 #endif /* CONFIG_AX25 */
+#ifdef CONFIG_ATALK
+	{ PROC_NET_ATALK,	9, "appletalk" },
+	{ PROC_NET_AT_ROUTE,	11,"atalk_route" },
+	{ PROC_NET_ATIF,	11,"atalk_iface" },
+#endif /* CONFIG_ATALK */
 	{ 0, 0, NULL }
 };
 
@@ -265,15 +295,23 @@ static int proc_readnet(struct inode * inode, struct file * file,
 #endif
 #ifdef CONFIG_IP_FIREWALL
 			case PROC_NET_IPFWFWD:
-				length = ip_fw_fwd_procinfo(page, &start, file->f_pos,thistime);
+				length = ip_fw_fwd_procinfo(page, &start, file->f_pos,
+					thistime, (file->f_flags & O_ACCMODE) == O_RDWR);
 				break;
-			case PROC_NET_IPBLFWD:
-				length = ip_fw_blk_procinfo(page, &start, file->f_pos,thistime);
+			case PROC_NET_IPFWBLK:
+				length = ip_fw_blk_procinfo(page, &start, file->f_pos,
+					thistime, (file->f_flags & O_ACCMODE) == O_RDWR);
 				break;
 #endif
 #ifdef CONFIG_IP_ACCT
 			case PROC_NET_IPACCT:
-				length = ip_acct_procinfo(page, &start, file->f_pos,thistime);
+				length = ip_acct_procinfo(page, &start, file->f_pos,
+					thistime, (file->f_flags & O_ACCMODE) == O_RDWR);
+				break;
+#endif
+#ifdef CONFIG_IP_MASQUERADE
+			case PROC_NET_IPMSQHST:
+				length = ip_msqhst_procinfo(page, &start, file->f_pos,thistime);
 				break;
 #endif
 #ifdef CONFIG_INET_RARP				
@@ -281,8 +319,16 @@ static int proc_readnet(struct inode * inode, struct file * file,
 				length = rarp_get_info(page,&start,file->f_pos,thistime);
 				break;
 #endif /* CONFIG_INET_RARP */				
+#if	defined(CONFIG_WAVELAN)
+			case PROC_NET_WAVELAN:
+				length = wavelan_get_info(page, &start, file->f_pos, thistime);
+				break;
+#endif	/* defined(CONFIG_WAVELAN) */
 #endif /* CONFIG_INET */
 #ifdef CONFIG_IPX
+			case PROC_NET_IPX_INTERFACE:
+				length = ipx_get_interface_info(page, &start, file->f_pos, thistime);
+				break;
 			case PROC_NET_IPX_ROUTE:
 				length = ipx_rt_get_info(page,&start,file->f_pos,thistime);
 				break;
@@ -290,6 +336,17 @@ static int proc_readnet(struct inode * inode, struct file * file,
 				length = ipx_get_info(page,&start,file->f_pos,thistime);
 				break;
 #endif /* CONFIG_IPX */
+#ifdef CONFIG_ATALK
+			case PROC_NET_ATALK:
+				length = atalk_get_info(page, &start, file->f_pos, thistime);
+				break;
+			case PROC_NET_AT_ROUTE:
+				length = atalk_rt_get_info(page, &start, file->f_pos, thistime);
+				break;
+			case PROC_NET_ATIF:
+				length = atalk_if_get_info(page, &start, file->f_pos, thistime);
+				break;
+#endif /* CONFIG_ATALK */
 #ifdef CONFIG_AX25
 			case PROC_NET_AX25_ROUTE:
 				length = ax25_rt_get_info(page,&start,file->f_pos,thistime);

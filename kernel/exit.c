@@ -354,26 +354,6 @@ static void forget_original_parent(struct task_struct * father)
 	}
 }
 
-static void exit_mm(void)
-{
-	struct vm_area_struct * mpnt;
-
-	mpnt = current->mm->mmap;
-	current->mm->mmap = NULL;
-	while (mpnt) {
-		struct vm_area_struct * next = mpnt->vm_next;
-		if (mpnt->vm_ops && mpnt->vm_ops->close)
-			mpnt->vm_ops->close(mpnt);
-		remove_shared_vm_struct(mpnt);
-		if (mpnt->vm_inode)
-			iput(mpnt->vm_inode);
-		kfree(mpnt);
-		mpnt = next;
-	}
-
-	free_page_tables(current);
-}
-
 static void exit_files(void)
 {
 	int i;
@@ -400,9 +380,9 @@ NORET_TYPE void do_exit(long code)
 		intr_count = 0;
 	}
 fake_volatile:
-	if (current->semundo)
-		sem_exit();
-	exit_mm();
+	sem_exit();
+	exit_mmap(current);
+	free_page_tables(current);
 	exit_files();
 	exit_fs();
 	exit_thread();

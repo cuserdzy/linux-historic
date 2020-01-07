@@ -1,3 +1,4 @@
+#define THREE_LEVEL
 /*
  *	linux/mm/filemmap.c
  *
@@ -21,13 +22,14 @@
 
 #include <asm/segment.h>
 #include <asm/system.h>
+#include <asm/pgtable.h>
 
 /*
  * Shared mappings implemented 30.11.1994. It's not fully working yet,
  * though.
  */
 
-static unsigned long file_mmap_nopage(struct vm_area_struct * area, unsigned long address,
+static unsigned long filemap_nopage(struct vm_area_struct * area, unsigned long address,
 	unsigned long page, int no_share)
 {
 	struct inode * inode = area->vm_inode;
@@ -60,12 +62,13 @@ static unsigned long file_mmap_nopage(struct vm_area_struct * area, unsigned lon
  * - the "swapout()" function needs to swap out the page to
  *   the shared file instead of using the swap device.
  */
-static inline void file_mmap_sync_page(struct vm_area_struct * vma,
+static void filemap_sync_page(struct vm_area_struct * vma,
 	unsigned long offset,
 	unsigned long page)
 {
 	struct buffer_head * bh;
 
+	printk("msync: %ld: [%08lx]\n", offset, page);
 	bh = buffer_pages[MAP_NR(page)];
 	if (bh) {
 		/* whee.. just mark the buffer heads dirty */
@@ -77,54 +80,94 @@ static inline void file_mmap_sync_page(struct vm_area_struct * vma,
 		return;
 	}
 	/* we'll need to go fetch the buffer heads etc.. RSN */
-	printk("msync: %ld: [%08lx]\n", offset, page);
 	printk("Can't handle non-shared page yet\n");
 	return;
 }
 
-static void file_mmap_sync(struct vm_area_struct * vma, unsigned long start,
+static inline void filemap_sync_pte(pte_t * pte, struct vm_area_struct *vma,
+	unsigned long address, unsigned int flags)
+{
+	pte_t page = *pte;
+
+	if (!pte_present(page))
+		return;
+	if (!pte_dirty(page))
+		return;
+	if (flags & MS_INVALIDATE) {
+		pte_clear(pte);
+	} else {
+		mem_map[MAP_NR(pte_page(page))]++;
+		*pte = pte_mkclean(page);
+	}
+	filemap_sync_page(vma, address - vma->vm_start, pte_page(page));
+	free_page(pte_page(page));
+}
+
+static inline void filemap_sync_pte_range(pmd_t * pmd,
+	unsigned long address, unsigned long size, 
+	struct vm_area_struct *vma, unsigned long offset, unsigned int flags)
+{
+	pte_t * pte;
+	unsigned long end;
+
+	if (pmd_none(*pmd))
+		return;
+	if (pmd_bad(*pmd)) {
+		printk("filemap_sync_pte_range: bad pmd (%08lx)\n", pmd_val(*pmd));
+		pmd_clear(pmd);
+		return;
+	}
+	pte = pte_offset(pmd, address);
+	offset += address & PMD_MASK;
+	address &= ~PMD_MASK;
+	end = address + size;
+	if (end > PMD_SIZE)
+		end = PMD_SIZE;
+	do {
+		filemap_sync_pte(pte, vma, address + offset, flags);
+		address += PAGE_SIZE;
+		pte++;
+	} while (address < end);
+}
+
+static inline void filemap_sync_pmd_range(pgd_t * pgd,
+	unsigned long address, unsigned long size, 
+	struct vm_area_struct *vma, unsigned int flags)
+{
+	pmd_t * pmd;
+	unsigned long offset, end;
+
+	if (pgd_none(*pgd))
+		return;
+	if (pgd_bad(*pgd)) {
+		printk("filemap_sync_pmd_range: bad pgd (%08lx)\n", pgd_val(*pgd));
+		pgd_clear(pgd);
+		return;
+	}
+	pmd = pmd_offset(pgd, address);
+	offset = address & PMD_MASK;
+	address &= ~PMD_MASK;
+	end = address + size;
+	if (end > PGDIR_SIZE)
+		end = PGDIR_SIZE;
+	do {
+		filemap_sync_pte_range(pmd, address, end - address, vma, offset, flags);
+		address = (address + PMD_SIZE) & PMD_MASK;
+		pmd++;
+	} while (address < end);
+}
+
+static void filemap_sync(struct vm_area_struct * vma, unsigned long address,
 	size_t size, unsigned int flags)
 {
-	unsigned long page_dir;
-	unsigned long *page_table, *dir;
-	unsigned long poff, pcnt, pc;
+	pgd_t * dir;
+	unsigned long end = address + size;
 
-	size = size >> PAGE_SHIFT;
-	dir = PAGE_DIR_OFFSET(current,start);
-	poff = (start >> PAGE_SHIFT) & (PTRS_PER_PAGE-1);
-	start -= vma->vm_start;
-	if ((pcnt = PTRS_PER_PAGE - poff) > size)
-		pcnt = size;
-
-	for ( ; size > 0; ++dir, size -= pcnt,
-	     pcnt = (size > PTRS_PER_PAGE ? PTRS_PER_PAGE : size)) {
-		if (!(PAGE_PRESENT & (page_dir = *dir))) {
-			if (page_dir)
-				printk("file_mmap_sync: bad page directory.\n");
-			poff = 0;
-			start += pcnt*PAGE_SIZE;
-			continue;
-		}
-		page_table = (unsigned long *)(PAGE_MASK & page_dir);
-		if (poff) {
-			page_table += poff;
-			poff = 0;
-		}
-		for (pc = pcnt; pc--; page_table++, start += PAGE_SIZE) {
-			unsigned long page = *page_table;
-			if (!(page & PAGE_PRESENT))
-				continue;
-			if (!(page & PAGE_DIRTY))
-				continue;
-			mem_map[MAP_NR(page)]++;
-			if (flags & MS_INVALIDATE) {
-				*page_table = 0;
-				free_page(page);
-			} else
-				*page_table = page & ~PAGE_DIRTY;
-			file_mmap_sync_page(vma, start, page);
-			free_page(page);
-		}
+	dir = pgd_offset(current, address);
+	while (address < end) {
+		filemap_sync_pmd_range(dir, address, end - address, vma, flags);
+		address = (address + PGDIR_SIZE) & PGDIR_MASK;
+		dir++;
 	}
 	invalidate();
 	return;
@@ -133,19 +176,17 @@ static void file_mmap_sync(struct vm_area_struct * vma, unsigned long start,
 /*
  * This handles area unmaps..
  */
-static void file_mmap_unmap(struct vm_area_struct *vma, unsigned long start, size_t len)
+static void filemap_unmap(struct vm_area_struct *vma, unsigned long start, size_t len)
 {
-	if (vma->vm_page_prot & PAGE_RW)
-		file_mmap_sync(vma, start, len, MS_ASYNC);
+	filemap_sync(vma, start, len, MS_ASYNC);
 }
 
 /*
  * This handles complete area closes..
  */
-static void file_mmap_close(struct vm_area_struct * vma)
+static void filemap_close(struct vm_area_struct * vma)
 {
-	if (vma->vm_page_prot & PAGE_RW)
-		file_mmap_sync(vma, vma->vm_start, vma->vm_end - vma->vm_start, MS_ASYNC);
+	filemap_sync(vma, vma->vm_start, vma->vm_end - vma->vm_start, MS_ASYNC);
 }
 
 /*
@@ -155,12 +196,12 @@ static void file_mmap_close(struct vm_area_struct * vma)
  * so we have to either write it out or just forget it. We currently
  * forget it..
  */
-void file_mmap_swapout(struct vm_area_struct * vma,
+void filemap_swapout(struct vm_area_struct * vma,
 	unsigned long offset,
-	unsigned long *pte)
+	pte_t *page_table)
 {
 	printk("swapout not implemented on shared files..\n");
-	*pte = 0;
+	pte_clear(page_table);
 }
 
 /*
@@ -170,14 +211,14 @@ void file_mmap_swapout(struct vm_area_struct * vma,
  */
 static struct vm_operations_struct file_shared_mmap = {
 	NULL,			/* open */
-	file_mmap_close,	/* close */
-	file_mmap_unmap,	/* unmap */
+	filemap_close,		/* close */
+	filemap_unmap,		/* unmap */
 	NULL,			/* protect */
-	file_mmap_sync,		/* sync */
+	filemap_sync,		/* sync */
 	NULL,			/* advise */
-	file_mmap_nopage,	/* nopage */
+	filemap_nopage,		/* nopage */
 	NULL,			/* wppage */
-	file_mmap_swapout,	/* swapout */
+	filemap_swapout,	/* swapout */
 	NULL,			/* swapin */
 };
 
@@ -194,7 +235,7 @@ static struct vm_operations_struct file_private_mmap = {
 	NULL,			/* protect */
 	NULL,			/* sync */
 	NULL,			/* advise */
-	file_mmap_nopage,	/* nopage */
+	filemap_nopage,		/* nopage */
 	NULL,			/* wppage */
 	NULL,			/* swapout */
 	NULL,			/* swapin */
@@ -216,9 +257,11 @@ int generic_mmap(struct inode * inode, struct file * file, struct vm_area_struct
 		if (vma->vm_flags & (VM_WRITE | VM_MAYWRITE)) {
 			static int nr = 0;
 			ops = &file_shared_mmap;
+#ifndef SHARED_MMAP_REALLY_WORKS /* it doesn't, yet */
 			if (nr++ < 5)
 				printk("%s tried to do a shared writeable mapping\n", current->comm);
 			return -EINVAL;
+#endif
 		}
 	}
 	if (!IS_RDONLY(inode)) {

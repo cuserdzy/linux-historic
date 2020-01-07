@@ -36,6 +36,7 @@
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
+#include <linux/mm.h>
 #include <linux/string.h>
 #include <linux/socket.h>
 #include <linux/sockios.h>
@@ -300,7 +301,8 @@ void ip_rt_add(short flags, unsigned long dst, unsigned long mask,
 	rp = &rt_base;
 	while ((r = *rp) != NULL) 
 	{
-		if (r->rt_dst != dst) 
+		if (r->rt_dst != dst || 
+		    r->rt_mask != mask) 
 		{
 			rp = &r->rt_next;
 			continue;

@@ -15,6 +15,7 @@
 #include <linux/string.h>
 #include <linux/config.h>
 #include <linux/locks.h>
+#include <linux/mm.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
@@ -544,8 +545,14 @@ long blk_dev_init(long mem_start, long mem_end)
 #ifdef CONFIG_CDU31A
 	mem_start = cdu31a_init(mem_start,mem_end);
 #endif
+#ifdef CONFIG_CDU535
+	mem_start = sony535_init(mem_start,mem_end);
+#endif
 #ifdef CONFIG_MCD
 	mem_start = mcd_init(mem_start,mem_end);
+#endif
+#ifdef CONFIG_AZTCD
+        mem_start = aztcd_init(mem_start,mem_end);
 #endif
 #ifdef CONFIG_BLK_DEV_FD
 	floppy_init();

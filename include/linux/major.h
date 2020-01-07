@@ -24,7 +24,7 @@
  *  4 - /dev/tty*
  *  5 - /dev/tty; /dev/cua*
  *  6 - lp
- *  7 -                                               UNUSED
+ *  7 - /dev/vcs*
  *  8 -                        scsi disk
  *  9 - scsi tape
  * 10 - mice
@@ -36,8 +36,8 @@
  * 16 - sockets
  * 17 - af_unix
  * 18 - af_inet
- * 19 -                                               UNUSED
- * 20 -                                               UNUSED
+ * 19 - cyclades /dev/ttyC*
+ * 20 - cyclades /dev/cub*
  * 21 - scsi generic
  * 22 -                        (at2disk)
  * 23 -                        mitsumi cdrom
@@ -46,6 +46,7 @@
  * 26 -                        matsushita cdrom 2     minors 0..3
  * 27 - qic117 tape            matsushita cdrom 3     minors 0..3
  * 28 -                        matsushita cdrom 4     minors 0..3
+ * 29 -                        aztech/orchid/okano/wearnes cdrom
  */
 
 #define UNNAMED_MAJOR	0
@@ -56,7 +57,7 @@
 #define TTY_MAJOR	4
 #define TTYAUX_MAJOR	5
 #define LP_MAJOR	6
-/* unused: 7 */
+#define VCS_MAJOR	7
 #define SCSI_DISK_MAJOR	8
 #define SCSI_TAPE_MAJOR	9
 #define MOUSE_MAJOR	10
@@ -68,7 +69,8 @@
 #define SOCKET_MAJOR	16
 #define AF_UNIX_MAJOR	17
 #define AF_INET_MAJOR	18
-/* unused: 19, 20 */
+#define CYCLADES_MAJOR  19
+#define CYCLADESAUX_MAJOR 20
 #define SCSI_GENERIC_MAJOR 21
 #define IDE1_MAJOR	22
 #define MITSUMI_CDROM_MAJOR 23
@@ -78,6 +80,7 @@
 #define MATSUSHITA_CDROM3_MAJOR 27
 #define MATSUSHITA_CDROM4_MAJOR 28
 #define QIC117_TAPE_MAJOR 27
+#define AZTECH_CDROM_MAJOR 29
 
 /*
  * Tests for SCSI devices.

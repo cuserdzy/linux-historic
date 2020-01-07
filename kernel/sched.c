@@ -25,10 +25,12 @@
 #include <linux/interrupt.h>
 #include <linux/tqueue.h>
 #include <linux/resource.h>
+#include <linux/mm.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
 #include <asm/segment.h>
+#include <asm/pgtable.h>
 
 #define TIMER_IRQ 0
 
@@ -768,4 +770,7 @@ void sched_init(void)
 	bh_base[IMMEDIATE_BH].routine = immediate_bh;
 	if (request_irq(TIMER_IRQ, do_timer, 0, "timer") != 0)
 		panic("Could not allocate timer IRQ!");
+	enable_bh(TIMER_BH);
+	enable_bh(TQUEUE_BH);
+	enable_bh(IMMEDIATE_BH);
 }

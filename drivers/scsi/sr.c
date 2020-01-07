@@ -1,6 +1,6 @@
 /*
  *      sr.c Copyright (C) 1992 David Giller
- *	     Copyright (C) 1993, 1994 Eric Youngdale
+ *	     Copyright (C) 1993, 1994, 1995 Eric Youngdale
  *
  *      adapted from:
  *	sd.c Copyright (C) 1992 Drew Eckhardt 
@@ -12,11 +12,15 @@
  *       Modified by Eric Youngdale ericy@cais.com to
  *       add scatter-gather, multiple outstanding request, and other
  *       enhancements.
+ *
+ *	 Modified by Eric Youngdale eric@aib.com to support loadable
+ *	 low-level scsi drivers.
  */
 
 #include <linux/fs.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
+#include <linux/mm.h>
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/cdrom.h>
@@ -31,7 +35,7 @@
 #include "constants.h"
 
 #define MAX_RETRIES 3
-#define SR_TIMEOUT 5000
+#define SR_TIMEOUT 15000
 
 static void sr_init(void);
 static void sr_finish(void);
@@ -236,14 +240,16 @@ static void rw_intr (Scsi_Cmnd * SCpnt)
 		}
 	    
 		if (SCpnt->sense_buffer[2] == ILLEGAL_REQUEST) {
-			printk("CD-ROM error: Drive reports ILLEGAL REQUEST.\n");
+			printk("CD-ROM error: ");
+			print_sense("sr", SCpnt);
+			printk("command was: ");
+			print_command(SCpnt->cmnd);
 			if (scsi_CDs[DEVICE_NR(SCpnt->request.dev)].ten) {
 				scsi_CDs[DEVICE_NR(SCpnt->request.dev)].ten = 0;
 				requeue_sr_request(SCpnt);
 				result = 0;
 				return;
 			} else {
-			  printk("CD-ROM error: Drive reports %d.\n", SCpnt->sense_buffer[2]);				
 			  SCpnt = end_scsi_request(SCpnt, 0, this_count);
 			  requeue_sr_request(SCpnt); /* Do next request */
 			  return;
@@ -287,13 +293,7 @@ static void rw_intr (Scsi_Cmnd * SCpnt)
  *     
  *   - TOSHIBA: setting density is done here now, mounting PhotoCD's should
  *              work now without running the program "set_density"
- *              People reported that it is necessary to eject and reinsert
- *              the CD after the set-density call to get this working for
- *              old drives.
- *              And some very new drives don't need this call any more...
  *              Multisession CD's are supported too.
- *
- * Dec 1994: completely rewritten, uses kernel_scsi_ioctl() now
  *
  *   kraxel@cs.tu-berlin.de (Gerd Knorr)
  */
@@ -301,9 +301,19 @@ static void rw_intr (Scsi_Cmnd * SCpnt)
 static void sr_photocd(struct inode *inode)
 {
   unsigned long   sector,min,sec,frame;
-  unsigned char   buf[40];
-  int             rc;
+  unsigned char   buf[40];    /* the buffer for the ioctl */
+  unsigned char   *cmd;       /* the scsi-command */
+  unsigned char   *send;      /* the data we send to the drive ... */
+  unsigned char   *rec;       /* ... and get back */
+  int             rc,is_xa,no_multi;
 
+  if (scsi_CDs[MINOR(inode->i_rdev)].xa_flags & 0x02) {
+#ifdef DEBUG
+    printk("sr_photocd: drive does not support multisession CD's");
+#endif
+    return;
+  }
+  
   if (!suser()) {
     /* I'm not the superuser, so SCSI_IOCTL_SEND_COMMAND isn't allowed for me.
      * That's why mpcd_sector will be initialized with zero, because I'm not
@@ -311,11 +321,18 @@ static void sr_photocd(struct inode *inode)
      * no disk change happened since the last call of this function and we can
      * keep the old value.
      */
-    if (1 == scsi_CDs[MINOR(inode->i_rdev)].device->access_count)
+    if (1 == scsi_CDs[MINOR(inode->i_rdev)].device->access_count) {
       scsi_CDs[MINOR(inode->i_rdev)].mpcd_sector = 0;
+      scsi_CDs[MINOR(inode->i_rdev)].xa_flags &= ~0x01;
+    }
     return;
   }
-  
+
+  sector   = 0;
+  is_xa    = 0;
+  no_multi = 0;
+  cmd = rec = &buf[8];
+
   switch(scsi_CDs[MINOR(inode->i_rdev)].device->manufacturer) {
 
   case SCSI_MAN_NEC:
@@ -323,27 +340,32 @@ static void sr_photocd(struct inode *inode)
     printk("sr_photocd: use NEC code\n");
 #endif
     memset(buf,0,40);
-    *((unsigned long*)buf)   = 0;
-    *((unsigned long*)buf+1) = 0x16;
-    buf[8+0] = 0xde;
-    buf[8+1] = 0x03;
-    buf[8+2] = 0xb0;
+    *((unsigned long*)buf)   = 0x0;   /* we send nothing...     */
+    *((unsigned long*)buf+1) = 0x16;  /* and receive 0x16 bytes */
+    cmd[0] = 0xde;
+    cmd[1] = 0x03;
+    cmd[2] = 0xb0;
     rc = kernel_scsi_ioctl(scsi_CDs[MINOR(inode->i_rdev)].device,
 			   SCSI_IOCTL_SEND_COMMAND, buf);
     if (rc != 0) {
       printk("sr_photocd: ioctl error (NEC): 0x%x\n",rc);
-      sector = 0;
-    } else {
-      min   = (unsigned long)buf[8+15]/16*10 + (unsigned long)buf[8+15]%16;
-      sec   = (unsigned long)buf[8+16]/16*10 + (unsigned long)buf[8+16]%16;
-      frame = (unsigned long)buf[8+17]/16*10 + (unsigned long)buf[8+17]%16;
-      sector = min*60*75 + sec*75 + frame;
-#ifdef DEBUG
-      if (sector) {
-	printk("sr_photocd: multisession CD detected. start: %lu\n",sector);
-      }
-#endif
+      break;
     }
+    if (rec[14] != 0 && rec[14] != 0xb0) {
+      printk("sr_photocd: Hmm, seems the CDROM doesn't support multisession CD's\n");
+      no_multi = 1;
+      break;
+    }
+    min   = (unsigned long) rec[15]/16*10 + (unsigned long) rec[15]%16;
+    sec   = (unsigned long) rec[16]/16*10 + (unsigned long) rec[16]%16;
+    frame = (unsigned long) rec[17]/16*10 + (unsigned long) rec[17]%16;
+    sector = min*CD_SECS*CD_FRAMES + sec*CD_FRAMES + frame;
+    is_xa  = (rec[14] == 0xb0);
+#ifdef DEBUG
+    if (sector) {
+      printk("sr_photocd: multisession CD detected. start: %lu\n",sector);
+    }
+#endif
     break;
 
   case SCSI_MAN_TOSHIBA:
@@ -351,44 +373,82 @@ static void sr_photocd(struct inode *inode)
     printk("sr_photocd: use TOSHIBA code\n");
 #endif
     
-    /* first I do a set_density-call (for reading XA-sectors) ... */
+    /* we request some disc information (is it a XA-CD ?,
+       where starts the last session ?) */
     memset(buf,0,40);
-    *((unsigned long*)buf)   = 12;
-    *((unsigned long*)buf+1) = 12;
-    buf[8+0] = 0x15;
-    buf[8+1] = (1 << 4);
-    buf[8+4] = 12;
-    buf[14+ 3] = 0x08;
-    buf[14+ 4] = 0x83;
-    buf[14+10] = 0x08;
+    *((unsigned long*)buf)   = 0;
+    *((unsigned long*)buf+1) = 4;  /* we receive 4 bytes from the drive */
+    cmd[0] = 0xc7;
+    cmd[1] = 3;
     rc = kernel_scsi_ioctl(scsi_CDs[MINOR(inode->i_rdev)].device,
 			   SCSI_IOCTL_SEND_COMMAND, buf);
     if (rc != 0) {
-      printk("sr_photocd: ioctl error (TOSHIBA #1): 0x%x\n",rc);
+      if (rc == 0x28000002) {
+	/* Got a "not ready" - error. No chance to find out if this is
+	   because there is no CD in the drive or because the drive
+	   don't knows multisession CD's. So I need to do an extra check... */
+	if (kernel_scsi_ioctl(scsi_CDs[MINOR(inode->i_rdev)].device,
+			      SCSI_IOCTL_TEST_UNIT_READY, NULL)) {
+	  printk("sr_photocd: drive not ready\n");
+	} else {
+	  printk("sr_photocd: Hmm, seems the CDROM doesn't support multisession CD's\n");
+	  no_multi = 1;
+	}
+      } else
+	printk("sr_photocd: ioctl error (TOSHIBA #1): 0x%x\n",rc);
+      break; /* if the first ioctl fails, we don't call the second one */
+    }
+    is_xa  = (rec[0] == 0x20);
+    min    = (unsigned long) rec[1]/16*10 + (unsigned long) rec[1]%16;
+    sec    = (unsigned long) rec[2]/16*10 + (unsigned long) rec[2]%16;
+    frame  = (unsigned long) rec[3]/16*10 + (unsigned long) rec[3]%16;
+    sector = min*CD_SECS*CD_FRAMES + sec*CD_FRAMES + frame;
+    if (sector) {
+      sector -= CD_BLOCK_OFFSET;
+#ifdef DEBUG
+      printk("sr_photocd: multisession CD detected: start: %lu\n",sector);
+#endif
     }
 
-    /* ... and then I ask, if there is a multisession-Disk */
+    /* now we do a get_density... */
     memset(buf,0,40);
     *((unsigned long*)buf)   = 0;
-    *((unsigned long*)buf+1) = 4;
-    buf[8+0] = 0xc7;
-    buf[8+1] = 3;
+    *((unsigned long*)buf+1) = 12;
+    cmd[0] = 0x1a;
+    cmd[2] = 1;
+    cmd[4] = 12;
     rc = kernel_scsi_ioctl(scsi_CDs[MINOR(inode->i_rdev)].device,
 			   SCSI_IOCTL_SEND_COMMAND, buf);
     if (rc != 0) {
       printk("sr_photocd: ioctl error (TOSHIBA #2): 0x%x\n",rc);
-      sector = 0;
-    } else {
-      min   = (unsigned long)buf[8+1]/16*10 + (unsigned long)buf[8+1]%16;
-      sec   = (unsigned long)buf[8+2]/16*10 + (unsigned long)buf[8+2]%16;
-      frame = (unsigned long)buf[8+3]/16*10 + (unsigned long)buf[8+3]%16;
-      sector = min*60*75 + sec*75 + frame;
-      if (sector) {
-        sector -= CD_BLOCK_OFFSET;
+      break;
+    }
 #ifdef DEBUG
-        printk("sr_photocd: multisession CD detected: start: %lu\n",sector);
+    printk("sr_photocd: get_density: 0x%x\n",rec[4]);
 #endif
+    
+    /* ...and only if necessary a set_density */
+    if ((rec[4] != 0x81 && is_xa) || (rec[4] != 0 && !is_xa)) {
+#ifdef DEBUG
+      printk("sr_photocd: doing set_density\n");
+#endif
+      memset(buf,0,40);
+      *((unsigned long*)buf)   = 12;  /* sending 12 bytes... */
+      *((unsigned long*)buf+1) = 0;
+      cmd[0] = 0x15;
+      cmd[1] = (1 << 4);
+      cmd[4] = 12;
+      send = &cmd[6];                 /* this is a 6-Byte command          */
+      send[ 3] = 0x08;                /* the data for the command          */
+      send[ 4] = (is_xa) ? 0x81 : 0;  /* density 0x81 for XA-CD's, 0 else  */
+      send[10] = 0x08;
+      rc = kernel_scsi_ioctl(scsi_CDs[MINOR(inode->i_rdev)].device,
+			     SCSI_IOCTL_SEND_COMMAND, buf);
+      if (rc != 0) {
+	printk("sr_photocd: ioctl error (TOSHIBA #3): 0x%x\n",rc);
       }
+      /* The set_density command may have changed the sector size or capacity. */
+      scsi_CDs[MINOR(inode->i_rdev)].needs_sector_size = 1;
     }
     break;
 
@@ -397,10 +457,15 @@ static void sr_photocd(struct inode *inode)
 #ifdef DEBUG
     printk("sr_photocd: unknown drive, no special multisession code\n");
 #endif
-    sector = 0;
     break; }
 
   scsi_CDs[MINOR(inode->i_rdev)].mpcd_sector = sector;
+  if (is_xa)
+    scsi_CDs[MINOR(inode->i_rdev)].xa_flags |= 0x01;
+  else
+    scsi_CDs[MINOR(inode->i_rdev)].xa_flags &= ~0x01;
+  if (no_multi)
+    scsi_CDs[MINOR(inode->i_rdev)].xa_flags |= 0x02;
   return;
 }
 
@@ -419,6 +484,8 @@ static int sr_open(struct inode * inode, struct file * filp)
 	if (scsi_CDs[MINOR(inode->i_rdev)].device->host->hostt->usage_count)
 	  (*scsi_CDs[MINOR(inode->i_rdev)].device->host->hostt->usage_count)++;
 
+	sr_photocd(inode);
+
 	/* If this device did not have media in the drive at boot time, then
 	   we would have been unable to get the sector size.  Check to see if
 	   this is the case, and try again.
@@ -426,10 +493,6 @@ static int sr_open(struct inode * inode, struct file * filp)
 
 	if(scsi_CDs[MINOR(inode->i_rdev)].needs_sector_size)
 	  get_sectorsize(MINOR(inode->i_rdev));
-
-#if 1	/* don't use for now - it doesn't seem to work for everybody */
-	sr_photocd(inode);
-#endif
 
 	return 0;
 }
@@ -579,15 +642,6 @@ work around the fact that the buffer cache has a block size of 1024,
 and we have 2048 byte sectors.  This code should work for buffers that
 are any multiple of 512 bytes long.  */
 
-#if 1
-	/* Here we redirect the volume descriptor block of the CD-ROM.
-	 * Necessary for multisession CD's, until the isofs-routines
-	 * handle this via the CDROMMULTISESSION_SYS call
-	 */
-	if (block >= 64 && block < 68) {
-	  block += scsi_CDs[dev].mpcd_sector*4; }
-#endif
-	
 	SCpnt->use_sg = 0;
 
 	if (SCpnt->host->sg_tablesize > 0 &&
@@ -686,7 +740,7 @@ are any multiple of 512 bytes long.  */
 	      };  /* if need DMA fixup */
 	    };  /* for loop to fill list */
 #ifdef DEBUG
-	    printk("SG: %d %d %d %d %d *** ",SCpnt->use_sg, SCpnt->request.sector,
+	    printk("SR: %d %d %d %d %d *** ",SCpnt->use_sg, SCpnt->request.sector,
 		   this_count, 
 		   SCpnt->request.current_nr_sectors,
 		   SCpnt->request.nr_sectors);
@@ -911,6 +965,7 @@ static void get_sectorsize(int i){
     if(scsi_CDs[i].sector_size == 2048)
       scsi_CDs[i].capacity *= 4;
     scsi_CDs[i].needs_sector_size = 0;
+    sr_sizes[i] = scsi_CDs[i].capacity;
   };
   scsi_free(buffer, 512);
 }
@@ -958,8 +1013,14 @@ void sr_finish()
 		  /* If we have already seen this, then skip it.  Comes up
 		     with loadable modules. */
 		  if (scsi_CDs[i].capacity) continue;
+		  scsi_CDs[i].capacity = 0x1fffff;
+		  scsi_CDs[i].sector_size = 2048;  /* A guess, just in case */
+		  scsi_CDs[i].needs_sector_size = 1;
+#if 0
+		  /* seems better to leave this for later */
 		  get_sectorsize(i);
 		  printk("Scd sectorsize = %d bytes.\n", scsi_CDs[i].sector_size);
+#endif
 		  scsi_CDs[i].use = 1;
 		  scsi_CDs[i].ten = 1;
 		  scsi_CDs[i].remap = 1;
@@ -1008,3 +1069,20 @@ static void sr_detach(Scsi_Device * SDp)
     }
   return;
 }
+
+/*
+ * Overrides for Emacs so that we follow Linus's tabbing style.
+ * Emacs will notice this stuff at the end of the file and automatically
+ * adjust the settings for this buffer only.  This must remain at the end
+ * of the file.
+ * ---------------------------------------------------------------------------
+ * Local variables:
+ * c-indent-level: 8
+ * c-brace-imaginary-offset: 0
+ * c-brace-offset: -8
+ * c-argdecl-indent: 8
+ * c-label-offset: -8
+ * c-continued-statement-offset: 8
+ * c-continued-brace-offset: 0
+ * End:
+ */

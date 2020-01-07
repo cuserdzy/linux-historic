@@ -1,3 +1,4 @@
+#define THREE_LEVEL
 /*
  *  linux/mm/memory.c
  *
@@ -43,9 +44,11 @@
 #include <linux/types.h>
 #include <linux/ptrace.h>
 #include <linux/mman.h>
+#include <linux/mm.h>
 
 #include <asm/system.h>
 #include <asm/segment.h>
+#include <asm/pgtable.h>
 
 unsigned long high_memory = 0;
 
@@ -60,9 +63,9 @@ unsigned char * free_area_map[NR_MEM_LISTS];
 
 #define copy_page(from,to) memcpy((void *) to, (void *) from, PAGE_SIZE)
 
-mem_map_t * mem_map = NULL;
+#define USER_PTRS_PER_PGD (TASK_SIZE / PGDIR_SIZE)
 
-#define CODE_SPACE(addr,p) ((addr) < (p)->end_code)
+mem_map_t * mem_map = NULL;
 
 /*
  * oom() prints a message (so that the user knows why the process died),
@@ -76,35 +79,67 @@ void oom(struct task_struct * task)
 	send_sig(SIGKILL,task,1);
 }
 
-static void free_one_table(unsigned long * page_dir)
+static inline void free_one_pte(pte_t * page_table)
+{
+	pte_t page = *page_table;
+
+	if (pte_none(page))
+		return;
+	pte_clear(page_table);
+	if (!pte_present(page)) {
+		swap_free(pte_val(page));
+		return;
+	}
+	free_page(pte_page(page));
+	return;
+}
+
+static inline void free_one_pmd(pmd_t * dir)
 {
 	int j;
-	unsigned long pg_table = *page_dir;
-	unsigned long * page_table;
+	pte_t * pte;
 
-	if (!pg_table)
+	if (pmd_none(*dir))
 		return;
-	*page_dir = 0;
-	if (pg_table >= high_memory || !(pg_table & PAGE_PRESENT)) {
-		printk("Bad page table: [%p]=%08lx\n",page_dir,pg_table);
+	if (pmd_bad(*dir)) {
+		printk("free_one_pmd: bad directory entry %08lx\n", pmd_val(*dir));
+		pmd_clear(dir);
 		return;
 	}
-	if (mem_map[MAP_NR(pg_table)] & MAP_PAGE_RESERVED)
+	pte = pte_offset(dir, 0);
+	pmd_clear(dir);
+	if (pte_inuse(pte)) {
+		pte_free(pte);
 		return;
-	page_table = (unsigned long *) (pg_table & PAGE_MASK);
-	for (j = 0 ; j < PTRS_PER_PAGE ; j++,page_table++) {
-		unsigned long pg = *page_table;
-		
-		if (!pg)
-			continue;
-		*page_table = 0;
-		if (pg & PAGE_PRESENT)
-			free_page(PAGE_MASK & pg);
-		else
-			swap_free(pg);
 	}
-	free_page(PAGE_MASK & pg_table);
+	for (j = 0; j < PTRS_PER_PTE ; j++)
+		free_one_pte(pte+j);
+	pte_free(pte);
 }
+
+static inline void free_one_pgd(pgd_t * dir)
+{
+	int j;
+	pmd_t * pmd;
+
+	if (pgd_none(*dir))
+		return;
+	if (pgd_bad(*dir)) {
+		printk("free_one_pgd: bad directory entry %08lx\n", pgd_val(*dir));
+		pgd_clear(dir);
+		return;
+	}
+	pmd = pmd_offset(dir, 0);
+	pgd_clear(dir);
+	if (pmd_inuse(pmd)) {
+		pmd_free(pmd);
+		return;
+	}
+	for (j = 0; j < PTRS_PER_PMD ; j++)
+		free_one_pmd(pmd+j);
+	pmd_free(pmd);
+}
+	
 
 /*
  * This function clears all user-level page tables of a process - this
@@ -116,32 +151,32 @@ static void free_one_table(unsigned long * page_dir)
 void clear_page_tables(struct task_struct * tsk)
 {
 	int i;
-	unsigned long * page_dir;
+	pgd_t * page_dir;
 
 	if (!tsk)
 		return;
 	if (tsk == task[0])
 		panic("task[0] (swapper) doesn't support exec()\n");
-	page_dir = PAGE_DIR_OFFSET(tsk, 0);
+	page_dir = pgd_offset(tsk, 0);
 	if (!page_dir || page_dir == swapper_pg_dir) {
 		printk("Trying to clear kernel page-directory: not good\n");
 		return;
 	}
-	if (mem_map[MAP_NR((unsigned long) page_dir)] > 1) {
-		unsigned long * new_pg;
+	if (pgd_inuse(page_dir)) {
+		pgd_t * new_pg;
 
-		if (!(new_pg = (unsigned long*) get_free_page(GFP_KERNEL))) {
+		if (!(new_pg = pgd_alloc())) {
 			oom(tsk);
 			return;
 		}
-		for (i = 768 ; i < 1024 ; i++)
+		for (i = USER_PTRS_PER_PGD ; i < PTRS_PER_PGD ; i++)
 			new_pg[i] = page_dir[i];
-		free_page((unsigned long) page_dir);
 		SET_PAGE_DIR(tsk, new_pg);
+		pgd_free(page_dir);
 		return;
 	}
-	for (i = 0 ; i < 768 ; i++,page_dir++)
-		free_one_table(page_dir);
+	for (i = 0 ; i < USER_PTRS_PER_PGD ; i++)
+		free_one_pgd(page_dir + i);
 	invalidate();
 	return;
 }
@@ -152,7 +187,7 @@ void clear_page_tables(struct task_struct * tsk)
 void free_page_tables(struct task_struct * tsk)
 {
 	int i;
-	unsigned long * page_dir;
+	pgd_t * page_dir;
 
 	if (!tsk)
 		return;
@@ -160,19 +195,19 @@ void free_page_tables(struct task_struct * tsk)
 		printk("task[0] (swapper) killed: unable to recover\n");
 		panic("Trying to free up swapper memory space");
 	}
-	page_dir = PAGE_DIR_OFFSET(tsk, 0);
+	page_dir = pgd_offset(tsk, 0);
 	if (!page_dir || page_dir == swapper_pg_dir) {
 		printk("Trying to free kernel page-directory: not good\n");
 		return;
 	}
 	SET_PAGE_DIR(tsk, swapper_pg_dir);
-	if (mem_map[MAP_NR((unsigned long) page_dir)] > 1) {
-		free_page((unsigned long) page_dir);
+	if (pgd_inuse(page_dir)) {
+		pgd_free(page_dir);
 		return;
 	}
-	for (i = 0 ; i < PTRS_PER_PAGE ; i++)
-		free_one_table(page_dir + i);
-	free_page((unsigned long) page_dir);
+	for (i = 0 ; i < PTRS_PER_PGD ; i++)
+		free_one_pgd(page_dir + i);
+	pgd_free(page_dir);
 	invalidate();
 }
 
@@ -184,11 +219,95 @@ void free_page_tables(struct task_struct * tsk)
  */
 int clone_page_tables(struct task_struct * tsk)
 {
-	unsigned long pg_dir;
+	pgd_t * pg_dir;
 
-	pg_dir = (unsigned long) PAGE_DIR_OFFSET(current, 0);
-	mem_map[MAP_NR(pg_dir)]++;
+	pg_dir = pgd_offset(current, 0);
+	pgd_reuse(pg_dir);
 	SET_PAGE_DIR(tsk, pg_dir);
+	return 0;
+}
+
+static inline void copy_one_pte(pte_t * old_pte, pte_t * new_pte)
+{
+	pte_t pte = *old_pte;
+
+	if (pte_none(pte))
+		return;
+	if (!pte_present(pte)) {
+		swap_duplicate(pte_val(pte));
+		*new_pte = pte;
+		return;
+	}
+	if (pte_page(pte) > high_memory || (mem_map[MAP_NR(pte_page(pte))] & MAP_PAGE_RESERVED)) {
+		*new_pte = pte;
+		return;
+	}
+	if (pte_cow(pte))
+		pte = pte_wrprotect(pte);
+	if (delete_from_swap_cache(pte_page(pte)))
+		pte = pte_mkdirty(pte);
+	*new_pte = pte_mkold(pte);
+	*old_pte = pte;
+	mem_map[MAP_NR(pte_page(pte))]++;
+}
+
+static inline int copy_one_pmd(pmd_t * old_pmd, pmd_t * new_pmd)
+{
+	int j;
+	pte_t *old_pte, *new_pte;
+
+	if (pmd_none(*old_pmd))
+		return 0;
+	if (pmd_bad(*old_pmd)) {
+		printk("copy_one_pmd: bad page table: probable memory corruption\n");
+		pmd_clear(old_pmd);
+		return 0;
+	}
+	old_pte = pte_offset(old_pmd, 0);
+	if (pte_inuse(old_pte)) {
+		pte_reuse(old_pte);
+		*new_pmd = *old_pmd;
+		return 0;
+	}
+	new_pte = pte_alloc(new_pmd, 0);
+	if (!new_pte)
+		return -ENOMEM;
+	for (j = 0 ; j < PTRS_PER_PTE ; j++) {
+		copy_one_pte(old_pte, new_pte);
+		old_pte++;
+		new_pte++;
+	}
+	return 0;
+}
+
+static inline int copy_one_pgd(pgd_t * old_pgd, pgd_t * new_pgd)
+{
+	int j;
+	pmd_t *old_pmd, *new_pmd;
+
+	if (pgd_none(*old_pgd))
+		return 0;
+	if (pgd_bad(*old_pgd)) {
+		printk("copy_one_pgd: bad page table (%p: %08lx): probable memory corruption\n", old_pgd, pgd_val(*old_pgd));
+		pgd_clear(old_pgd);
+		return 0;
+	}
+	old_pmd = pmd_offset(old_pgd, 0);
+	if (pmd_inuse(old_pmd)) {
+		pmd_reuse(old_pmd);
+		*new_pgd = *old_pgd;
+		return 0;
+	}
+	new_pmd = pmd_alloc(new_pgd, 0);
+	if (!new_pmd)
+		return -ENOMEM;
+	for (j = 0 ; j < PTRS_PER_PMD ; j++) {
+		int error = copy_one_pmd(old_pmd, new_pmd);
+		if (error)
+			return error;
+		old_pmd++;
+		new_pmd++;
+	}
 	return 0;
 }
 
@@ -200,177 +319,171 @@ int clone_page_tables(struct task_struct * tsk)
 int copy_page_tables(struct task_struct * tsk)
 {
 	int i;
-	unsigned long *old_page_dir;
-	unsigned long *new_page_dir;
+	pgd_t *old_pgd;
+	pgd_t *new_pgd;
 
-	new_page_dir = (unsigned long *) get_free_page(GFP_KERNEL);
-	if (!new_page_dir)
+	new_pgd = pgd_alloc();
+	if (!new_pgd)
 		return -ENOMEM;
-	old_page_dir = PAGE_DIR_OFFSET(current, 0);
-	SET_PAGE_DIR(tsk, new_page_dir);
-	for (i = 0 ; i < PTRS_PER_PAGE ; i++,old_page_dir++,new_page_dir++) {
-		int j;
-		unsigned long old_pg_table, *old_page_table;
-		unsigned long new_pg_table, *new_page_table;
-
-		old_pg_table = *old_page_dir;
-		if (!old_pg_table)
-			continue;
-		if (old_pg_table >= high_memory || !(old_pg_table & PAGE_PRESENT)) {
-			printk("copy_page_tables: bad page table: "
-				"probable memory corruption\n");
-			*old_page_dir = 0;
-			continue;
-		}
-		if (mem_map[MAP_NR(old_pg_table)] & MAP_PAGE_RESERVED) {
-			*new_page_dir = old_pg_table;
-			continue;
-		}
-		if (!(new_pg_table = get_free_page(GFP_KERNEL))) {
+	SET_PAGE_DIR(tsk, new_pgd);
+	old_pgd = pgd_offset(current, 0);
+	for (i = 0 ; i < PTRS_PER_PGD ; i++) {
+		int errno = copy_one_pgd(old_pgd, new_pgd);
+		if (errno) {
 			free_page_tables(tsk);
-			return -ENOMEM;
+			invalidate();
+			return errno;
 		}
-		old_page_table = (unsigned long *) (PAGE_MASK & old_pg_table);
-		new_page_table = (unsigned long *) (PAGE_MASK & new_pg_table);
-		for (j = 0 ; j < PTRS_PER_PAGE ; j++,old_page_table++,new_page_table++) {
-			unsigned long pg;
-			pg = *old_page_table;
-			if (!pg)
-				continue;
-			if (!(pg & PAGE_PRESENT)) {
-				*new_page_table = swap_duplicate(pg);
-				continue;
-			}
-			if (pg > high_memory || (mem_map[MAP_NR(pg)] & MAP_PAGE_RESERVED)) {
-				*new_page_table = pg;
-				continue;
-			}
-			if (pg & PAGE_COW)
-				pg &= ~PAGE_RW;
-			if (delete_from_swap_cache(pg))
-				pg |= PAGE_DIRTY;
-			*new_page_table = pg;
-			*old_page_table = pg;
-			mem_map[MAP_NR(pg)]++;
-		}
-		*new_page_dir = new_pg_table | PAGE_TABLE;
+		old_pgd++;
+		new_pgd++;
 	}
 	invalidate();
 	return 0;
+}
+
+static inline void forget_pte(pte_t page)
+{
+	if (pte_none(page))
+		return;
+	if (pte_present(page)) {
+		free_page(pte_page(page));
+		if (mem_map[MAP_NR(pte_page(page))] & MAP_PAGE_RESERVED)
+			return;
+		if (current->mm->rss <= 0)
+			return;
+		current->mm->rss--;
+		return;
+	}
+	swap_free(pte_val(page));
+}
+
+static inline void unmap_pte_range(pmd_t * pmd, unsigned long address, unsigned long size)
+{
+	pte_t * pte;
+	unsigned long end;
+
+	if (pmd_none(*pmd))
+		return;
+	if (pmd_bad(*pmd)) {
+		printk("unmap_pte_range: bad pmd (%08lx)\n", pmd_val(*pmd));
+		pmd_clear(pmd);
+		return;
+	}
+	pte = pte_offset(pmd, address);
+	address &= ~PMD_MASK;
+	end = address + size;
+	if (end >= PMD_SIZE)
+		end = PMD_SIZE;
+	do {
+		pte_t page = *pte;
+		pte_clear(pte);
+		forget_pte(page);
+		address += PAGE_SIZE;
+		pte++;
+	} while (address < end);
+}
+
+static inline void unmap_pmd_range(pgd_t * dir, unsigned long address, unsigned long size)
+{
+	pmd_t * pmd;
+	unsigned long end;
+
+	if (pgd_none(*dir))
+		return;
+	if (pgd_bad(*dir)) {
+		printk("unmap_pmd_range: bad pgd (%08lx)\n", pgd_val(*dir));
+		pgd_clear(dir);
+		return;
+	}
+	pmd = pmd_offset(dir, address);
+	address &= ~PGDIR_MASK;
+	end = address + size;
+	if (end > PGDIR_SIZE)
+		end = PGDIR_SIZE;
+	do {
+		unmap_pte_range(pmd, address, end - address);
+		address = (address + PMD_SIZE) & PMD_MASK; 
+		pmd++;
+	} while (address < end);
 }
 
 /*
  * a more complete version of free_page_tables which performs with page
  * granularity.
  */
-int unmap_page_range(unsigned long from, unsigned long size)
+int unmap_page_range(unsigned long address, unsigned long size)
 {
-	unsigned long page, page_dir;
-	unsigned long *page_table, *dir;
-	unsigned long poff, pcnt, pc;
+	pgd_t * dir;
+	unsigned long end = address + size;
 
-	if (from & ~PAGE_MASK) {
-		printk("unmap_page_range called with wrong alignment\n");
-		return -EINVAL;
-	}
-	size = (size + ~PAGE_MASK) >> PAGE_SHIFT;
-	dir = PAGE_DIR_OFFSET(current,from);
-	poff = (from >> PAGE_SHIFT) & (PTRS_PER_PAGE-1);
-	if ((pcnt = PTRS_PER_PAGE - poff) > size)
-		pcnt = size;
-
-	for ( ; size > 0; ++dir, size -= pcnt,
-	     pcnt = (size > PTRS_PER_PAGE ? PTRS_PER_PAGE : size)) {
-		if (!(page_dir = *dir))	{
-			poff = 0;
-			continue;
-		}
-		if (!(page_dir & PAGE_PRESENT)) {
-			printk("unmap_page_range: bad page directory.");
-			continue;
-		}
-		page_table = (unsigned long *)(PAGE_MASK & page_dir);
-		if (poff) {
-			page_table += poff;
-			poff = 0;
-		}
-		for (pc = pcnt; pc--; page_table++) {
-			if ((page = *page_table) != 0) {
-				*page_table = 0;
-				if (PAGE_PRESENT & page) {
-					if (!(mem_map[MAP_NR(page)] & MAP_PAGE_RESERVED))
-						if (current->mm->rss > 0)
-							--current->mm->rss;
-					free_page(PAGE_MASK & page);
-				} else
-					swap_free(page);
-			}
-		}
-		if (pcnt == PTRS_PER_PAGE) {
-			*dir = 0;
-			free_page(PAGE_MASK & page_dir);
-		}
+	dir = pgd_offset(current, address);
+	while (address < end) {
+		unmap_pmd_range(dir, address, end - address);
+		address = (address + PGDIR_SIZE) & PGDIR_MASK;
+		dir++;
 	}
 	invalidate();
 	return 0;
 }
 
-int zeromap_page_range(unsigned long from, unsigned long size, int mask)
+static inline void zeromap_pte_range(pte_t * pte, unsigned long address, unsigned long size, pte_t zero_pte)
 {
-	unsigned long *page_table, *dir;
-	unsigned long poff, pcnt;
-	unsigned long page;
+	unsigned long end;
 
-	if (mask) {
-		if ((mask & (PAGE_MASK|PAGE_PRESENT)) != PAGE_PRESENT) {
-			printk("zeromap_page_range: mask = %08x\n",mask);
-			return -EINVAL;
-		}
-		mask |= ZERO_PAGE;
-	}
-	if (from & ~PAGE_MASK) {
-		printk("zeromap_page_range: from = %08lx\n",from);
-		return -EINVAL;
-	}
-	dir = PAGE_DIR_OFFSET(current,from);
-	size = (size + ~PAGE_MASK) >> PAGE_SHIFT;
-	poff = (from >> PAGE_SHIFT) & (PTRS_PER_PAGE-1);
-	if ((pcnt = PTRS_PER_PAGE - poff) > size)
-		pcnt = size;
+	address &= ~PMD_MASK;
+	end = address + size;
+	if (end > PMD_SIZE)
+		end = PMD_SIZE;
+	do {
+		pte_t oldpage = *pte;
+		*pte = zero_pte;
+		forget_pte(oldpage);
+		address += PAGE_SIZE;
+		pte++;
+	} while (address < end);
+}
 
-	while (size > 0) {
-		if (!(PAGE_PRESENT & *dir)) {
-				/* clear page needed here?  SRB. */
-			if (!(page_table = (unsigned long*) get_free_page(GFP_KERNEL))) {
-				invalidate();
-				return -ENOMEM;
-			}
-			if (PAGE_PRESENT & *dir) {
-				free_page((unsigned long) page_table);
-				page_table = (unsigned long *)(PAGE_MASK & *dir++);
-			} else
-				*dir++ = ((unsigned long) page_table) | PAGE_TABLE;
-		} else
-			page_table = (unsigned long *)(PAGE_MASK & *dir++);
-		page_table += poff;
-		poff = 0;
-		for (size -= pcnt; pcnt-- ;) {
-			if ((page = *page_table) != 0) {
-				*page_table = 0;
-				if (page & PAGE_PRESENT) {
-					if (!(mem_map[MAP_NR(page)] & MAP_PAGE_RESERVED))
-						if (current->mm->rss > 0)
-							--current->mm->rss;
-					free_page(PAGE_MASK & page);
-				} else
-					swap_free(page);
-			}
-			*page_table++ = mask;
-		}
-		pcnt = (size > PTRS_PER_PAGE ? PTRS_PER_PAGE : size);
+static inline int zeromap_pmd_range(pmd_t * pmd, unsigned long address, unsigned long size, pte_t zero_pte)
+{
+	unsigned long end;
+
+	address &= ~PGDIR_MASK;
+	end = address + size;
+	if (end > PGDIR_SIZE)
+		end = PGDIR_SIZE;
+	do {
+		pte_t * pte = pte_alloc(pmd, address);
+		if (!pte)
+			return -ENOMEM;
+		zeromap_pte_range(pte, address, end - address, zero_pte);
+		address = (address + PMD_SIZE) & PMD_MASK;
+		pmd++;
+	} while (address < end);
+	return 0;
+}
+
+int zeromap_page_range(unsigned long address, unsigned long size, pgprot_t prot)
+{
+	int error = 0;
+	pgd_t * dir;
+	unsigned long end = address + size;
+	pte_t zero_pte;
+
+	zero_pte = pte_wrprotect(mk_pte(ZERO_PAGE, prot));
+	dir = pgd_offset(current, address);
+	while (address < end) {
+		pmd_t *pmd = pmd_alloc(dir, address);
+		error = -ENOMEM;
+		if (!pmd)
+			break;
+		error = zeromap_pmd_range(pmd, address, end - address, zero_pte);
+		if (error)
+			break;
+		address = (address + PGDIR_SIZE) & PGDIR_MASK;
+		dir++;
 	}
 	invalidate();
-	return 0;
+	return error;
 }
 
 /*
@@ -378,155 +491,122 @@ int zeromap_page_range(unsigned long from, unsigned long size, int mask)
  * mappings are removed. any references to nonexistent pages results
  * in null mappings (currently treated as "copy-on-access")
  */
-int remap_page_range(unsigned long from, unsigned long to, unsigned long size, int mask)
+static inline void remap_pte_range(pte_t * pte, unsigned long address, unsigned long size,
+	unsigned long offset, pgprot_t prot)
 {
-	unsigned long *page_table, *dir;
-	unsigned long poff, pcnt;
-	unsigned long page;
+	unsigned long end;
 
-	if (mask) {
-		if ((mask & (PAGE_MASK|PAGE_PRESENT)) != PAGE_PRESENT) {
-			printk("remap_page_range: mask = %08x\n",mask);
-			return -EINVAL;
+	address &= ~PMD_MASK;
+	end = address + size;
+	if (end > PMD_SIZE)
+		end = PMD_SIZE;
+	do {
+		pte_t oldpage = *pte;
+		pte_clear(pte);
+		if (offset >= high_memory || (mem_map[MAP_NR(offset)] & MAP_PAGE_RESERVED))
+			*pte = mk_pte(offset, prot);
+		else if (mem_map[MAP_NR(offset)]) {
+			mem_map[MAP_NR(offset)]++;
+			*pte = mk_pte(offset, prot);
 		}
-	}
-	if ((from & ~PAGE_MASK) || (to & ~PAGE_MASK)) {
-		printk("remap_page_range: from = %08lx, to=%08lx\n",from,to);
-		return -EINVAL;
-	}
-	dir = PAGE_DIR_OFFSET(current,from);
-	size = (size + ~PAGE_MASK) >> PAGE_SHIFT;
-	poff = (from >> PAGE_SHIFT) & (PTRS_PER_PAGE-1);
-	if ((pcnt = PTRS_PER_PAGE - poff) > size)
-		pcnt = size;
+		forget_pte(oldpage);
+		address += PAGE_SIZE;
+		offset += PAGE_SIZE;
+		pte++;
+	} while (address < end);
+}
 
-	while (size > 0) {
-		if (!(PAGE_PRESENT & *dir)) {
-			/* clearing page here, needed?  SRB. */
-			if (!(page_table = (unsigned long*) get_free_page(GFP_KERNEL))) {
-				invalidate();
-				return -1;
-			}
-			*dir++ = ((unsigned long) page_table) | PAGE_TABLE;
-		}
-		else
-			page_table = (unsigned long *)(PAGE_MASK & *dir++);
-		if (poff) {
-			page_table += poff;
-			poff = 0;
-		}
+static inline int remap_pmd_range(pmd_t * pmd, unsigned long address, unsigned long size,
+	unsigned long offset, pgprot_t prot)
+{
+	unsigned long end;
 
-		for (size -= pcnt; pcnt-- ;) {
-			if ((page = *page_table) != 0) {
-				*page_table = 0;
-				if (PAGE_PRESENT & page) {
-					if (!(mem_map[MAP_NR(page)] & MAP_PAGE_RESERVED))
-						if (current->mm->rss > 0)
-							--current->mm->rss;
-					free_page(PAGE_MASK & page);
-				} else
-					swap_free(page);
-			}
-
-			/*
-			 * the first condition should return an invalid access
-			 * when the page is referenced. current assumptions
-			 * cause it to be treated as demand allocation in some
-			 * cases.
-			 */
-			if (!mask)
-				*page_table++ = 0;	/* not present */
-			else if (to >= high_memory)
-				*page_table++ = (to | mask);
-			else if (!mem_map[MAP_NR(to)])
-				*page_table++ = 0;	/* not present */
-			else {
-				*page_table++ = (to | mask);
-				if (!(mem_map[MAP_NR(to)] & MAP_PAGE_RESERVED)) {
-					++current->mm->rss;
-					mem_map[MAP_NR(to)]++;
-				}
-			}
-			to += PAGE_SIZE;
-		}
-		pcnt = (size > PTRS_PER_PAGE ? PTRS_PER_PAGE : size);
-	}
-	invalidate();
+	address &= ~PGDIR_MASK;
+	end = address + size;
+	if (end > PGDIR_SIZE)
+		end = PGDIR_SIZE;
+	offset -= address;
+	do {
+		pte_t * pte = pte_alloc(pmd, address);
+		if (!pte)
+			return -ENOMEM;
+		remap_pte_range(pte, address, end - address, address + offset, prot);
+		address = (address + PMD_SIZE) & PMD_MASK;
+		pmd++;
+	} while (address < end);
 	return 0;
 }
 
-/*
- * This function puts a page in memory at the wanted address.
- * It returns the physical address of the page gotten, 0 if
- * out of memory (either when trying to access page-table or
- * page.)
- */
-unsigned long put_page(struct task_struct * tsk,unsigned long page,
-	unsigned long address,int prot)
+int remap_page_range(unsigned long from, unsigned long offset, unsigned long size, pgprot_t prot)
 {
-	unsigned long *page_table;
+	int error = 0;
+	pgd_t * dir;
+	unsigned long end = from + size;
 
-	if ((prot & (PAGE_MASK|PAGE_PRESENT)) != PAGE_PRESENT)
-		printk("put_page: prot = %08x\n",prot);
-	if (page >= high_memory) {
-		printk("put_page: trying to put page %08lx at %08lx\n",page,address);
-		return 0;
+	offset -= from;
+	dir = pgd_offset(current, from);
+	while (from < end) {
+		pmd_t *pmd = pmd_alloc(dir, from);
+		error = -ENOMEM;
+		if (!pmd)
+			break;
+		error = remap_pmd_range(pmd, from, end - from, offset + from, prot);
+		if (error)
+			break;
+		from = (from + PGDIR_SIZE) & PGDIR_MASK;
+		dir++;
 	}
-	page_table = PAGE_DIR_OFFSET(tsk,address);
-	if ((*page_table) & PAGE_PRESENT)
-		page_table = (unsigned long *) (PAGE_MASK & *page_table);
-	else {
-		printk("put_page: bad page directory entry\n");
-		oom(tsk);
-		*page_table = BAD_PAGETABLE | PAGE_TABLE;
-		return 0;
-	}
-	page_table += (address >> PAGE_SHIFT) & (PTRS_PER_PAGE-1);
-	if (*page_table) {
-		printk("put_page: page already exists\n");
-		*page_table = 0;
-		invalidate();
-	}
-	*page_table = page | prot;
-/* no need for invalidate */
-	return page;
+	invalidate();
+	return error;
 }
 
 /*
- * The previous function doesn't work very well if you also want to mark
- * the page dirty: exec.c wants this, as it has earlier changed the page,
- * and we want the dirty-status to be correct (for VM). Thus the same
- * routine, but this time we mark it dirty too.
+ * sanity-check function..
+ */
+static void put_page(pte_t * page_table, pte_t pte)
+{
+	if (!pte_none(*page_table)) {
+		printk("put_page: page already exists %08lx\n", pte_val(*page_table));
+		free_page(pte_page(pte));
+		return;
+	}
+/* no need for invalidate */
+	*page_table = pte;
+}
+
+/*
+ * This routine is used to map in a page into an address space: needed by
+ * execve() for the initial stack and environment pages.
  */
 unsigned long put_dirty_page(struct task_struct * tsk, unsigned long page, unsigned long address)
 {
-	unsigned long tmp, *page_table;
+	pgd_t * pgd;
+	pmd_t * pmd;
+	pte_t * pte;
 
 	if (page >= high_memory)
 		printk("put_dirty_page: trying to put page %08lx at %08lx\n",page,address);
 	if (mem_map[MAP_NR(page)] != 1)
 		printk("mem_map disagrees with %08lx at %08lx\n",page,address);
-	page_table = PAGE_DIR_OFFSET(tsk,address);
-	if (PAGE_PRESENT & *page_table)
-		page_table = (unsigned long *) (PAGE_MASK & *page_table);
-	else {
-		if (!(tmp = get_free_page(GFP_KERNEL)))
-			return 0;
-		if (PAGE_PRESENT & *page_table) {
-			free_page(tmp);
-			page_table = (unsigned long *) (PAGE_MASK & *page_table);
-		} else {
-			*page_table = tmp | PAGE_TABLE;
-			page_table = (unsigned long *) tmp;
-		}
+	pgd = pgd_offset(tsk,address);
+	pmd = pmd_alloc(pgd, address);
+	if (!pmd) {
+		free_page(page);
+		oom(tsk);
+		return 0;
 	}
-	page_table += (address >> PAGE_SHIFT) & (PTRS_PER_PAGE-1);
-	if (*page_table) {
+	pte = pte_alloc(pmd, address);
+	if (!pte) {
+		free_page(page);
+		oom(tsk);
+		return 0;
+	}
+	if (!pte_none(*pte)) {
 		printk("put_dirty_page: page already exists\n");
-		*page_table = 0;
+		pte_clear(pte);
 		invalidate();
 	}
-	*page_table = page | (PAGE_DIRTY | PAGE_PRIVATE);
+	*pte = pte_mkwrite(pte_mkdirty(mk_pte(page, PAGE_COPY)));
 /* no need for invalidate */
 	return page;
 }
@@ -538,61 +618,79 @@ unsigned long put_dirty_page(struct task_struct * tsk, unsigned long page, unsig
  *
  * Goto-purists beware: the only reason for goto's here is that it results
  * in better assembly code.. The "default" path will see no jumps at all.
+ *
+ * Note that this routine assumes that the protection checks have been
+ * done by the caller (the low-level page fault routine in most cases).
+ * Thus we can safely just mark it writable once we've done any necessary
+ * COW.
+ *
+ * We also mark the page dirty at this point even though the page will
+ * change only once the write actually happens. This avoids a few races,
+ * and potentially makes it more efficient.
  */
 void do_wp_page(struct vm_area_struct * vma, unsigned long address,
 	int write_access)
 {
-	unsigned long *pde, pte, old_page, prot;
-	unsigned long new_page;
+	pgd_t *page_dir;
+	pmd_t *page_middle;
+	pte_t *page_table, pte;
+	unsigned long old_page, new_page;
 
 	new_page = __get_free_page(GFP_KERNEL);
-	pde = PAGE_DIR_OFFSET(vma->vm_task,address);
-	pte = *pde;
-	if (!(pte & PAGE_PRESENT))
+	page_dir = pgd_offset(vma->vm_task,address);
+	if (pgd_none(*page_dir))
 		goto end_wp_page;
-	if ((pte & PAGE_TABLE) != PAGE_TABLE || pte >= high_memory)
-		goto bad_wp_pagetable;
-	pte &= PAGE_MASK;
-	pte += PAGE_PTR(address);
-	old_page = *(unsigned long *) pte;
-	if (!(old_page & PAGE_PRESENT))
+	if (pgd_bad(*page_dir))
+		goto bad_wp_pagedir;
+	page_middle = pmd_offset(page_dir, address);
+	if (pmd_none(*page_middle))
 		goto end_wp_page;
+	if (pmd_bad(*page_middle))
+		goto bad_wp_pagemiddle;
+	page_table = pte_offset(page_middle, address);
+	pte = *page_table;
+	if (!pte_present(pte))
+		goto end_wp_page;
+	if (pte_write(pte))
+		goto end_wp_page;
+	old_page = pte_page(pte);
 	if (old_page >= high_memory)
 		goto bad_wp_page;
-	if (old_page & PAGE_RW)
-		goto end_wp_page;
 	vma->vm_task->mm->min_flt++;
-	prot = (old_page & ~PAGE_MASK) | PAGE_RW | PAGE_DIRTY;
-	old_page &= PAGE_MASK;
+	/*
+	 * Do we need to copy?
+	 */
 	if (mem_map[MAP_NR(old_page)] != 1) {
 		if (new_page) {
 			if (mem_map[MAP_NR(old_page)] & MAP_PAGE_RESERVED)
 				++vma->vm_task->mm->rss;
 			copy_page(old_page,new_page);
-			*(unsigned long *) pte = new_page | prot;
+			*page_table = pte_mkwrite(pte_mkdirty(mk_pte(new_page, vma->vm_page_prot)));
 			free_page(old_page);
 			invalidate();
 			return;
 		}
+		*page_table = BAD_PAGE;
 		free_page(old_page);
 		oom(vma->vm_task);
-		*(unsigned long *) pte = BAD_PAGE | prot;
 		invalidate();
 		return;
 	}
-	*(unsigned long *) pte |= PAGE_RW | PAGE_DIRTY;
+	*page_table = pte_mkdirty(pte_mkwrite(pte));
 	invalidate();
 	if (new_page)
 		free_page(new_page);
 	return;
 bad_wp_page:
 	printk("do_wp_page: bogus page at address %08lx (%08lx)\n",address,old_page);
-	*(unsigned long *) pte = BAD_PAGE | PAGE_SHARED;
 	send_sig(SIGKILL, vma->vm_task, 1);
 	goto end_wp_page;
-bad_wp_pagetable:
-	printk("do_wp_page: bogus page-table at address %08lx (%08lx)\n",address,pte);
-	*pde = BAD_PAGETABLE | PAGE_TABLE;
+bad_wp_pagemiddle:
+	printk("do_wp_page: bogus page-middle at address %08lx (%08lx)\n", address, pmd_val(*page_middle));
+	send_sig(SIGKILL, vma->vm_task, 1);
+	goto end_wp_page;
+bad_wp_pagedir:
+	printk("do_wp_page: bogus page-dir entry at address %08lx (%08lx)\n", address, pgd_val(*page_dir));
 	send_sig(SIGKILL, vma->vm_task, 1);
 end_wp_page:
 	if (new_page)
@@ -615,12 +713,9 @@ int verify_area(int type, const void * addr, unsigned long size)
 	if (get_fs() == get_ds())
 		return 0;
 
-	for (vma = current->mm->mmap ; ; vma = vma->vm_next) {
-		if (!vma)
-			goto bad_area;
-		if (vma->vm_end > start)
-			break;
-	}
+	vma = find_vma(current, start);
+	if (!vma)
+		goto bad_area;
 	if (vma->vm_start <= start)
 		goto good_area;
 	if (!(vma->vm_flags & VM_GROWSDOWN))
@@ -629,13 +724,11 @@ int verify_area(int type, const void * addr, unsigned long size)
 		goto bad_area;
 
 good_area:
-	if (!wp_works_ok && type == VERIFY_WRITE)
-		goto check_wp_fault_by_hand;
+	if (type == VERIFY_WRITE)
+		goto check_write;
 	for (;;) {
 		struct vm_area_struct * next;
-		if (!(vma->vm_page_prot & PAGE_USER))
-			goto bad_area;
-		if (type != VERIFY_READ && !(vma->vm_page_prot & (PAGE_COW | PAGE_RW)))
+		if (!(vma->vm_flags & VM_READ))
 			goto bad_area;
 		if (vma->vm_end - start >= size)
 			return 0;
@@ -645,6 +738,22 @@ good_area:
 		vma = next;
 	}
 
+check_write:
+	if (!(vma->vm_flags & VM_WRITE))
+		goto bad_area;
+	if (!wp_works_ok)
+		goto check_wp_fault_by_hand;
+	for (;;) {
+		if (vma->vm_end - start >= size)
+			break;
+		if (!vma->vm_next || vma->vm_end != vma->vm_next->vm_start)
+			goto bad_area;
+		vma = vma->vm_next;
+		if (!(vma->vm_flags & VM_WRITE))
+			goto bad_area;
+	}
+	return 0;
+
 check_wp_fault_by_hand:
 	size--;
 	size += start & ~PAGE_MASK;
@@ -652,34 +761,35 @@ check_wp_fault_by_hand:
 	start &= PAGE_MASK;
 
 	for (;;) {
-		if (!(vma->vm_page_prot & (PAGE_COW | PAGE_RW)))
-			goto bad_area;
-		do_wp_page(vma, start, PAGE_PRESENT);
+		do_wp_page(vma, start, 1);
 		if (!size)
-			return 0;
+			break;
 		size--;
 		start += PAGE_SIZE;
 		if (start < vma->vm_end)
 			continue;
 		vma = vma->vm_next;
 		if (!vma || vma->vm_start != start)
-			break;
+			goto bad_area;
+		if (!(vma->vm_flags & VM_WRITE))
+			goto bad_area;;
 	}
+	return 0;
 
 bad_area:
 	return -EFAULT;
 }
 
-static inline void get_empty_page(struct task_struct * tsk, unsigned long address)
+static inline void get_empty_page(struct vm_area_struct * vma, pte_t * page_table)
 {
 	unsigned long tmp;
 
 	if (!(tmp = get_free_page(GFP_KERNEL))) {
-		oom(tsk);
-		tmp = BAD_PAGE;
+		oom(vma->vm_task);
+		put_page(page_table, BAD_PAGE);
+		return;
 	}
-	if (!put_page(tsk,tmp,address,PAGE_PRIVATE))
-		free_page(tmp);
+	put_page(page_table, pte_mkwrite(mk_pte(tmp, vma->vm_page_prot)));
 }
 
 /*
@@ -694,80 +804,109 @@ static int try_to_share(unsigned long to_address, struct vm_area_struct * to_are
 	unsigned long from_address, struct vm_area_struct * from_area,
 	unsigned long newpage)
 {
-	unsigned long from;
-	unsigned long to;
-	unsigned long from_page;
-	unsigned long to_page;
+	pgd_t * from_dir, * to_dir;
+	pmd_t * from_middle, * to_middle;
+	pte_t * from_table, * to_table;
+	pte_t from, to;
 
-	from_page = (unsigned long)PAGE_DIR_OFFSET(from_area->vm_task,from_address);
-	to_page = (unsigned long)PAGE_DIR_OFFSET(to_area->vm_task,to_address);
+	from_dir = pgd_offset(from_area->vm_task,from_address);
 /* is there a page-directory at from? */
-	from = *(unsigned long *) from_page;
-	if (!(from & PAGE_PRESENT))
+	if (pgd_none(*from_dir))
 		return 0;
-	from &= PAGE_MASK;
-	from_page = from + PAGE_PTR(from_address);
-	from = *(unsigned long *) from_page;
+	if (pgd_bad(*from_dir)) {
+		printk("try_to_share: bad page directory %08lx\n", pgd_val(*from_dir));
+		pgd_clear(from_dir);
+		return 0;
+	}
+	from_middle = pmd_offset(from_dir, from_address);
+/* is there a mid-directory at from? */
+	if (pmd_none(*from_middle))
+		return 0;
+	if (pmd_bad(*from_middle)) {
+		printk("try_to_share: bad mid directory %08lx\n", pmd_val(*from_middle));
+		pmd_clear(from_middle);
+		return 0;
+	}
+	from_table = pte_offset(from_middle, from_address);
+	from = *from_table;
 /* is the page present? */
-	if (!(from & PAGE_PRESENT))
+	if (!pte_present(from))
 		return 0;
-/* if it is private, it must be clean to be shared */
-	if (from & PAGE_DIRTY) {
-		if (from_area->vm_page_prot & PAGE_COW)
+/* if it is dirty it must be from a shared mapping to be shared */
+	if (pte_dirty(from)) {
+		if (!(from_area->vm_flags & VM_SHARED))
 			return 0;
-		if (!(from_area->vm_page_prot & PAGE_RW))
+		if (pte_write(from)) {
+			printk("nonwritable, but dirty, shared page\n");
 			return 0;
-	}		
+		}
+	}
 /* is the page reasonable at all? */
-	if (from >= high_memory)
+	if (pte_page(from) >= high_memory)
 		return 0;
-	if (mem_map[MAP_NR(from)] & MAP_PAGE_RESERVED)
+	if (mem_map[MAP_NR(pte_page(from))] & MAP_PAGE_RESERVED)
 		return 0;
 /* is the destination ok? */
-	to = *(unsigned long *) to_page;
-	if (!(to & PAGE_PRESENT))
+	to_dir = pgd_offset(to_area->vm_task,to_address);
+/* is there a page-directory at to? */
+	if (pgd_none(*to_dir))
 		return 0;
-	to &= PAGE_MASK;
-	to_page = to + PAGE_PTR(to_address);
-	if (*(unsigned long *) to_page)
+	if (pgd_bad(*to_dir)) {
+		printk("try_to_share: bad page directory %08lx\n", pgd_val(*to_dir));
+		return 0;
+	}
+	to_middle = pmd_offset(to_dir, to_address);
+/* is there a mid-directory at to? */
+	if (pmd_none(*to_middle))
+		return 0;
+	if (pmd_bad(*to_middle)) {
+		printk("try_to_share: bad mid directory %08lx\n", pmd_val(*to_middle));
+		return 0;
+	}
+	to_table = pte_offset(to_middle, to_address);
+	to = *to_table;
+	if (!pte_none(to))
 		return 0;
 /* do we copy? */
 	if (newpage) {
-		if (in_swap_cache(from)) { /* implies PAGE_DIRTY */
-			if (from_area->vm_page_prot & PAGE_COW)
+		/* if it's in the swap cache, it's dirty by implication */
+		/* so we can't use it if it's not from a shared mapping */
+		if (in_swap_cache(pte_page(from))) {
+			if (!(from_area->vm_flags & VM_SHARED))
 				return 0;
-			if (!(from_area->vm_page_prot & PAGE_RW))
+			if (!pte_write(from)) {
+				printk("nonwritable, but dirty, shared page\n");
 				return 0;
+			}
 		}
-		copy_page((from & PAGE_MASK), newpage);
-		*(unsigned long *) to_page = newpage | to_area->vm_page_prot;
+		copy_page(pte_page(from), newpage);
+		*to_table = mk_pte(newpage, to_area->vm_page_prot);
 		return 1;
 	}
-/* do a final swap-cache test before sharing them.. */
-	if (in_swap_cache(from)) {
-		if (from_area->vm_page_prot & PAGE_COW)
+/*
+ * do a final swap-cache test before sharing them: if it's in the swap
+ * cache, we have to remove it now, as we get two pointers to the same
+ * physical page and the cache can't handle it. Mark the original dirty.
+ *
+ * NOTE! Even if "from" is dirty, "to" will be clean: if we get here
+ * with a dirty "from", the from-mapping is a shared map, so we can trust
+ * the page contents to be up-to-date
+ */
+	if (in_swap_cache(pte_page(from))) {
+		if (!(from_area->vm_flags & VM_SHARED))
 			return 0;
-		if (!(from_area->vm_page_prot & PAGE_RW))
-			return 0;
-		from |= PAGE_DIRTY;
-		*(unsigned long *) from_page = from;
-		delete_from_swap_cache(from);
-		invalidate();
+		*from_table = pte_mkdirty(from);
+		delete_from_swap_cache(pte_page(from));
 	}
-	mem_map[MAP_NR(from)]++;
-/* fill in the 'to' field, checking for COW-stuff */
-	to = (from & (PAGE_MASK | PAGE_DIRTY)) | to_area->vm_page_prot;
-	if (to & PAGE_COW)
-		to &= ~PAGE_RW;
-	*(unsigned long *) to_page = to;
+	mem_map[MAP_NR(pte_page(from))]++;
+	*to_table = mk_pte(pte_page(from), to_area->vm_page_prot);
 /* Check if we need to do anything at all to the 'from' field */
-	if (!(from & PAGE_RW))
+	if (!pte_write(from))
 		return 1;
-	if (!(from_area->vm_page_prot & PAGE_COW))
+	if (from_area->vm_flags & VM_SHARED)
 		return 1;
 /* ok, need to mark it read-only, so invalidate any possible old TB entry */
-	from &= ~PAGE_RW;
-	*(unsigned long *) from_page = from;
+	*from_table = pte_wrprotect(from);
 	invalidate();
 	return 1;
 }
@@ -792,7 +931,7 @@ static int share_page(struct vm_area_struct * area, unsigned long address,
 		return 0;
 	/* do we need to copy or can we just share? */
 	give_page = 0;
-	if ((area->vm_page_prot & PAGE_COW) && write_access) {
+	if (write_access && !(area->vm_flags & VM_SHARED)) {
 		if (!newpage)
 			return 0;
 		give_page = newpage;
@@ -828,82 +967,76 @@ static int share_page(struct vm_area_struct * area, unsigned long address,
 /*
  * fill in an empty page-table if none exists.
  */
-static inline unsigned long get_empty_pgtable(struct task_struct * tsk,unsigned long address)
+static inline pte_t * get_empty_pgtable(struct task_struct * tsk,unsigned long address)
 {
-	unsigned long page;
-	unsigned long *p;
+	pgd_t *pgd;
+	pmd_t *pmd;
+	pte_t *pte;
 
-	p = PAGE_DIR_OFFSET(tsk,address);
-	if (PAGE_PRESENT & *p)
-		return *p;
-	if (*p) {
-		printk("get_empty_pgtable: bad page-directory entry \n");
-		*p = 0;
+	pgd = pgd_offset(tsk, address);
+	pmd = pmd_alloc(pgd, address);
+	if (!pmd) {
+		oom(tsk);
+		return NULL;
 	}
-	page = get_free_page(GFP_KERNEL);
-	p = PAGE_DIR_OFFSET(tsk,address);
-	if (PAGE_PRESENT & *p) {
-		free_page(page);
-		return *p;
+	pte = pte_alloc(pmd, address);
+	if (!pte) {
+		oom(tsk);
+		return NULL;
 	}
-	if (*p) {
-		printk("get_empty_pgtable: bad page-directory entry \n");
-		*p = 0;
-	}
-	if (page) {
-		*p = page | PAGE_TABLE;
-		return *p;
-	}
-	oom(current);
-	*p = BAD_PAGETABLE | PAGE_TABLE;
-	return 0;
+	return pte;
 }
 
-static inline void do_swap_page(struct vm_area_struct * vma,
-	unsigned long address, unsigned long * pge, unsigned long entry)
+static inline void do_swap_page(struct vm_area_struct * vma, unsigned long address,
+	pte_t * page_table, pte_t entry, int write_access)
 {
-	unsigned long page;
+	pte_t page;
 
-	if (vma->vm_ops && vma->vm_ops->swapin)
-		page = vma->vm_ops->swapin(vma, address - vma->vm_start + vma->vm_offset, entry);
-	else
-		page = swap_in(entry);
-	if (*pge != entry) {
-		free_page(page);
+	if (!vma->vm_ops || !vma->vm_ops->swapin) {
+		swap_in(vma, page_table, pte_val(entry), write_access);
 		return;
 	}
-	page = page | vma->vm_page_prot;
-	if (mem_map[MAP_NR(page)] > 1 && (page & PAGE_COW))
-		page &= ~PAGE_RW;
+	page = vma->vm_ops->swapin(vma, address - vma->vm_start + vma->vm_offset, pte_val(entry));
+	if (pte_val(*page_table) != pte_val(entry)) {
+		free_page(pte_page(page));
+		return;
+	}
+	if (mem_map[MAP_NR(pte_page(page))] > 1 && !(vma->vm_flags & VM_SHARED))
+		page = pte_wrprotect(page);
 	++vma->vm_task->mm->rss;
 	++vma->vm_task->mm->maj_flt;
-	*pge = page;
+	*page_table = page;
 	return;
 }
 
+/*
+ * do_no_page() tries to create a new page mapping. It aggressively
+ * tries to share with existing pages, but makes a separate copy if
+ * the "write_access" parameter is true in order to avoid the next
+ * page fault.
+ */
 void do_no_page(struct vm_area_struct * vma, unsigned long address,
 	int write_access)
 {
-	unsigned long page, entry, prot;
+	pte_t * page_table;
+	pte_t entry;
+	unsigned long page;
 
-	page = get_empty_pgtable(vma->vm_task,address);
-	if (!page)
+	page_table = get_empty_pgtable(vma->vm_task,address);
+	if (!page_table)
 		return;
-	page &= PAGE_MASK;
-	page += PAGE_PTR(address);
-	entry = *(unsigned long *) page;
-	if (entry & PAGE_PRESENT)
+	entry = *page_table;
+	if (pte_present(entry))
 		return;
-	if (entry) {
-		do_swap_page(vma, address, (unsigned long *) page, entry);
+	if (!pte_none(entry)) {
+		do_swap_page(vma, address, page_table, entry, write_access);
 		return;
 	}
 	address &= PAGE_MASK;
-
 	if (!vma->vm_ops || !vma->vm_ops->nopage) {
 		++vma->vm_task->mm->rss;
 		++vma->vm_task->mm->min_flt;
-		get_empty_page(vma->vm_task,address);
+		get_empty_page(vma, page_table);
 		return;
 	}
 	page = get_free_page(GFP_KERNEL);
@@ -914,18 +1047,18 @@ void do_no_page(struct vm_area_struct * vma, unsigned long address,
 	}
 	if (!page) {
 		oom(current);
-		put_page(vma->vm_task, BAD_PAGE, address, PAGE_PRIVATE);
+		put_page(page_table, BAD_PAGE);
 		return;
 	}
 	++vma->vm_task->mm->maj_flt;
 	++vma->vm_task->mm->rss;
-	prot = vma->vm_page_prot;
 	/*
 	 * The fourth argument is "no_share", which tells the low-level code
 	 * to copy, not share the page even if sharing is possible.  It's
-	 * essentially an early COW detection ("moo at 5 AM").
+	 * essentially an early COW detection 
 	 */
-	page = vma->vm_ops->nopage(vma, address, page, write_access && (prot & PAGE_COW));
+	page = vma->vm_ops->nopage(vma, address, page,
+		write_access && !(vma->vm_flags & VM_SHARED));
 	if (share_page(vma, address, write_access, 0)) {
 		free_page(page);
 		return;
@@ -934,13 +1067,67 @@ void do_no_page(struct vm_area_struct * vma, unsigned long address,
 	 * This silly early PAGE_DIRTY setting removes a race
 	 * due to the bad i386 page protection. But it's valid
 	 * for other architectures too.
+	 *
+	 * Note that if write_access is true, we either now have
+	 * a exclusive copy of the page, or this is a shared mapping,
+	 * so we can make it writable and dirty to avoid having to
+	 * handle that later.
 	 */
+	entry = mk_pte(page, vma->vm_page_prot);
 	if (write_access) {
-		prot |= PAGE_DIRTY;	/* can't be COW-shared: see "no_share" above */
-	} else if ((prot & PAGE_COW) && mem_map[MAP_NR(page)] > 1)
-		prot &= ~PAGE_RW;
-	if (put_page(vma->vm_task, page, address, prot))
+		entry = pte_mkwrite(pte_mkdirty(entry));
+	} else if (mem_map[MAP_NR(page)] > 1 && !(vma->vm_flags & VM_SHARED))
+		entry = pte_wrprotect(entry);
+	put_page(page_table, entry);
+}
+
+/*
+ * The above separate functions for the no-page and wp-page
+ * cases will go away (they mostly do the same thing anyway),
+ * and we'll instead use only a general "handle_mm_fault()".
+ *
+ * These routines also need to handle stuff like marking pages dirty
+ * and/or accessed for architectures that don't do it in hardware (most
+ * RISC architectures).  The early dirtying is also good on the i386.
+ *
+ * There is also a hook called "update_mmu_cache()" that architectures
+ * with external mmu caches can use to update those (ie the Sparc or
+ * PowerPC hashed page tables that act as extended TLBs).
+ */
+static inline void handle_pte_fault(struct vm_area_struct * vma, unsigned long address,
+	int write_access, pte_t * pte)
+{
+	if (!pte_present(*pte)) {
+		do_no_page(vma, address, write_access);
 		return;
-	free_page(page);
-	oom(current);
+	}
+	*pte = pte_mkyoung(*pte);
+	if (!write_access)
+		return;
+	if (pte_write(*pte)) {
+		*pte = pte_mkdirty(*pte);
+		return;
+	}
+	do_wp_page(vma, address, write_access);
+}
+
+void handle_mm_fault(struct vm_area_struct * vma, unsigned long address,
+	int write_access)
+{
+	pgd_t *pgd;
+	pmd_t *pmd;
+	pte_t *pte;
+
+	pgd = pgd_offset(vma->vm_task, address);
+	pmd = pmd_alloc(pgd, address);
+	if (!pmd)
+		goto no_memory;
+	pte = pte_alloc(pmd, address);
+	if (!pte)
+		goto no_memory;
+	handle_pte_fault(vma, address, write_access, pte);
+	update_mmu_cache(vma, address, *pte);
+	return;
+no_memory:
+	oom(vma->vm_task);
 }

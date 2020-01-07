@@ -52,9 +52,11 @@ SCSI_OBJS := $(SCSI_OBJS) sg.o
 SCSI_SRCS := $(SCSI_SRCS) sg.c
 endif
 
+SCSI_SRCS := $(SCSI_SRCS) qlogic.c
 ifdef CONFIG_SCSI_QLOGIC
 SCSI_OBJS := $(SCSI_OBJS) qlogic.o
-SCSI_SRCS := $(SCSI_SRCS) qlogic.c
+else
+SCSI_MODULE_OBJS := $(SCSI_MODULE_OBJS) qlogic.o
 endif
 
 ifdef CONFIG_SCSI_AHA152X
@@ -62,8 +64,8 @@ SCSI_OBJS := $(SCSI_OBJS) aha152x.o
 SCSI_SRCS := $(SCSI_SRCS) aha152x.c
 endif
 
-SCSI_SRCS := $(SCSI_SRCS) aha1542.c
 ifdef CONFIG_SCSI_AHA1542
+SCSI_SRCS := $(SCSI_SRCS) aha1542.c
 SCSI_OBJS := $(SCSI_OBJS) aha1542.o
 else
 SCSI_MODULE_OBJS := $(SCSI_MODULE_OBJS) aha1542.o
@@ -92,10 +94,12 @@ endif
 ifdef CONFIG_SCSI_U14_34F
 SCSI_OBJS := $(SCSI_OBJS) u14-34f.o
 SCSI_SRCS := $(SCSI_SRCS) u14-34f.c
+else
+SCSI_MODULE_OBJS := $(SCSI_MODULE_OBJS) u14-34f.o
 endif
 
-SCSI_SRCS := $(SCSI_SRCS) scsi_debug.c
 ifdef CONFIG_SCSI_DEBUG
+SCSI_SRCS := $(SCSI_SRCS) scsi_debug.c
 SCSI_OBJS := $(SCSI_OBJS) scsi_debug.o
 else
 SCSI_MODULE_OBJS := $(SCSI_MODULE_OBJS) scsi_debug.o
@@ -106,8 +110,8 @@ SCSI_OBJS := $(SCSI_OBJS) fdomain.o
 SCSI_SRCS := $(SCSI_SRCS) fdomain.c
 endif
 
-SCSI_SRCS := $(SCSI_SRCS) in2000.c
 ifdef CONFIG_SCSI_IN2000
+SCSI_SRCS := $(SCSI_SRCS) in2000.c
 SCSI_OBJS := $(SCSI_OBJS) in2000.o
 else
 SCSI_MODULE_OBJS := $(SCSI_MODULE_OBJS) in2000.o
@@ -156,6 +160,8 @@ endif
 ifdef CONFIG_SCSI_EATA
 SCSI_OBJS := $(SCSI_OBJS) eata.o
 SCSI_SRCS := $(SCSI_SRCS) eata.c
+else
+SCSI_MODULE_OBJS := $(SCSI_MODULE_OBJS) eata.o
 endif
 
 
@@ -193,6 +199,7 @@ modules: $(SCSI_MODULE_OBJS)
 
 dep:
 	$(CPP) -M $(AHA152X) $(SCSI_SRCS) > .depend
+	$(CPP) -M -DMODULE $(SCSI_MODULE_OBJS:.o=.c) >> .depend
 
 else
 

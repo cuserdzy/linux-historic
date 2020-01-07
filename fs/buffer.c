@@ -33,6 +33,7 @@ static char buffersize_index[9] = {-1,  0,  1, -1,  2, -1, -1, -1, 3};
 static short int bufferindex_size[NR_SIZES] = {512, 1024, 2048, 4096};
 
 #define BUFSIZE_INDEX(X) ((int) buffersize_index[(X)>>9])
+#define MAX_BUF_PER_PAGE (PAGE_SIZE / 512)
 
 static int grow_buffers(int pri, int size);
 static int shrink_specific_buffers(unsigned int priority, int size);
@@ -258,14 +259,16 @@ void invalidate_buffers(dev_t dev)
 
 	for(nlist = 0; nlist < NR_LIST; nlist++) {
 		bh = lru_list[nlist];
-		for (i = nr_buffers_type[nlist]*2 ; --i > 0 ; 
-		     bh = bh->b_next_free) {
+		for (i = nr_buffers_type[nlist]*2 ; --i > 0 ; bh = bh->b_next_free) {
 			if (bh->b_dev != dev)
-				 continue;
+				continue;
 			wait_on_buffer(bh);
-			if (bh->b_dev == dev)
-				 bh->b_flushtime = bh->b_uptodate = 
-					  bh->b_dirt = bh->b_req = 0;
+			if (bh->b_dev != dev)
+				continue;
+			if (bh->b_count)
+				continue;
+			bh->b_flushtime = bh->b_uptodate = 
+				bh->b_dirt = bh->b_req = 0;
 		}
 	}
 }
@@ -741,20 +744,19 @@ void set_writetime(struct buffer_head * buf, int flag)
 }
 
 
-static char buffer_disposition[] = {BUF_CLEAN, BUF_SHARED, BUF_LOCKED, BUF_SHARED, 
-				      BUF_DIRTY, BUF_DIRTY, BUF_DIRTY, BUF_DIRTY};
-
 void refile_buffer(struct buffer_head * buf){
-	int i, dispose;
-	i = 0;
+	int dispose;
 	if(buf->b_dev == 0xffff) panic("Attempt to refile free buffer\n");
-	if(mem_map[MAP_NR((unsigned long) buf->b_data)] != 1) i = 1;
-	if(buf->b_lock) i |= 2;
-	if(buf->b_dirt) i |= 4;
-	dispose = buffer_disposition[i];
-	if(buf->b_list == BUF_SHARED && dispose == BUF_CLEAN)
-		 dispose = BUF_UNSHARED;
-	if(dispose == -1) panic("Bad buffer settings (%d)\n", i);
+	if (buf->b_dirt)
+		dispose = BUF_DIRTY;
+	else if (mem_map[MAP_NR((unsigned long) buf->b_data)] > 1)
+		dispose = BUF_SHARED;
+	else if (buf->b_lock)
+		dispose = BUF_LOCKED;
+	else if (buf->b_list == BUF_SHARED)
+		dispose = BUF_UNSHARED;
+	else
+		dispose = BUF_CLEAN;
 	if(dispose == BUF_CLEAN) buf->b_lru_time = jiffies;
 	if(dispose != buf->b_list)  {
 		if(dispose == BUF_DIRTY || dispose == BUF_UNSHARED)
@@ -963,7 +965,7 @@ static void read_buffers(struct buffer_head * bh[], int nrbuf)
 {
 	int i;
 	int bhnum = 0;
-	struct buffer_head * bhr[8];
+	struct buffer_head * bhr[MAX_BUF_PER_PAGE];
 
 	for (i = 0 ; i < nrbuf ; i++) {
 		if (bh[i] && !bh[i]->b_uptodate)
@@ -997,7 +999,7 @@ static unsigned long try_to_align(struct buffer_head ** bh, int nrbuf,
 static unsigned long check_aligned(struct buffer_head * first, unsigned long address,
 	dev_t dev, int *b, int size)
 {
-	struct buffer_head * bh[8];
+	struct buffer_head * bh[MAX_BUF_PER_PAGE];
 	unsigned long page;
 	unsigned long offset;
 	int block;
@@ -1038,7 +1040,7 @@ no_go:
 static unsigned long try_to_load_aligned(unsigned long address,
 	dev_t dev, int b[], int size)
 {
-	struct buffer_head * bh, * tmp, * arr[8];
+	struct buffer_head * bh, * tmp, * arr[MAX_BUF_PER_PAGE];
 	unsigned long offset;
         int isize = BUFSIZE_INDEX(size);
 	int * p;
@@ -1129,7 +1131,7 @@ static inline unsigned long try_to_share_buffers(unsigned long address,
  */
 unsigned long bread_page(unsigned long address, dev_t dev, int b[], int size, int no_share)
 {
-	struct buffer_head * bh[8];
+	struct buffer_head * bh[MAX_BUF_PER_PAGE];
 	unsigned long where;
 	int i, j;
 
@@ -1210,6 +1212,9 @@ static int grow_buffers(int pri, int size)
 	buffermem += PAGE_SIZE;
 	return 1;
 }
+
+
+/* =========== Reduce the buffer memory ============= */
 
 /*
  * try_to_free() checks if all the buffers on this particular page
@@ -1358,7 +1363,7 @@ static int shrink_specific_buffers(unsigned int priority, int size)
 		if(priority > 3 && nlist == BUF_SHARED) continue;
 		bh = lru_list[nlist];
 		if(!bh) continue;
-		i = nr_buffers_type[nlist] >> priority;
+		i = 2*nr_buffers_type[nlist] >> priority;
 		for ( ; i-- > 0 ; bh = bh->b_next_free) {
 			/* We may have stalled while waiting for I/O to complete. */
 			if(bh->b_list != nlist) goto repeat1;
@@ -1385,6 +1390,8 @@ static int shrink_specific_buffers(unsigned int priority, int size)
 	return 0;
 }
 
+
+/* ================== Debugging =================== */
 
 void show_buffers(void)
 {
@@ -1424,6 +1431,9 @@ void show_buffers(void)
 		printk("\n");
 	}
 }
+
+
+/* ====================== Cluster patches for ext2 ==================== */
 
 /*
  * try_to_reassign() checks if all the buffers on this particular page
@@ -1511,7 +1521,7 @@ static int reassign_cluster(dev_t dev,
  */
 static unsigned long try_to_generate_cluster(dev_t dev, int block, int size)
 {
-	struct buffer_head * bh, * tmp, * arr[8];
+	struct buffer_head * bh, * tmp, * arr[MAX_BUF_PER_PAGE];
         int isize = BUFSIZE_INDEX(size);
 	unsigned long offset;
 	unsigned long page;
@@ -1556,7 +1566,7 @@ static unsigned long try_to_generate_cluster(dev_t dev, int block, int size)
 	bh->b_this_page = tmp;
 	while (nblock-- > 0)
 		brelse(arr[nblock]);
-	return 4;
+	return 4; /* ?? */
 not_aligned:
 	while ((tmp = bh) != NULL) {
 		bh = bh->b_this_page;
@@ -1591,6 +1601,9 @@ unsigned long generate_cluster(dev_t dev, int b[], int size)
 	else
 		 return reassign_cluster(dev, b[0], size);
 }
+
+
+/* ===================== Init ======================= */
 
 /*
  * This initializes the initial buffer free list.  nr_buffers_type is set
@@ -1630,6 +1643,9 @@ void buffer_init(void)
 		panic("VFS: Unable to initialize buffer free list!");
 	return;
 }
+
+
+/* ====================== bdflush support =================== */
 
 /* This is a simple kernel daemon, whose job it is to provide a dynamically
  * response to dirty buffers.  Once this process is activated, we write back

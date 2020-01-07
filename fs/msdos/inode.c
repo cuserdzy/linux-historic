@@ -4,6 +4,14 @@
  *  Written 1992,1993 by Werner Almesberger
  */
 
+#ifdef MODULE
+#include <linux/module.h>
+#include <linux/version.h>
+#else
+#define MOD_INC_USE_COUNT
+#define MOD_DEC_USE_COUNT
+#endif
+
 #include <linux/msdos_fs.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -17,14 +25,6 @@
 #include <linux/locks.h>
 
 #include "msbuffer.h"
-
-#ifdef MODULE
-#include <linux/module.h>
-#include <linux/version.h>
-#else
-#define MOD_INC_USE_COUNT
-#define MOD_DEC_USE_COUNT
-#endif
 
 #include <asm/segment.h>
 
@@ -275,7 +275,7 @@ struct super_block *msdos_read_super(struct super_block *sb,void *data,
 		    MSDOS_SB(sb)->fats,MSDOS_SB(sb)->fat_start,MSDOS_SB(sb)->
 		    fat_length,MSDOS_SB(sb)->dir_start,MSDOS_SB(sb)->dir_entries,
 		    MSDOS_SB(sb)->data_start,CF_LE_W(*(unsigned short *) &b->
-		    sectors),b->total_sect,logical_sector_size);
+		    sectors),(unsigned long)b->total_sect,logical_sector_size);
 		printk ("Transaction block size = %d\n",blksize);
 	}
 	if (error) {

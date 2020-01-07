@@ -18,6 +18,7 @@
 
 #include <asm/system.h>
 #include <asm/segment.h>
+#include <asm/pgtable.h>
 #include <asm/hwrpb.h>
 
 extern void scsi_mem_init(unsigned long);
@@ -38,22 +39,22 @@ extern void show_net_buffers(void);
  * ZERO_PAGE is a special page that is used for zero-initialized
  * data and COW.
  */
-unsigned long __bad_pagetable(void)
+pmd_t * __bad_pagetable(void)
 {
 	memset((void *) EMPTY_PGT, 0, PAGE_SIZE);
-	return EMPTY_PGT;
+	return (pmd_t *) EMPTY_PGT;
 }
 
-unsigned long __bad_page(void)
+pte_t __bad_page(void)
 {
 	memset((void *) EMPTY_PGE, 0, PAGE_SIZE);
-	return EMPTY_PGE;
+	return pte_mkdirty(mk_pte((unsigned long) EMPTY_PGE, PAGE_SHARED));
 }
 
 unsigned long __zero_page(void)
 {
 	memset((void *) ZERO_PGE, 0, PAGE_SIZE);
-	return ZERO_PGE;
+	return (unsigned long) ZERO_PGE;
 }
 
 void show_mem(void)
@@ -86,17 +87,25 @@ void show_mem(void)
 
 extern unsigned long free_area_init(unsigned long, unsigned long);
 
+static void load_PCB(struct thread_struct * pcb)
+{
+	__asm__ __volatile__(
+		"stq $30,0(%0)\n\t"
+		"bis %0,%0,$16\n\t"
+		".long %1"
+		: /* no outputs */
+		: "r" (pcb), "i" (PAL_swpctx)
+		: "$0", "$1", "$16", "$22", "$23", "$24", "$25");
+}
+
 /*
  * paging_init() sets up the page tables: in the alpha version this actually
  * unmaps the bootup page table (as we're now in KSEG, so we don't need it).
- *
- * The bootup sequence put the virtual page table into high memory: that
- * means that we cah change the L1 page table by just using VL1p below.
  */
-#define VL1p ((unsigned long *) 0xffffffffffffe000)
 unsigned long paging_init(unsigned long start_mem, unsigned long end_mem)
 {
 	int i;
+	unsigned long newptbr;
 	struct memclust_struct * cluster;
 	struct memdesc_struct * memdesc;
 
@@ -122,8 +131,14 @@ unsigned long paging_init(unsigned long start_mem, unsigned long end_mem)
 	}
 
 	/* unmap the console stuff: we don't need it, and we don't want it */
-	for (i = 0; i < 1023; i++)
-		VL1p[i] = 0;
+	/* Also set up the real kernel PCB while we're at it.. */
+	memset((void *) ZERO_PGE, 0, PAGE_SIZE);
+	memset(swapper_pg_dir, 0, PAGE_SIZE);
+	newptbr = ((unsigned long) swapper_pg_dir - PAGE_OFFSET) >> PAGE_SHIFT;
+	pgd_val(swapper_pg_dir[1023]) = (newptbr << 32) | pgprot_val(PAGE_KERNEL);
+	init_task.tss.ptbr = newptbr;
+	load_PCB(&init_task.tss);
+
 	invalidate_all();
 	return start_mem;
 }
@@ -137,7 +152,7 @@ void mem_init(unsigned long start_mem, unsigned long end_mem)
 	start_mem = PAGE_ALIGN(start_mem);
 
 	/*
-	 * Mark the pages used by the kernel as reserved,,
+	 * Mark the pages used by the kernel as reserved..
 	 */
 	tmp = KERNEL_START;
 	while (tmp < start_mem) {

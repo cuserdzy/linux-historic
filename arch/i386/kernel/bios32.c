@@ -132,6 +132,15 @@ static pci_resource_t pci_list = { 0, 0, NULL };
 static int pci_index = 0;
 static pci_resource_t pci_table[PCI_LIST_SIZE];
 
+static struct	pci_class_type pci_class[PCI_CLASS_NUM] = PCI_CLASS_TYPE;
+static struct	pci_vendor_type	pci_vendor[PCI_VENDOR_NUM] = PCI_VENDOR_TYPE;
+static struct	pci_device_type	pci_device[PCI_DEVICE_NUM] = PCI_DEVICE_TYPE;
+
+#ifdef CONFIG_PCI_OPTIMIZE
+static	struct bridge_mapping_type bridge_mapping[5*BRIDGE_MAPPING_NUM] = BRIDGE_MAPPING_TYPE;
+static	struct optimisation_type optimisation[OPTIMISATION_NUM] = OPTIMISATION_TYPE;
+#endif
+
 static unsigned long bios32_service(unsigned long service)
 {
 	unsigned char return_code;	/* %al */
@@ -487,13 +496,12 @@ int revision_decode(unsigned char bus,unsigned char dev_fn)
 
 int class_decode(unsigned char bus,unsigned char dev_fn)
 {
-	struct pci_class_type 	pci_class[PCI_CLASS_NUM] = PCI_CLASS_TYPE;
 	int 			i;
 	unsigned long   	class;
 		pcibios_read_config_dword(
 			bus, dev_fn, (unsigned char) PCI_CLASS_REVISION, &class);
 		class=class >> 16;
-		for (i=0;i<PCI_CLASS_NUM;i++)
+		for (i=0;i<PCI_CLASS_NUM-1;i++)
 			if (class==pci_class[i].class_id) break;
 		return i;
 }
@@ -501,8 +509,6 @@ int class_decode(unsigned char bus,unsigned char dev_fn)
 
 int device_decode(unsigned char bus,unsigned char dev_fn,unsigned short vendor_num)
 {
-	struct pci_device_type 	pci_device[PCI_DEVICE_NUM] = PCI_DEVICE_TYPE;
-	struct pci_vendor_type 	pci_vendor[PCI_VENDOR_NUM] = PCI_VENDOR_TYPE;
 	int 			i;
 	unsigned short   	device;
 
@@ -517,7 +523,6 @@ int device_decode(unsigned char bus,unsigned char dev_fn,unsigned short vendor_n
 
 int vendor_decode(unsigned char bus,unsigned char dev_fn)
 {
-	struct pci_vendor_type 	pci_vendor[PCI_VENDOR_NUM] = PCI_VENDOR_TYPE;
 	int			i;
 	unsigned short   	vendor;
 
@@ -530,18 +535,10 @@ int vendor_decode(unsigned char bus,unsigned char dev_fn)
 
 #ifdef CONFIG_PCI_OPTIMIZE
 
-unsigned char bridge_decode(int device)
-{
-	struct pci_device_type	pci_device[PCI_DEVICE_NUM] = PCI_DEVICE_TYPE;
-	return (pci_device[device].bridge_id);
-}
-
 /* Turn on/off PCI bridge optimisation. This should allow benchmarking. */
 
 void burst_bridge(unsigned char bus,unsigned char dev_fn,unsigned char pos, int turn_on)
 {
-	struct bridge_mapping_type bridge_mapping[5*BRIDGE_MAPPING_NUM] = BRIDGE_MAPPING_TYPE;
-	struct optimisation_type optimisation[OPTIMISATION_NUM] = OPTIMISATION_TYPE;
 	int i;
 	unsigned char val;
 
@@ -550,17 +547,17 @@ void burst_bridge(unsigned char bus,unsigned char dev_fn,unsigned char pos, int 
 	for (i=0;i<OPTIMISATION_NUM;i++)
 	{
 		printk("    %s : ",optimisation[i].type);
-		if (bridge_mapping[pos+i].adress==0) printk("Not supported.");
+		if (bridge_mapping[pos+i].address==0) printk("Not supported.");
 		else {
 			pcibios_read_config_byte(
-				bus, dev_fn, bridge_mapping[pos+i].adress, &val);
+				bus, dev_fn, bridge_mapping[pos+i].address, &val);
 			if ((val & bridge_mapping[pos+i].mask)==bridge_mapping[pos+i].value) 
 			{
 				printk("%s.",optimisation[i].on);
 				if (turn_on==0) 
 				{
 				pcibios_write_config_byte(
-					bus, dev_fn, bridge_mapping[pos+i].adress,
+					bus, dev_fn, bridge_mapping[pos+i].address,
 					(val | bridge_mapping[pos+i].mask) -
 					bridge_mapping[pos+i].value);
 				printk("Changed! now %s.",optimisation[i].off);
@@ -570,7 +567,7 @@ void burst_bridge(unsigned char bus,unsigned char dev_fn,unsigned char pos, int 
 				if (turn_on==1) 
 				{
 				pcibios_write_config_byte(
-					bus, dev_fn, bridge_mapping[pos+i].adress,
+					bus, dev_fn, bridge_mapping[pos+i].address,
 					(val & (0xff-bridge_mapping[pos+i].mask)) +
 					bridge_mapping[pos+i].value);
 				printk("Changed! now %s.",optimisation[i].on);
@@ -583,7 +580,7 @@ void burst_bridge(unsigned char bus,unsigned char dev_fn,unsigned char pos, int 
 
 #endif
 
-/* In future version in case we detect a PCI to PCi bridge, we will go
+/* In future version in case we detect a PCI to PCI bridge, we will go
 for a recursive device search*/
 
 void probe_devices(unsigned char bus)
@@ -644,7 +641,7 @@ void add_pci_resource(unsigned char bus, unsigned char dev_fn)
 	{
 		printk("Unknown PCI device. PCI Vendor id=%x. PCI Device id=%x.\n",
 			vendor_id & 0xffff,device_id & 0xffff);
-		printk("PLEASE MAIL POTTER@CAO-VLSI.IBP.FR your harware description and /proc/pci.\n");
+		printk("PLEASE MAIL POTTER@CAO-VLSI.IBP.FR your hardware description and /proc/pci.\n");
 		return;
 	}
 	/*
@@ -652,7 +649,7 @@ void add_pci_resource(unsigned char bus, unsigned char dev_fn)
 	 */
 #ifdef CONFIG_PCI_OPTIMIZE
 
-	bridge_id=bridge_decode(device_id);
+	bridge_id=pci_device[device_id].bridge_id;
 	if (bridge_id != 0xff)
 	{
 		burst_bridge(bus,dev_fn,bridge_id,1); /* Burst bridge */
@@ -700,9 +697,6 @@ int get_pci_list(char* buf)
 {
 	int pr, length;
 	pci_resource_t* temp = pci_list.next;
-	struct	pci_class_type	pci_class[PCI_CLASS_NUM] = PCI_CLASS_TYPE;
-	struct	pci_vendor_type	pci_vendor[PCI_VENDOR_NUM] = PCI_VENDOR_TYPE;
-	struct	pci_device_type	pci_device[PCI_DEVICE_NUM] = PCI_DEVICE_TYPE;
 
 	pr = sprintf(buf, "PCI devices found :\n"); 
 	for (length = pr ; (temp) && (length<4000); temp = temp->next)
@@ -771,8 +765,12 @@ unsigned long bios32_init(unsigned long memory_start, unsigned long memory_end)
 		}
 		printk ("bios32_init : BIOS32 Service Directory structure at 0x%p\n", check);
 		if (!bios32_entry) {
-			bios32_indirect.address = bios32_entry = check->fields.entry;
-			printk ("bios32_init : BIOS32 Service Directory entry at 0x%lx\n", bios32_entry);
+			if (check->fields.entry >= 0x100000) {
+				printk("bios32_init: entry in high memory, unable to access\n");
+			} else {
+				bios32_indirect.address = bios32_entry = check->fields.entry;
+				printk ("bios32_init : BIOS32 Service Directory entry at 0x%lx\n", bios32_entry);
+			}
 		} else {
 			printk ("bios32_init : multiple entries, mail drew@colorado.edu\n");
 			/*

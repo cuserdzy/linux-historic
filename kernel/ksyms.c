@@ -3,11 +3,14 @@
  * with dynamically loaded kernel modules.
  *			Jon.
  *
- * Stacked module support and unified symbol table added by
- * Bjorn Ekwall <bj0rn@blox.se>
+ * - Stacked module support and unified symbol table added (June 1994)
+ * - External symbol table support added (December 1994)
+ * - Versions on symbols added (December 1994)
+ * by Bjorn Ekwall <bj0rn@blox.se>
  */
 
 #include <linux/autoconf.h>
+#include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>
 #include <linux/blkdev.h>
@@ -22,7 +25,6 @@
 #include <linux/timer.h>
 #include <linux/binfmts.h>
 #include <linux/personality.h>
-#include <linux/module.h>
 #include <linux/termios.h>
 #include <linux/tqueue.h>
 #include <linux/tty.h>
@@ -35,6 +37,9 @@
 #ifdef CONFIG_INET
 #include <linux/net.h>
 #include <linux/netdevice.h>
+#include <linux/ip.h>
+#include "../net/inet/protocol.h"
+#include "../net/inet/arp.h"
 #endif
 #ifdef CONFIG_PCI
 #include <linux/pci.h>
@@ -50,12 +55,8 @@ extern struct file_operations * get_blkfops(unsigned int);
   
 extern void *sys_call_table;
 
-/* must match struct internal_symbol !!! */
-#define X(name)	{ (void *) &name, "_" #name }
-
 #ifdef CONFIG_FTAPE
 extern char * ftape_big_buffer;
-extern void (*do_floppy)(void);
 #endif
 
 #ifdef CONFIG_SCSI
@@ -67,22 +68,27 @@ extern int sys_tz;
 extern int request_dma(unsigned int dmanr, char * deviceID);
 extern void free_dma(unsigned int dmanr);
 
+extern int close_fp(struct file *filp);
 extern void (* iABI_hook)(struct pt_regs * regs);
 
-struct symbol_table symbol_table = { 0, 0, 0, /* for stacked module support */
-	{
+struct symbol_table symbol_table = {
+#include <linux/symtab_begin.h>
+#ifdef CONFIG_MODVERSIONS
+	{ (void *)1 /* Version version :-) */, "_Using_Versions" },
+#endif
 	/* stackable module support */
 	X(rename_module_symbol),
+	X(register_symtab),
 
 	/* system info variables */
 	/* These check that they aren't defines (0/1) */
-#ifndef EISA_bus
+#ifndef EISA_bus__is_a_macro
 	X(EISA_bus),
 #endif
-#ifndef MCA_bus
+#ifndef MCA_bus__is_a_macro
 	X(MCA_bus),
 #endif
-#ifndef wp_works_ok
+#ifndef wp_works_ok__is_a_macro
 	X(wp_works_ok),
 #endif
 
@@ -124,6 +130,7 @@ struct symbol_table symbol_table = { 0, 0, 0, /* for stacked module support */
 	X(namei),
 	X(lnamei),
 	X(open_namei),
+	X(close_fp),
 	X(check_disk_change),
 	X(invalidate_buffers),
 	X(fsync_dev),
@@ -169,6 +176,12 @@ struct symbol_table symbol_table = { 0, 0, 0, /* for stacked module support */
 	X(register_serial),
 	X(unregister_serial),
 
+	/* tty routines */
+	X(tty_hangup),
+	X(tty_wait_until_sent),
+	X(tty_check_change),
+	X(tty_hung_up_p),
+
 	/* filesystem registration */
 	X(register_filesystem),
 	X(unregister_filesystem),
@@ -200,6 +213,10 @@ struct symbol_table symbol_table = { 0, 0, 0, /* for stacked module support */
 	/* dma handling */
 	X(request_dma),
 	X(free_dma),
+#ifdef HAVE_DISABLE_HLT
+	X(disable_hlt),
+	X(enable_hlt),
+#endif
 
 	/* IO port handling */
 	X(check_region),
@@ -245,15 +262,23 @@ struct symbol_table symbol_table = { 0, 0, 0, /* for stacked module support */
 
 	/* Miscellaneous access points */
 	X(si_meminfo),
-
+#ifdef CONFIG_NET
 	/* socket layer registration */
 	X(sock_register),
 	X(sock_unregister),
+	/* Internet layer registration */
+#ifdef CONFIG_INET	
+	X(inet_add_protocol),
+	X(inet_del_protocol),
+#endif
+	/* Device callback registration */
+	X(register_netdevice_notifier),
+	X(unregister_netdevice_notifier),
+#endif
 
 #ifdef CONFIG_FTAPE
 	/* The next labels are needed for ftape driver.  */
 	X(ftape_big_buffer),
-	X(do_floppy),
 #endif
 	X(floppy_track_buffer),
 #ifdef CONFIG_INET
@@ -274,6 +299,12 @@ struct symbol_table symbol_table = { 0, 0, 0, /* for stacked module support */
 	X(dev_ioctl),
 	X(dev_queue_xmit),
 	X(dev_base),
+	X(dev_close),
+	X(arp_find),
+	X(n_tty_ioctl),
+	X(tty_register_ldisc),
+	X(kill_fasync),
+	X(tty_hung_up_p),
 #endif
 #ifdef CONFIG_SCSI
 	/* Supports loadable scsi drivers */
@@ -283,6 +314,7 @@ struct symbol_table symbol_table = { 0, 0, 0, /* for stacked module support */
 	X(scsi_malloc),
 	X(scsi_register),
 	X(scsi_unregister),
+	X(scsicam_bios_param),
 #endif
 	/* Added to make file system as module */
 	X(set_writetime),
@@ -329,9 +361,7 @@ struct symbol_table symbol_table = { 0, 0, 0, /* for stacked module support */
 	 * Do not add anything below this line,
 	 * as the stacked modules depend on this!
 	 */
-	{ NULL, NULL } /* mark end of table */
-	},
-	{ { NULL, NULL } /* no module refs */ }
+#include <linux/symtab_end.h>
 };
 
 /*

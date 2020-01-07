@@ -37,6 +37,7 @@
  *                                      re-arranged proxy handling.
  *		Alan Cox	:	Changed to use notifiers.
  *		Niibe Yutaka	:	Reply for this device or proxies only.
+ *		Alan Cox	:	Don't proxy across hardware types!
  */
 
 #include <linux/types.h>
@@ -49,6 +50,7 @@
 #include <linux/errno.h>
 #include <linux/if_arp.h>
 #include <linux/in.h>
+#include <linux/mm.h>
 #include <asm/system.h>
 #include <asm/segment.h>
 #include <stdarg.h>
@@ -580,9 +582,7 @@ int arp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 			break;
 #endif
 		case ARPHRD_ETHER:
-#ifdef CONFIG_ARCNET
 		case ARPHRD_ARCNET:
-#endif
 			if(arp->ar_pro != htons(ETH_P_IP))
 			{
 				kfree_skb(skb, FREE_READ);
@@ -658,7 +658,10 @@ int arp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 /* 
  * 	It is now an arp request 
  */
-		if(addr_hint != IS_MYADDR)
+/*
+ * Only reply for the real device address or when it's in our proxy tables
+ */
+		if(tip!=dev->pa_addr)
 		{
 /*
  * 	To get in here, it is a request for someone else.  We need to
@@ -678,7 +681,7 @@ int arp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 			     having to use a huge number of proxy arp entries
 			     and having to keep them uptodate.
 			     */
-			  if (proxy_entry->htype == htype && 
+			  if (proxy_entry->dev != dev && proxy_entry->htype == htype &&
 			      !((proxy_entry->ip^tip)&proxy_entry->mask))
 			    break;
 
@@ -703,8 +706,7 @@ int arp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 /*
  * 	To get here, it must be an arp request for us.  We need to reply.
  */
- 			if(tip==dev->pa_addr)	/* Only reply for the real device address */
-				arp_send(ARPOP_REPLY,ETH_P_ARP,sip,dev,tip,sha,dev->dev_addr);
+			arp_send(ARPOP_REPLY,ETH_P_ARP,sip,dev,tip,sha,dev->dev_addr);
 		}
 	}
 
@@ -840,7 +842,7 @@ int arp_find(unsigned char *haddr, unsigned long paddr, struct device *dev,
 	/*
 	 *	Find an entry
 	 */
-	entry = arp_lookup(paddr, 0);
+	entry = arp_lookup(paddr, 1);
 
 	if (entry != NULL) 	/* It exists */
 	{
@@ -1056,12 +1058,12 @@ static int arp_req_set(struct arpreq *req)
 			htype = ARPHRD_ETHER;
 			hlen = ETH_ALEN;
 			break;
-#ifdef CONFIG_ARCNET
+
 		case ARPHRD_ARCNET:
 			htype = ARPHRD_ARCNET;
 			hlen = 1;	/* length of arcnet addresses */
 			break;
-#endif
+
 #ifdef CONFIG_AX25
 		case ARPHRD_AX25:
 			htype = ARPHRD_AX25;
@@ -1098,6 +1100,13 @@ static int arp_req_set(struct arpreq *req)
 	 *	Find the entry
 	 */
 	entry = arp_lookup(ip, 1);
+	if (entry && (entry->flags & ATF_PUBL) != (r.arp_flags & ATF_PUBL))
+	{
+		sti();
+		arp_destroy(ip,1);
+		cli();
+		entry = NULL;
+	}
 
 	/*
 	 *	Do we need to create a new entry

@@ -35,6 +35,7 @@
  *      Dmitry Gorodchanin      :       Even more cleanups. Preserve CSLIP
  *                                      statistics. Include CSLIP code only
  *                                      if it really needed.
+ *		Alan Cox	:	Free slhc buffers in the right place.
  *
  *
  *
@@ -45,6 +46,10 @@
 
 #define SL_CHECK_TRANSMIT
 #include <linux/config.h>
+#ifdef MODULE
+#include <linux/module.h>
+#include <linux/version.h>
+#endif
 
 /* Undef this, if you don't need 6bit encapsulation code in the driver */
 #define CONFIG_SLIP_MODE_SLIP6
@@ -67,15 +72,10 @@
 #include <linux/if_arp.h>
 #include "slip.h"
 #ifdef CONFIG_INET
-#include "ip.h"
-#include "tcp.h"
+#include <linux/ip.h>
+#include <linux/tcp.h>
 #include "slhc.h"
 #endif
-#ifdef MODULE
-#include <linux/module.h>
-#include <linux/version.h>
-#endif
-
 
 #ifdef MODULE
 #define SLIP_VERSION    "0.8.3-NET3.019-NEWTTY-MODULAR"
@@ -117,6 +117,32 @@ sl_alloc(void)
 static inline void
 sl_free(struct slip *sl)
 {
+	/* Free all SLIP frame buffers. */
+	if (sl->rbuff)  {
+		kfree(sl->rbuff);
+	}
+	sl->rbuff = NULL;
+	if (sl->xbuff)  {
+		kfree(sl->xbuff);
+	}
+	sl->xbuff = NULL;
+#ifdef SL_INCLUDE_CSLIP
+	/* Save CSLIP statistics */
+	if (sl->slcomp)  {
+		sl->rx_compressed += sl->slcomp->sls_i_compressed;
+		sl->rx_dropped    += sl->slcomp->sls_i_tossed;
+		sl->tx_compressed += sl->slcomp->sls_o_compressed;
+		sl->tx_misses     += sl->slcomp->sls_o_misses;
+	}
+	if (sl->cbuff)  {
+		kfree(sl->cbuff);
+	}
+	sl->cbuff = NULL;
+	if(sl->slcomp)
+		slhc_free(sl->slcomp);
+	sl->slcomp = NULL;
+#endif
+
 	if (!clear_bit(SLF_INUSE, &sl->flags)) {
 		printk("%s: sl_free for already free unit.\n", sl->dev->name);
 	}
@@ -582,30 +608,6 @@ sl_close(struct device *dev)
 	
 /*	dev->flags &= ~IFF_UP; */
 
-	/* Free all SLIP frame buffers. */
-	if (sl->rbuff)  {
-		kfree(sl->rbuff);
-	}
-	sl->rbuff = NULL;
-	if (sl->xbuff)  {
-		kfree(sl->xbuff);
-	}
-	sl->xbuff = NULL;
-#ifdef SL_INCLUDE_CSLIP
-	/* Save CSLIP statistics */
-	if (sl->slcomp)  {
-		sl->rx_compressed += sl->slcomp->sls_i_compressed;
-		sl->rx_dropped    += sl->slcomp->sls_i_tossed;
-		sl->tx_compressed += sl->slcomp->sls_o_compressed;
-		sl->tx_misses     += sl->slcomp->sls_o_misses;
-	}
-	if (sl->cbuff)  {
-		kfree(sl->cbuff);
-	}
-	sl->cbuff = NULL;
-	slhc_free(sl->slcomp);
-	sl->slcomp = NULL;
-#endif
 	return 0;
 }
 

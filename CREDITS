@@ -21,7 +21,7 @@ D: Linux-AFS Port, random kernel hacker,
 D: VFS fixes (new notify_change in particular)
 D: Moving all VFS access checks into the file systems
 S: MIT Room E15-341
-S: 20 Ames St.
+S: 20 Ames Street
 S: Cambridge, Massachusetts  02139
 S: USA
 
@@ -31,6 +31,14 @@ D: Adaptec 274x driver
 S: Department of Computer Science
 S: University of Calgary
 S: Calgary, Alberta, Canada
+
+N: Ralf Baechle
+E: ralf@waldorf-gmbh.de
+D: Linux/MIPS port
+D: Linux/68k hacker
+S: Hauptstrasse 19
+S: 79837 St. Blasien
+S: Germany
 
 N: Krishna Balasubramanian
 E: balasub@cis.ohio-state.edu
@@ -80,7 +88,7 @@ N: Randolph Bentson
 E: bentson@grieg.seaslug.org
 D: author of driver for Cyclades Cyclom-Y async mux
 S: 2500 Gilman Dr W, #404
-S: Seattle, WA 98119-2102
+S: Seattle, Washington 98119-2102
 S: USA
 
 N: Stephen R. van den Berg (AKA BuGless)
@@ -321,7 +329,7 @@ D: National Language Support
 D: German Support-Disks for SLS/Slackware called SLT
 D: Linux Internationalization Project
 D: DOSemu
-S: Mohlenweg 19
+S: Muehlenweg 19
 S: 34266 Niestetal
 S: Germany
 
@@ -363,7 +371,7 @@ S: USA
 N: Rob W. W. Hooft
 E: hooft@EMBL-Heidelberg.DE
 D: Shared libs for graphics-tools and for the f2c compiler
-D: Some kernel programming on the floppy and sounddrivers in early days
+D: Some kernel programming on the floppy and sound drivers in early days
 D: Some other hacks to get different kinds of programs to work for linux
 S: Panoramastrasse 18
 S: D-69126 Heidelberg
@@ -497,8 +505,15 @@ S: 00200 Helsinki
 S: Finland
 
 N: Kai M"akisara
-E: Kai.Makisara@vtt.fi
+E: Kai.Makisara@metla.fi
 D: SCSI Tape Driver
+
+N: Hamish Macdonald
+E: hamish@border.ocunix.on.ca
+D: Linux/68k port
+S: 102-B Valleystream Drive
+S: Nepean, Ontario
+S: Canada K2H-9E1
 
 N: Peter MacDonald
 D: SLS distribution
@@ -522,7 +537,6 @@ S: Australia
 
 N: John A. Martin
 E: jam@acm.org
-E: j.a.martin@ieee.org
 D: FSSTND contributor
 D: Credit file compilator
 
@@ -629,6 +643,13 @@ S: Dragonvagen 1 A 13
 S: FIN-00330 Helsingfors
 S: Finland
 
+N: Michael Neuffer
+E: neuffer@goofy.zdv.uni-mainz.de
+D: developer and maintainer of the eata_dma SCSI driver 
+S: Zum Schiersteiner Grund 2
+S: 55127 Mainz
+S: Germany
+
 N: David C. Niemi
 E: niemidc@clark.net
 E: niemidc@slma.com
@@ -648,6 +669,10 @@ S: Subiaco, 6008
 S: Perth, Western Australia
 S: Australia
 
+N: Greg Page
+E: greg@caldera.com
+D: IPX development and support
+
 N: Kai Petzke
 E: wpp@marie.physik.tu-berlin.de
 D: Driver for Laser Magnetic Storage CD-ROM
@@ -656,6 +681,11 @@ D: Port of the database Postgres
 S: Stresemannstr. 62
 S: 10963 Berlin
 S: Germany
+
+N: Ken Pizzini
+E: ken@halcyon.com
+D: CDROM driver "sonycd535" (Sony CDU-535/531)
+S: 
 
 N: Stefan Probst
 E: snprobst@immd4.informatik.uni-erlangen.de
@@ -694,8 +724,8 @@ D: Dosemu
 N: Hannu Savolainen
 E: hannu@voxware.pp.fi
 D: Kernel sound drivers
-S: Pallaksentie 4 A 2
-S: 00970 Helsinki
+S: Hiekkalaiturintie 3 A 8
+S: 00980 Helsinki
 S: Finland
 
 N: Peter De Schrijver
@@ -896,6 +926,7 @@ D: Original kernel README
 D: Linux News (electronic magazine)
 D: Meta-FAQ, originator
 D: INFO-SHEET, former maintainer
+D: Author of the longest-living linux bug
 S: Ohratie 16 C 198
 S: sf-01370 Vantaa
 S: Finland
@@ -922,12 +953,28 @@ S: 17 Canterbury Square #101
 S: Alexandria, Virginia 22304
 S: USA
 
+N: Niibe Yutaka
+E: gniibe@mri.co.jp
+D: PLIP driver
+D: Asynchronous socket I/O in the NET code
+S: Mitsubishi Research Institute, Inc.
+S: ARCO Tower 1-8-1 Shimomeguro Meguro-ku
+S: Tokyo 153
+S: Japan
+
 N: Orest Zborowski
 E: orestz@eskimo.com
 D: XFree86 and kernel development
 S: 1507 145th Place SE #B5
 S: Bellevue, Washington 98007
 S: USA
+
+N: Werner Zimmermann
+E: zimmerma@rz.fht-esslingen.de
+D: CDROM driver "aztcd" (Aztech/Okano/Orchid/Wearnes)
+S: Flandernstrasse 101
+S: D-73732 Esslingen
+S: Germany
 
 N: Leonard N. Zubkoff
 E: lnz@dandelion.com

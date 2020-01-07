@@ -69,15 +69,24 @@ enum net_directory_inos {
 #endif
 #ifdef CONFIG_IP_FIREWALL
 	PROC_NET_IPFWFWD,
-	PROC_NET_IPBLFWD,
+	PROC_NET_IPFWBLK,
 #endif
 #ifdef CONFIG_IP_ACCT
 	PROC_NET_IPACCT,
 #endif
+#if	defined(CONFIG_WAVELAN)
+	PROC_NET_WAVELAN,
+#endif	/* defined(CONFIG_WAVELAN) */
 #endif
 #ifdef CONFIG_IPX
+	PROC_NET_IPX_INTERFACE,
 	PROC_NET_IPX_ROUTE,
 	PROC_NET_IPX,
+#endif
+#ifdef CONFIG_ATALK
+	PROC_NET_ATALK,
+	PROC_NET_AT_ROUTE,
+	PROC_NET_ATIF,
 #endif
 #ifdef CONFIG_AX25
 	PROC_NET_AX25_ROUTE,
@@ -113,6 +122,7 @@ extern struct inode_operations proc_base_inode_operations;
 extern struct inode_operations proc_net_inode_operations;
 extern struct inode_operations proc_mem_inode_operations;
 extern struct inode_operations proc_array_inode_operations;
+extern struct inode_operations proc_arraylong_inode_operations;
 extern struct inode_operations proc_kcore_inode_operations;
 extern struct inode_operations proc_profile_inode_operations;
 extern struct inode_operations proc_kmsg_inode_operations;

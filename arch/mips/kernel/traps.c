@@ -34,21 +34,16 @@ static inline void console_verbose(void)
 
 #define get_seg_byte(seg,addr) ({ \
 register unsigned char __res; \
-int unsigned long save; \
-save = segment_fs; \
 __res = get_user_byte(addr); \
-segment_fs = save; \
 __res;})
 
 #define get_seg_long(seg,addr) ({ \
 register unsigned long __res; \
-int unsigned long save; \
-save = segment_fs; \
 __res = get_user_word(addr); \
-segment_fs = save; \
 __res;})
 
-extern asmlinkage void handle_int(void);
+extern asmlinkage void deskstation_tyne_handle_int(void);
+extern asmlinkage void acer_pica_61_handle_int(void);
 extern asmlinkage void handle_mod(void);
 extern asmlinkage void handle_tlbl(void);
 extern asmlinkage void handle_tlbs(void);
@@ -244,7 +239,7 @@ void do_cpu(struct pt_regs *regs)
 		case 0x44000000:
 		case 0xc4000000:
 		case 0xe4000000:
-			printk("CP1 instruction - enabeling cp1.\n");
+			printk("CP1 instruction - enabling cp1.\n");
 			regs->cp0_status |= ST0_CU1;
 			/*
 			 * No need to handle branch delay slots
@@ -252,7 +247,7 @@ void do_cpu(struct pt_regs *regs)
 			break;
 		default:
 			/*
-			 * This wasn't a cp1 instruction and therfore illegal.
+			 * This wasn't a cp1 instruction and therefore illegal.
 			 * Default is to kill the process.
 			 */
 			send_sig(SIGILL, current, 1);
@@ -289,7 +284,7 @@ void do_watch(struct pt_regs *regs)
 void do_reserved(struct pt_regs *regs)
 {
 	/*
-	 * Game over - no way to handle this if it ever occours.
+	 * Game over - no way to handle this if it ever occurs.
 	 * Most probably caused by a new unknown cpu type or a
 	 * after another deadly hard/software error.
 	 */
@@ -373,6 +368,12 @@ void trap_init(void)
 	 */
 	switch(boot_info.machtype) {
 	case MACH_DESKSTATION_TYNE:
-		set_except_vector(0, handle_int);
+		set_except_vector(0, deskstation_tyne_handle_int);
+		break;
+	case MACH_ACER_PICA_61:
+		set_except_vector(0, acer_pica_61_handle_int);
+		break;
+	default:
+		panic("Unknown machine type");
 		}
 }

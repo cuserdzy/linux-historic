@@ -42,6 +42,7 @@
 
 #include <asm/system.h>
 #include <asm/segment.h>
+#include <asm/pgtable.h>
 
 #include <linux/config.h>
 
@@ -110,14 +111,16 @@ int open_inode(struct inode * inode, int mode)
 		return -EINVAL;
 	f = get_empty_filp();
 	if (!f)
-		return -EMFILE;
+		return -ENFILE;
 	fd = 0;
 	fpp = current->files->fd;
 	for (;;) {
 		if (!*fpp)
 			break;
-		if (++fd > NR_OPEN)
-			return -ENFILE;
+		if (++fd >= NR_OPEN) {
+			f->f_count--;
+			return -EMFILE;
+		}
 		fpp++;
 	}
 	*fpp = f;
@@ -305,7 +308,7 @@ unsigned long * create_tables(char * p,int argc,int envc,int ibcs)
 		mpnt->vm_task = current;
 		mpnt->vm_start = PAGE_MASK & (unsigned long) p;
 		mpnt->vm_end = TASK_SIZE;
-		mpnt->vm_page_prot = PAGE_PRIVATE|PAGE_DIRTY;
+		mpnt->vm_page_prot = PAGE_COPY;
 		mpnt->vm_flags = VM_STACK_FLAGS;
 		mpnt->vm_ops = NULL;
 		mpnt->vm_offset = 0;
@@ -505,7 +508,6 @@ void flush_old_exec(struct linux_binprm * bprm)
 	int i;
 	int ch;
 	char * name;
-	struct vm_area_struct * mpnt, *mpnt1;
 
 	current->dumpable = 1;
 	name = bprm->filename;
@@ -517,20 +519,9 @@ void flush_old_exec(struct linux_binprm * bprm)
 				current->comm[i++] = ch;
 	}
 	current->comm[i] = '\0';
-	/* Release all of the old mmap stuff. */
 
-	mpnt = current->mm->mmap;
-	current->mm->mmap = NULL;
-	while (mpnt) {
-		mpnt1 = mpnt->vm_next;
-		if (mpnt->vm_ops && mpnt->vm_ops->close)
-			mpnt->vm_ops->close(mpnt);
-		remove_shared_vm_struct(mpnt);
-		if (mpnt->vm_inode)
-			iput(mpnt->vm_inode);
-		kfree(mpnt);
-		mpnt = mpnt1;
-	}
+	/* Release all of the old mmap stuff. */
+	exit_mmap(current);
 
 	flush_thread();
 

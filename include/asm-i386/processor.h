@@ -33,12 +33,13 @@ __asm__ __volatile__("decl _intr_count")
  */
 extern int EISA_bus;
 #define MCA_bus 0
+#define MCA_bus__is_a_macro /* for versions in ksyms.c */
 
 /*
  * User space process size: 3GB. This is hardcoded into a few places,
  * so don't change it unless you know what you are doing.
  */
-#define TASK_SIZE	0xc0000000
+#define TASK_SIZE	(0xC0000000UL)
 
 /*
  * Size of io_bitmap in longwords: 32 is ports 0-0x3ff.
@@ -111,6 +112,8 @@ struct thread_struct {
 	unsigned long v86flags, v86mask, v86mode;
 };
 
+#define INIT_MMAP { &init_task, 0, 0x40000000, PAGE_SHARED, VM_READ | VM_WRITE | VM_EXEC }
+
 #define INIT_TSS  { \
 	0,0, \
 	sizeof(init_kernel_stack) + (long) &init_kernel_stack, \
@@ -125,6 +128,14 @@ struct thread_struct {
 	_TSS(0), 0, 0,0, \
 	{ { 0, }, },  /* 387 state */ \
 	NULL, 0, 0, 0, 0 /* vm86_info */ \
+}
+
+static inline void start_thread(struct pt_regs * regs, unsigned long eip, unsigned long esp)
+{
+	regs->cs = USER_CS;
+	regs->ds = regs->es = regs->ss = regs->fs = regs->gs = USER_DS;
+	regs->eip = eip;
+	regs->esp = esp;
 }
 
 #endif /* __ASM_I386_PROCESSOR_H */

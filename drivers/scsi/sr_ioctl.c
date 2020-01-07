@@ -1,5 +1,6 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
+#include <linux/mm.h>
 #include <linux/fs.h>
 #include <asm/segment.h>
 #include <linux/errno.h>
@@ -14,7 +15,8 @@
 
 #define IOCTL_RETRIES 3
 /* The CDROM is fairly slow, so we need a little extra time */
-#define IOCTL_TIMEOUT 200
+/* In fact, it is very slow if it has to spin up first */
+#define IOCTL_TIMEOUT 3000
 
 extern int scsi_ioctl (Scsi_Device *dev, int cmd, void *arg);
 
@@ -407,11 +409,8 @@ int sr_ioctl(struct inode * inode, struct file * file, unsigned int cmd, unsigne
 			    ms_info.addr.lba=scsi_CDs[target].mpcd_sector;
 			  else return (-EINVAL);
 			
-			  if (scsi_CDs[target].mpcd_sector)
-			    ms_info.xa_flag=1; /* valid redirection address */
-			  else
-			    ms_info.xa_flag=0; /* invalid redirection address */
-			  
+			  ms_info.xa_flag=scsi_CDs[target].xa_flags & 0x01;
+			 			  
 			  err=verify_area(VERIFY_WRITE,(void *) arg,
 					  sizeof(struct cdrom_multisession));
 			  if (err) return (err);
@@ -420,11 +419,6 @@ int sr_ioctl(struct inode * inode, struct file * file, unsigned int cmd, unsigne
 			  return (0);
 			}
 
-		case CDROMMULTISESSION_SYS: /* tell start-of-last-session to kernel */
-			if(!suser()) return -EACCES;
-			*((unsigned int *)arg)=scsi_CDs[target].mpcd_sector;
-			return (0);
-			
 		case BLKRASET:
 			if(!suser())  return -EACCES;
 			if(!inode->i_rdev) return -EINVAL;
@@ -436,3 +430,20 @@ int sr_ioctl(struct inode * inode, struct file * file, unsigned int cmd, unsigne
 			return scsi_ioctl(scsi_CDs[target].device,cmd,(void *) arg);
 		}
 }
+
+/*
+ * Overrides for Emacs so that we follow Linus's tabbing style.
+ * Emacs will notice this stuff at the end of the file and automatically
+ * adjust the settings for this buffer only.  This must remain at the end
+ * of the file.
+ * ---------------------------------------------------------------------------
+ * Local variables:
+ * c-indent-level: 8
+ * c-brace-imaginary-offset: 0
+ * c-brace-offset: -8
+ * c-argdecl-indent: 8
+ * c-label-offset: -8
+ * c-continued-statement-offset: 8
+ * c-continued-brace-offset: 0
+ * End:
+ */

@@ -24,11 +24,6 @@
 #include <asm/segment.h>
 #include <asm/system.h>
 
-/* These should maybe be in <linux/tasks.h> */
-
-#define MAX_TASKS_PER_USER (NR_TASKS/2)
-#define MIN_TASKS_LEFT_FOR_ROOT 4
-
 long last_pid=0;
 
 static int find_empty_process(void)
@@ -57,7 +52,7 @@ repeat:
 			goto repeat;
 	}
 	if (tasks_free <= MIN_TASKS_LEFT_FOR_ROOT ||
-	    this_user_tasks > MAX_TASKS_PER_USER)
+	    this_user_tasks > current->rlim[RLIMIT_NPROC].rlim_cur)
 		if (current->uid)
 			return -EAGAIN;
 	return free_task;
@@ -93,8 +88,10 @@ static int dup_mmap(struct task_struct * tsk)
 	p = &tsk->mm->mmap;
 	for (mpnt = current->mm->mmap ; mpnt ; mpnt = mpnt->vm_next) {
 		tmp = (struct vm_area_struct *) kmalloc(sizeof(struct vm_area_struct), GFP_KERNEL);
-		if (!tmp)
+		if (!tmp) {
+			exit_mmap(tsk);
 			return -ENOMEM;
+		}
 		*tmp = *mpnt;
 		tmp->vm_task = tsk;
 		tmp->vm_next = NULL;
@@ -110,6 +107,7 @@ static int dup_mmap(struct task_struct * tsk)
 		*p = tmp;
 		p = &tmp->vm_next;
 	}
+	build_mmap_avl(tsk);
 	return 0;
 }
 
@@ -139,7 +137,6 @@ static void copy_files(unsigned long clone_flags, struct task_struct * p)
 static int copy_mm(unsigned long clone_flags, struct task_struct * p)
 {
 	if (clone_flags & COPYVM) {
-		p->mm->swappable = 1;
 		p->mm->min_flt = p->mm->maj_flt = 0;
 		p->mm->cmin_flt = p->mm->cmaj_flt = 0;
 		if (copy_page_tables(p))
@@ -165,12 +162,11 @@ static void copy_fs(unsigned long clone_flags, struct task_struct * p)
  * information (task[nr]) and sets up the necessary registers. It
  * also copies the data segment in its entirety.
  */
-asmlinkage int sys_fork(struct pt_regs regs)
+int do_fork(unsigned long clone_flags, unsigned long usp, struct pt_regs *regs)
 {
 	int nr;
-	struct task_struct *p;
 	unsigned long new_stack;
-	unsigned long clone_flags = COPYVM | SIGCHLD;
+	struct task_struct *p;
 
 	if(!(p = (struct task_struct*)__get_free_page(GFP_KERNEL)))
 		goto bad_fork;
@@ -196,7 +192,6 @@ asmlinkage int sys_fork(struct pt_regs regs)
 	p->pid = last_pid;
 	p->p_pptr = p->p_opptr = current;
 	p->p_cptr = NULL;
-	SET_LINKS(p);
 	p->signal = 0;
 	p->it_real_value = p->it_virt_value = p->it_prof_value = 0;
 	p->it_real_incr = p->it_virt_incr = p->it_prof_incr = 0;
@@ -205,10 +200,12 @@ asmlinkage int sys_fork(struct pt_regs regs)
 	p->utime = p->stime = 0;
 	p->cutime = p->cstime = 0;
 	p->start_time = jiffies;
+	p->mm->swappable = 0;	/* don't try to swap it out before it's set up */
 	task[nr] = p;
+	SET_LINKS(p);
 
 	/* copy all the process information */
-	clone_flags = copy_thread(nr, COPYVM | SIGCHLD, p, &regs);
+	copy_thread(nr, clone_flags, usp, p, regs);
 	if (copy_mm(clone_flags, p))
 		goto bad_fork_cleanup;
 	p->semundo = NULL;
@@ -216,6 +213,7 @@ asmlinkage int sys_fork(struct pt_regs regs)
 	copy_fs(clone_flags, p);
 
 	/* ok, now we should be set up.. */
+	p->mm->swappable = 1;
 	p->exit_signal = clone_flags & CSIGNAL;
 	p->counter = current->counter >> 1;
 	p->state = TASK_RUNNING;	/* do this last, just in case */

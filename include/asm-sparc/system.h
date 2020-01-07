@@ -1,6 +1,8 @@
 #ifndef __SPARC_SYSTEM_H
 #define __SPARC_SYSTEM_H
 
+#include <asm/segment.h>
+
 /*
  * System defines.. Note that this is included both from .c and .S
  * files, so it does only defines, not any C code.
@@ -18,11 +20,19 @@
  */
 
 #include <asm/openprom.h>
+#include <asm/psr.h>
 
 #define INIT_PCB	0x00011fe0
 #define INIT_STACK	0x00013fe0
 #define START_ADDR	0x00004000
 #define START_SIZE	(32*1024)
+#define EMPTY_PGT	0x00001000
+#define EMPTY_PGE	0x00001000
+#define ZERO_PGE	0x00001000
+
+#define IRQ_ENA_ADR     0x2000        /* This is a bitmap of all activated IRQ's
+				       * which is mapped in head.S during boot.
+				       */
 
 #ifndef __ASSEMBLY__
 
@@ -38,32 +48,30 @@ extern struct linux_romvec *romvec;
 #define stbar() __asm__ __volatile__("stbar": : :"memory")
 #endif
 
-/* Changing the PIL on the sparc is a bit hairy. I figure out some
- * more optimized way of doing this soon.
+/* Changing the PIL on the sparc is a bit hairy. I'll figure out some
+ * more optimized way of doing this soon. This is bletcherous code.
  */
 
 #define swpipl(__new_ipl) \
-({ unsigned long __old_ipl, psr; \
+({ unsigned long psr, retval; \
 __asm__ __volatile__( \
-	"and %1, 15, %1\n\t" \
-	"sll %1, 8, %1\n\t" \
-	"rd %%psr, %2\n\t" \
-	"or %%g0, %2, %0\n\t" \
-	"or %2, %1, %2\n\t" \
-	"wr %2, 0x0, %%psr\n\t" \
-	"srl %0, 8, %0\n\t" \
-        "and %0, 15, %0\n\t" \
-	: "=r" (__old_ipl) \
-	: "r" (__new_ipl), "r" (psr=0)); \
-__old_ipl; })
+        "rd %%psr, %0\n\t" : "=&r" (psr)); \
+retval = psr; \
+psr = (psr & ~(PSR_PIL)); \
+psr |= ((__new_ipl << 8) & PSR_PIL); \
+__asm__ __volatile__( \
+	"wr  %0, 0x0, %%psr\n\t" \
+	: : "r" (psr)); \
+retval = ((retval>>8)&15); \
+retval; })
 
 #define cli()			swpipl(15)  /* 15 = no int's except nmi's */
-#define sti()			swpipl(0)   /* same as alpha */
+#define sti()			swpipl(0)   /* I'm scared */
 #define save_flags(flags)	do { flags = swpipl(15); } while (0)
 #define restore_flags(flags)	swpipl(flags)
 
 #define iret() __asm__ __volatile__ ("jmp %%l1\n\t" \
-				     "rett %l2\n\t": : :"memory")
+				     "rett %%l2\n\t": : :"memory")
 
 #define _set_gate(gate_addr,type,dpl,addr) \
 __asm__ __volatile__ ("nop\n\t")
@@ -81,6 +89,20 @@ __asm__ __volatile__ ("nop\n\t")
 	_set_gate(a,12,3,addr)
 
 
+extern inline unsigned int get_psr(void)
+{
+  unsigned int ret_val;
+  __asm__("rd %%psr, %0\n\t" :
+	  "=r" (ret_val));
+  return ret_val;
+}
+
+extern inline void put_psr(unsigned int new_psr)
+{
+  __asm__("wr %0, 0x0, %%psr\n\t" : :
+	  "r" (new_psr));
+}
+
 /* Must this be atomic? */
 
 extern inline void *xchg_u32(int * m, unsigned long val)
@@ -88,12 +110,12 @@ extern inline void *xchg_u32(int * m, unsigned long val)
 	unsigned long dummy;
 
 	__asm__ __volatile__(
-		"ld [%1],%2\n\t"
-		"st %0, [%1]\n\t"
+		"ld %1,%2   ! xchg_u32() is here\n\t"
+		"st %0, %1\n\t"
 		"or %%g0, %2, %0"
-		: "=r" (val), "=r" (m), "=r" (dummy)
+		: "=r" (val), "=m" (*m), "=r" (dummy)
 		: "0" (val));
-	return (void *)val;
+	return (void *) val;
 }
 
 

@@ -207,8 +207,11 @@ while (tries --)
             page->nfree--;
             if (!page->nfree)
                 {
-                sizes[order].firstfree = page->next;
-                page->next = NULL;
+		  if(dma_flag)
+		    sizes[order].dmafree = page->next;
+		  else
+		    sizes[order].firstfree = page->next;
+		  page->next = NULL;
                 }
             restore_flags(flags);
 
@@ -270,11 +273,13 @@ while (tries --)
      * sizes[order].firstfree used to be NULL, otherwise we wouldn't be
      * here, but you never know.... 
      */
-    page->next = sizes[order].firstfree;
-    if (dma_flag)
+    if (dma_flag) {
+      page->next = sizes[order].dmafree;
       sizes[order].dmafree = page;
-    else
+    } else {
+      page->next = sizes[order].firstfree;
       sizes[order].firstfree = page;
+    }
     restore_flags(flags);
     }
 

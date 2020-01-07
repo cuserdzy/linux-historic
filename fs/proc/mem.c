@@ -1,3 +1,4 @@
+#define THREE_LEVEL
 /*
  *  linux/fs/proc/mem.c
  *
@@ -13,6 +14,7 @@
 #include <asm/page.h>
 #include <asm/segment.h>
 #include <asm/io.h>
+#include <asm/pgtable.h>
 
 /*
  * mem_write isn't really a good idea right now. It needs
@@ -24,10 +26,13 @@
 
 static int mem_read(struct inode * inode, struct file * file,char * buf, int count)
 {
+	pgd_t *page_dir;
+	pmd_t *page_middle;
+	pte_t pte;
+	char * page;
 	struct task_struct * tsk;
 	unsigned long addr, pid;
 	char *tmp;
-	unsigned long pte, page;
 	int i;
 
 	if (count < 0)
@@ -47,20 +52,30 @@ static int mem_read(struct inode * inode, struct file * file,char * buf, int cou
 	while (count > 0) {
 		if (current->signal & ~current->blocked)
 			break;
-		pte = *PAGE_DIR_OFFSET(tsk,addr);
-		if (!(pte & PAGE_PRESENT))
+		page_dir = pgd_offset(tsk,addr);
+		if (pgd_none(*page_dir))
 			break;
-		pte &= PAGE_MASK;
-		pte += PAGE_PTR(addr);
-		page = *(unsigned long *) pte;
-		if (!(page & 1))
+		if (pgd_bad(*page_dir)) {
+			printk("Bad page dir entry %08lx\n", pgd_val(*page_dir));
+			pgd_clear(page_dir);
 			break;
-		page &= PAGE_MASK;
-		page += addr & ~PAGE_MASK;
+		}
+		page_middle = pmd_offset(page_dir,addr);
+		if (pmd_none(*page_middle))
+			break;
+		if (pmd_bad(*page_middle)) {
+			printk("Bad page middle entry %08lx\n", pmd_val(*page_middle));
+			pmd_clear(page_middle);
+			break;
+		}
+		pte = *pte_offset(page_middle,addr);
+		if (!pte_present(pte))
+			break;
+		page = (char *) pte_page(pte) + (addr & ~PAGE_MASK);
 		i = PAGE_SIZE-(addr & ~PAGE_MASK);
 		if (i > count)
 			i = count;
-		memcpy_tofs(tmp,(void *) page,i);
+		memcpy_tofs(tmp, page, i);
 		addr += i;
 		tmp += i;
 		count -= i;
@@ -73,10 +88,13 @@ static int mem_read(struct inode * inode, struct file * file,char * buf, int cou
 
 static int mem_write(struct inode * inode, struct file * file,char * buf, int count)
 {
+	pgd_t *page_dir;
+	pmd_t *page_middle;
+	pte_t pte;
+	char * page;
 	struct task_struct * tsk;
 	unsigned long addr, pid;
 	char *tmp;
-	unsigned long pte, page;
 	int i;
 
 	if (count < 0)
@@ -96,24 +114,32 @@ static int mem_write(struct inode * inode, struct file * file,char * buf, int co
 	while (count > 0) {
 		if (current->signal & ~current->blocked)
 			break;
-		pte = *PAGE_DIR_OFFSET(tsk,addr);
-		if (!(pte & PAGE_PRESENT))
+		page_dir = pgd_offset(tsk,addr);
+		if (pgd_none(*page_dir))
 			break;
-		pte &= PAGE_MASK;
-		pte += PAGE_PTR(addr);
-		page = *(unsigned long *) pte;
-		if (!(page & PAGE_PRESENT))
+		if (pgd_bad(*page_dir)) {
+			printk("Bad page dir entry %08lx\n", pgd_val(*page_dir));
+			pgd_clear(page_dir);
 			break;
-		if (!(page & 2)) {
-			do_wp_page(0,addr,current,0);
-			continue;
 		}
-		page &= PAGE_MASK;
-		page += addr & ~PAGE_MASK;
+		page_middle = pmd_offset(page_dir,addr);
+		if (pmd_none(*page_middle))
+			break;
+		if (pmd_bad(*page_middle)) {
+			printk("Bad page middle entry %08lx\n", pmd_val(*page_middle));
+			pmd_clear(page_middle);
+			break;
+		}
+		pte = *pte_offset(page_middle,addr);
+		if (!pte_present(pte))
+			break;
+		if (!pte_write(pte))
+			break;
+		page = (char *) pte_page(pte) + (addr & ~PAGE_MASK);
 		i = PAGE_SIZE-(addr & ~PAGE_MASK);
 		if (i > count)
 			i = count;
-		memcpy_fromfs((void *) page,tmp,i);
+		memcpy_fromfs(page, tmp, i);
 		addr += i;
 		tmp += i;
 		count -= i;
@@ -142,93 +168,108 @@ static int mem_lseek(struct inode * inode, struct file * file, off_t offset, int
 	}
 }
 
-int
-mem_mmap(struct inode * inode, struct file * file,
+/*
+ * This isn't really reliable by any means..
+ */
+int mem_mmap(struct inode * inode, struct file * file,
 	     struct vm_area_struct * vma)
 {
-  struct task_struct *tsk;
-  unsigned long *src_table, *dest_table, stmp, dtmp;
-  struct vm_area_struct *src_vma = 0;
-  int i;
+	struct task_struct *tsk;
+	pgd_t *src_dir, *dest_dir;
+	pmd_t *src_middle, *dest_middle;
+	pte_t *src_table, *dest_table;
+	unsigned long stmp, dtmp;
+	struct vm_area_struct *src_vma = NULL;
+	int i;
 
-  /* Get the source's task information */
+	/* Get the source's task information */
 
-  tsk = NULL;
-  for (i = 1 ; i < NR_TASKS ; i++)
-    if (task[i] && task[i]->pid == (inode->i_ino >> 16)) {
-      tsk     = task[i];
-      src_vma = task[i]->mm->mmap;
-      break;
-    }
+	tsk = NULL;
+	for (i = 1 ; i < NR_TASKS ; i++)
+		if (task[i] && task[i]->pid == (inode->i_ino >> 16)) {
+			tsk = task[i];
+			break;
+		}
 
-  if (!tsk)
-    return -EACCES;
+	if (!tsk)
+		return -EACCES;
 
-/* Ensure that we have a valid source area.  (Has to be mmap'ed and
-   have valid page information.)  We can't map shared memory at the
-   moment because working out the vm_area_struct & nattach stuff isn't
-   worth it. */
+	/* Ensure that we have a valid source area.  (Has to be mmap'ed and
+	 have valid page information.)  We can't map shared memory at the
+	 moment because working out the vm_area_struct & nattach stuff isn't
+	 worth it. */
 
-  stmp = vma->vm_offset;
-  while (stmp < vma->vm_offset + (vma->vm_end - vma->vm_start)) {
-    while (src_vma && stmp > src_vma->vm_end)
-      src_vma = src_vma->vm_next;
-    if (!src_vma || (src_vma->vm_flags & VM_SHM))
-      return -EINVAL;
+	src_vma = tsk->mm->mmap;
+	stmp = vma->vm_offset;
+	while (stmp < vma->vm_offset + (vma->vm_end - vma->vm_start)) {
+		while (src_vma && stmp > src_vma->vm_end)
+			src_vma = src_vma->vm_next;
+		if (!src_vma || (src_vma->vm_flags & VM_SHM))
+			return -EINVAL;
 
-    src_table = PAGE_DIR_OFFSET(tsk, stmp);
-    if (!*src_table)
-      return -EINVAL;
-    src_table = (unsigned long *)((*src_table & PAGE_MASK) + PAGE_PTR(stmp));
-    if (!*src_table)
-      return -EINVAL;
+		src_dir = pgd_offset(tsk, stmp);
+		if (pgd_none(*src_dir))
+			return -EINVAL;
+		if (pgd_bad(*src_dir)) {
+			printk("Bad source page dir entry %08lx\n", pgd_val(*src_dir));
+			return -EINVAL;
+		}
+		src_middle = pmd_offset(src_dir, stmp);
+		if (pmd_none(*src_middle))
+			return -EINVAL;
+		if (pmd_bad(*src_middle)) {
+			printk("Bad source page middle entry %08lx\n", pmd_val(*src_middle));
+			return -EINVAL;
+		}
+		src_table = pte_offset(src_middle, stmp);
+		if (pte_none(*src_table))
+			return -EINVAL;
 
-    if (stmp < src_vma->vm_start) {
-      if (!(src_vma->vm_flags & VM_GROWSDOWN))
-	return -EINVAL;
-      if (src_vma->vm_end - stmp > current->rlim[RLIMIT_STACK].rlim_cur)
-	return -EINVAL;
-    }
-    stmp += PAGE_SIZE;
-  }
+		if (stmp < src_vma->vm_start) {
+			if (!(src_vma->vm_flags & VM_GROWSDOWN))
+				return -EINVAL;
+			if (src_vma->vm_end - stmp > current->rlim[RLIMIT_STACK].rlim_cur)
+				return -EINVAL;
+		}
+		stmp += PAGE_SIZE;
+	}
 
-  src_vma = task[i]->mm->mmap;
-  stmp    = vma->vm_offset;
-  dtmp    = vma->vm_start;
+	src_vma = tsk->mm->mmap;
+	stmp    = vma->vm_offset;
+	dtmp    = vma->vm_start;
 
-  while (dtmp < vma->vm_end) {
-    while (src_vma && stmp > src_vma->vm_end)
-      src_vma = src_vma->vm_next;
+	while (dtmp < vma->vm_end) {
+		while (src_vma && stmp > src_vma->vm_end)
+			src_vma = src_vma->vm_next;
 
-    src_table = PAGE_DIR_OFFSET(tsk, stmp);
-    src_table = (unsigned long *)((*src_table & PAGE_MASK) + PAGE_PTR(stmp));
+		src_dir = pgd_offset(tsk, stmp);
+		src_middle = pmd_offset(src_dir, stmp);
+		src_table = pte_offset(src_middle, stmp);
 
-    dest_table = PAGE_DIR_OFFSET(current, dtmp);
+		dest_dir = pgd_offset(current, dtmp);
+		dest_middle = pmd_alloc(dest_dir, dtmp);
+		if (!dest_middle)
+			return -ENOMEM;
+		dest_table = pte_alloc(dest_middle, dtmp);
+		if (!dest_table)
+			return -ENOMEM;
 
-    if (!*dest_table) {
-      *dest_table = get_free_page(GFP_KERNEL);
-      if (!*dest_table) { oom(current); *dest_table=BAD_PAGE; }
-      else *dest_table |= PAGE_TABLE;
-    }
-    
-    dest_table = (unsigned long *)((*dest_table & PAGE_MASK) + PAGE_PTR(dtmp));
+		if (!pte_present(*src_table))
+			do_no_page(src_vma, stmp, 1);
 
-    if (!(*src_table & PAGE_PRESENT)) 
-      do_no_page(src_vma, stmp, PAGE_PRESENT);
+		if ((vma->vm_flags & VM_WRITE) && !pte_write(*src_table))
+			do_wp_page(src_vma, stmp, 1);
 
-    if ((vma->vm_flags & VM_WRITE) && !(*src_table & PAGE_RW))
-      do_wp_page(src_vma, stmp, PAGE_RW | PAGE_PRESENT);
+		*src_table = pte_mkdirty(*src_table);
+		*dest_table = *src_table;
+		mem_map[MAP_NR(pte_page(*src_table))]++;
 
-    *src_table |= PAGE_DIRTY;
-    *dest_table = *src_table;
-    mem_map[MAP_NR(*src_table)]++;
+		stmp += PAGE_SIZE;
+		dtmp += PAGE_SIZE;
+	}
 
-    stmp += PAGE_SIZE;
-    dtmp += PAGE_SIZE;
-  }
-
-  invalidate();
-  return 0;
+	invalidate();
+	return 0;
 }
 
 static struct file_operations proc_mem_operations = {

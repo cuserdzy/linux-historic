@@ -1,7 +1,10 @@
 /*
  *	hosts.c Copyright (C) 1992 Drew Eckhardt
- *	mid to lowlevel SCSI driver interface by
- *		Drew Eckhardt
+ *	        Copyright (C) 1993, 1994, 1995 Eric Youngdale
+ *
+ *	mid to lowlevel SCSI driver interface
+ *		Initial versions: Drew Eckhardt
+ *		Subsequent revisions: Eric Youngdale
  *
  *	<drew@colorado.edu>
  */
@@ -17,6 +20,8 @@
 #include "../block/blk.h"
 #include <linux/kernel.h>
 #include <linux/string.h>
+#include <linux/mm.h>
+
 #include "scsi.h"
 
 #ifndef NULL
@@ -211,19 +216,22 @@ int next_scsi_host = 0;
 void
 scsi_unregister(struct Scsi_Host * sh){
 	struct Scsi_Host * shpnt;
-	int j;
-
-	j = sh->extra_bytes;
 
 	if(scsi_hostlist == sh)
-		scsi_hostlist = NULL;
+		scsi_hostlist = sh->next;
 	else {
 		shpnt = scsi_hostlist;
 		while(shpnt->next != sh) shpnt = shpnt->next;
 		shpnt->next = shpnt->next->next;
 	};
+
+        /* If we are removing the last host registered, it is safe to reuse
+           its host number (this avoids "holes" at boot time) (DB) */
+        if (max_scsi_hosts == next_scsi_host && !scsi_loadable_module_flag)
+           max_scsi_hosts--;
+
 	next_scsi_host--;
-	scsi_init_free((char *) sh, sizeof(struct Scsi_Host) + j);
+	scsi_init_free((char *) sh, sizeof(struct Scsi_Host) + sh->extra_bytes);
 }
 
 /* We call this when we come across a new host adapter. We only do this
@@ -236,14 +244,18 @@ struct Scsi_Host * scsi_register(Scsi_Host_Template * tpnt, int j){
 						      (tpnt->unchecked_isa_dma && j ? GFP_DMA : 0) | GFP_ATOMIC);
 	retval->host_busy = 0;
 	retval->block = NULL;
+	retval->wish_block = 0;
 	if(j > 0xffff) panic("Too many extra bytes requested\n");
 	retval->extra_bytes = j;
 	retval->loaded_as_module = scsi_loadable_module_flag;
-	retval->host_no = next_scsi_host++;
+	retval->host_no = max_scsi_hosts++; /* never reuse host_no (DB) */
+	next_scsi_host++;
 	retval->host_queue = NULL;
 	retval->host_wait = NULL;
 	retval->last_reset = 0;
 	retval->irq = 0;
+	retval->dma_channel = 0xff;
+	retval->io_port = 0;
 	retval->forbidden_addr = 0;
 	retval->forbidden_size = 0;
 	retval->hostt = tpnt;
@@ -329,31 +341,10 @@ unsigned int scsi_init()
 		      shpnt->host_no, name);
 	    }
 
-	printk ("scsi : %d hosts.\n", next_scsi_host);
+	printk ("scsi : %d host%s.\n", next_scsi_host,
+		(next_scsi_host == 1) ? "" : "s");
 
-      {
-      int block_count = 0, index;
-      struct Scsi_Host * sh[128], * shpnt;
-
-         for(shpnt=scsi_hostlist; shpnt; shpnt = shpnt->next)
-            if (shpnt->block) sh[block_count++] = shpnt;
-      
-         if (block_count == 1) sh[0]->block = NULL;
-
-         else if (block_count > 1) {
-
-            for(index = 0; index < block_count - 1; index++) {
-               sh[index]->block = sh[index + 1];
-               printk("scsi%d : added to blocked host list.\n", 
-                      sh[index]->host_no);
-               }
-           
-            sh[block_count - 1]->block = sh[0];
-            printk("scsi%d : added to blocked host list.\n", 
-                   sh[index]->host_no);
-            }
-
-      }
+	scsi_make_blocked_list();
 
 	/* Now attach the high level drivers */
 #ifdef CONFIG_BLK_DEV_SD
@@ -369,7 +360,9 @@ unsigned int scsi_init()
 	scsi_register_device(&sg_template);
 #endif
 
+#if 0      
 	max_scsi_hosts = next_scsi_host;
+#endif
 	return 0;
 }
 
@@ -394,3 +387,20 @@ void scsi_mem_init(unsigned long memory_end)
 	continue;
     }
 }
+
+/*
+ * Overrides for Emacs so that we follow Linus's tabbing style.
+ * Emacs will notice this stuff at the end of the file and automatically
+ * adjust the settings for this buffer only.  This must remain at the end
+ * of the file.
+ * ---------------------------------------------------------------------------
+ * Local variables:
+ * c-indent-level: 8
+ * c-brace-imaginary-offset: 0
+ * c-brace-offset: -8
+ * c-argdecl-indent: 8
+ * c-label-offset: -8
+ * c-continued-statement-offset: 8
+ * c-continued-brace-offset: 0
+ * End:
+ */

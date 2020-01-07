@@ -16,6 +16,7 @@
 #include <linux/string.h>
 #include <linux/fcntl.h>
 #include <linux/stat.h>
+#include <linux/mm.h>
 
 #define ACC_MODE(x) ("\000\004\002\006"[(x)&O_ACCMODE])
 
@@ -31,19 +32,14 @@ static inline int get_max_filename(unsigned long address)
 
 	if (get_fs() == KERNEL_DS)
 		return 0;
-	for (vma = current->mm->mmap ; ; vma = vma->vm_next) {
-		if (!vma)
-			return -EFAULT;
-		if (vma->vm_end > address)
-			break;
-	}
-	if (vma->vm_start > address || !(vma->vm_page_prot & PAGE_USER))
+	vma = find_vma(current, address);
+	if (!vma || vma->vm_start > address || !(vma->vm_flags & VM_READ))
 		return -EFAULT;
 	address = vma->vm_end - address;
 	if (address > PAGE_SIZE)
 		return 0;
 	if (vma->vm_next && vma->vm_next->vm_start == vma->vm_end &&
-	   (vma->vm_next->vm_page_prot & PAGE_USER))
+	   (vma->vm_next->vm_flags & VM_READ))
 		return 0;
 	return address;
 }

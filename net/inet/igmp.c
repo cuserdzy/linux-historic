@@ -32,7 +32,7 @@
 #include "route.h"
 #include <linux/skbuff.h>
 #include "sock.h"
-#include "igmp.h"
+#include <linux/igmp.h>
 
 #ifdef CONFIG_IP_MULTICAST
 
@@ -63,6 +63,7 @@ static void igmp_start_timer(struct ip_mc_list *im)
 		return;
 	tv=random()%(10*HZ);		/* Pick a number any number 8) */
 	im->timer.expires=tv;
+	im->tm_running=1;
 	add_timer(&im->timer);
 }
  
@@ -178,7 +179,7 @@ static void igmp_group_dropped(struct ip_mc_list *im)
 	del_timer(&im->timer);
 	igmp_send_report(im->interface, im->multiaddr, IGMP_HOST_LEAVE_MESSAGE);
 	ip_mc_filter_del(im->interface, im->multiaddr);
-	printk("Left group %lX\n",im->multiaddr);
+/*	printk("Left group %lX\n",im->multiaddr);*/
 }
 
 static void igmp_group_added(struct ip_mc_list *im)
@@ -186,7 +187,7 @@ static void igmp_group_added(struct ip_mc_list *im)
 	igmp_init_timer(im);
 	igmp_send_report(im->interface, im->multiaddr, IGMP_HOST_MEMBERSHIP_REPORT);
 	ip_mc_filter_add(im->interface, im->multiaddr);
-	printk("Joined group %lX\n",im->multiaddr);
+/*	printk("Joined group %lX\n",im->multiaddr);*/
 }
 
 int igmp_rcv(struct sk_buff *skb, struct device *dev, struct options *opt,

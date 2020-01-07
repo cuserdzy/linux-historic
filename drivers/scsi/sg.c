@@ -11,6 +11,7 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/string.h>
+#include <linux/mm.h>
 #include <linux/errno.h>
 #include <linux/mtio.h>
 #include <linux/ioctl.h>
@@ -312,7 +313,7 @@ static int sg_write(struct inode *inode,struct file *filp,char *buf,int count)
   printk("do cmd\n");
 #endif
   scsi_do_cmd (SCpnt,(void *) cmnd,
-               (void *) device->buff,device->header.pack_len-size-sizeof(struct sg_header),
+               (void *) device->buff,amt,
 	       sg_command_done,device->timeout,SG_DEFAULT_RETRIES);
 #ifdef DEBUG
   printk("done cmd\n");
@@ -373,7 +374,7 @@ static void sg_init()
    memset(scsi_generics, 0, (sg_template.dev_noticed + SG_EXTRA_DEVS)
 	  * sizeof(struct scsi_generic));
 
-   sg_template.dev_max = sg_template.dev_noticed;
+   sg_template.dev_max = sg_template.dev_noticed + SG_EXTRA_DEVS;
  }
 
 static int sg_attach(Scsi_Device * SDp)
@@ -421,3 +422,20 @@ static void sg_detach(Scsi_Device * SDp)
     }
   return;
 }
+
+/*
+ * Overrides for Emacs so that we follow Linus's tabbing style.
+ * Emacs will notice this stuff at the end of the file and automatically
+ * adjust the settings for this buffer only.  This must remain at the end
+ * of the file.
+ * ---------------------------------------------------------------------------
+ * Local variables:
+ * c-indent-level: 8
+ * c-brace-imaginary-offset: 0
+ * c-brace-offset: -8
+ * c-argdecl-indent: 8
+ * c-label-offset: -8
+ * c-continued-statement-offset: 8
+ * c-continued-brace-offset: 0
+ * End:
+ */

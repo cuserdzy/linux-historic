@@ -82,7 +82,6 @@
  */
 
 #define CONFIG_FLOPPY_SANITY
-#define  CONFIG_FLOPPY_2_FDC
 #undef  CONFIG_FLOPPY_SILENT_DCL_CLEAR
 
 #define REALLY_SLOW_IO
@@ -91,6 +90,9 @@
 #define DCL_DEBUG /* debug disk change line */
 
 #include <linux/config.h>
+
+/* do print messages for unexpected interrupts */
+static int print_unex=1;
 
 #ifndef FD_MODULE
 /* the following is the mask of allowed drives. By default units 2 and
@@ -108,7 +110,6 @@ static int FDC2=-1;
 
 #define MODULE_AWARE_DRIVER
 
-#ifdef CONFIG_BLK_DEV_FD
 #include <linux/sched.h>
 #include <linux/fs.h>
 #include <linux/kernel.h>
@@ -122,6 +123,7 @@ static int FDC2=-1;
 #include <linux/string.h>
 #include <linux/fcntl.h>
 #include <linux/delay.h>
+#include <linux/mc146818rtc.h> /* CMOS defines */
 
 #include <asm/dma.h>
 #include <asm/irq.h>
@@ -135,14 +137,21 @@ static int FDC2=-1;
 static unsigned int fake_change = 0;
 static int initialising=1;
 
+#define FLOPPY0_TYPE	((CMOS_READ(0x10) >> 4) & 15)
+#define FLOPPY1_TYPE	(CMOS_READ(0x10) & 15)
 
-#ifdef CONFIG_FLOPPY_2_FDC
+/*
+ * Again, the CMOS information doesn't work on the alpha..
+ */
+#ifdef __alpha__
+#undef FLOPPY0_TYPE
+#undef FLOPPY1_TYPE
+#define FLOPPY0_TYPE 6
+#define FLOPPY1_TYPE 0
+#endif
+
 #define N_FDC 2
 #define N_DRIVE 8
-#else
-#define N_FDC 1
-#define N_DRIVE 4
-#endif
 
 #define TYPE(x) ( ((x)>>2) & 0x1f )
 #define DRIVE(x) ( ((x)&0x03) | (((x)&0x80 ) >> 5))
@@ -166,16 +175,16 @@ static int initialising=1;
 #define USETF(x) (set_bit(x##_BIT, &UDRS->flags))
 #define UTESTF(x) (test_bit(x##_BIT, &UDRS->flags))
 
-#define DPRINT(x) printk(DEVICE_NAME "%d: " x,current_drive);
+#define DPRINT(x) printk(DEVICE_NAME "%d: " x,current_drive)
 
 #define DPRINT1(x,x1) \
-printk(DEVICE_NAME "%d: " x,current_drive,(x1));
+printk(DEVICE_NAME "%d: " x,current_drive,(x1))
 
 #define DPRINT2(x,x1,x2) \
-printk(DEVICE_NAME "%d: " x,current_drive,(x1),(x2));
+printk(DEVICE_NAME "%d: " x,current_drive,(x1),(x2))
 
 #define DPRINT3(x,x1,x2,x3) \
-printk(DEVICE_NAME "%d: " x,current_drive,(x1),(x2),(x3));
+printk(DEVICE_NAME "%d: " x,current_drive,(x1),(x2),(x3))
 
 /* read/write */
 #define COMMAND raw_cmd.cmd[0]
@@ -231,6 +240,8 @@ static int inr; /* size of reply buffer, when called from interrupt */
 #define R_SECTOR (reply_buffer[5])
 #define R_SIZECODE (reply_buffer[6])
 
+#define SEL_DLY (2*HZ/100)
+
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof( (x)[0] ))
 /*
  * this struct defines the different floppy drive types.
@@ -245,38 +256,38 @@ static struct {
   |     |   Head load time, msec
   |     |   |   Head unload time, msec (not used)
   |     |   |   |     Step rate interval, usec
-  |     |   |   |     |    Time needed for spinup time (jiffies)
-  |     |   |   |     |    |    Timeout for spinning down (jiffies)
-  |     |   |   |     |    |    |   Spindown offset (where disk stops)
-  |     |   |   |     |    |    |   |  Select delay
-  |     |   |   |     |    |    |   |  |  RPS
-  |     |   |   |     |    |    |   |  |  |    Max number of tracks
-  |     |   |   |     |    |    |   |  |  |    |     Interrupt timeout
-  |     |   |   |     |    |    |   |  |  |    |     |   Max nonintlv. sectors
-  |     |   |   |     |    |    |   |  |  |    |     |   | -Max Errors- flags */
-{{0,  500, 16, 16, 8000, 100, 300,  0, 2, 5,  80, 3*HZ, 20, {3,1,2,0,2}, 0,
-      0, { 7, 4, 8, 2, 1, 5, 3,10}, 150, 0 }, "unknown" },
+  |     |   |   |     |       Time needed for spinup time (jiffies)
+  |     |   |   |     |       |      Timeout for spinning down (jiffies)
+  |     |   |   |     |       |      |   Spindown offset (where disk stops)
+  |     |   |   |     |       |      |   |     Select delay
+  |     |   |   |     |       |      |   |     |     RPS
+  |     |   |   |     |       |      |   |     |     |    Max number of tracks
+  |     |   |   |     |       |      |   |     |     |    |     Interrupt timeout
+  |     |   |   |     |       |      |   |     |     |    |     |   Max nonintlv. sectors
+  |     |   |   |     |       |      |   |     |     |    |     |   | -Max Errors- flags */
+{{0,  500, 16, 16, 8000,    1*HZ, 3*HZ,  0, SEL_DLY, 5,  80, 3*HZ, 20, {3,1,2,0,2}, 0,
+      0, { 7, 4, 8, 2, 1, 5, 3,10}, 3*HZ/2, 0 }, "unknown" },
 
-{{1,  300, 16, 16, 8000, 100, 300,  0, 2, 5,  40, 3*HZ, 17, {3,1,2,0,2}, 0,
-      0, { 1, 0, 0, 0, 0, 0, 0, 0}, 150, 1 }, "360K PC" }, /*5 1/4 360 KB PC*/
+{{1,  300, 16, 16, 8000,    1*HZ, 3*HZ,  0, SEL_DLY, 5,  40, 3*HZ, 17, {3,1,2,0,2}, 0,
+      0, { 1, 0, 0, 0, 0, 0, 0, 0}, 3*HZ/2, 1 }, "360K PC" }, /*5 1/4 360 KB PC*/
 
-{{2,  500, 16, 16, 6000,  40, 300, 14, 2, 6,  83, 3*HZ, 17, {3,1,2,0,2}, 0,
-      0, { 2, 5, 6,23,10,20,11, 0}, 150, 2 }, "1.2M" }, /*5 1/4 HD AT*/
+{{2,  500, 16, 16, 6000, 4*HZ/10, 3*HZ, 14, SEL_DLY, 6,  83, 3*HZ, 17, {3,1,2,0,2}, 0,
+      0, { 2, 5, 6,23,10,20,11, 0}, 3*HZ/2, 2 }, "1.2M" }, /*5 1/4 HD AT*/
 
-{{3,  250, 16, 16, 3000, 100, 300,  0, 2, 5,  83, 3*HZ, 20, {3,1,2,0,2}, 0,
-      0, { 4,22,21,30, 3, 0, 0, 0}, 150, 4 }, "720k" }, /*3 1/2 DD*/
+{{3,  250, 16, 16, 3000,    1*HZ, 3*HZ,  0, SEL_DLY, 5,  83, 3*HZ, 20, {3,1,2,0,2}, 0,
+      0, { 4,22,21,30, 3, 0, 0, 0}, 3*HZ/2, 4 }, "720k" }, /*3 1/2 DD*/
 
-{{4,  500, 16, 16, 4000,  40, 300, 10, 2, 5,  83, 3*HZ, 20, {3,1,2,0,2}, 0,
-      0, { 7, 4,25,22,31,21,29,11}, 150, 7 }, "1.44M" }, /*3 1/2 HD*/
+{{4,  500, 16, 16, 4000, 4*HZ/10, 3*HZ, 10, SEL_DLY, 5,  83, 3*HZ, 20, {3,1,2,0,2}, 0,
+      0, { 7, 4,25,22,31,21,29,11}, 3*HZ/2, 7 }, "1.44M" }, /*3 1/2 HD*/
 
-{{5, 1000, 15,  8, 3000,  40, 300, 10, 2, 5,  83, 3*HZ, 40, {3,1,2,0,2}, 0,
-      0, { 7, 8, 4,25,28,22,31,21}, 150, 8 }, "2.88M AMI BIOS" }, /*3 1/2 ED*/
+{{5, 1000, 15,  8, 3000, 4*HZ/10, 3*HZ, 10, SEL_DLY, 5,  83, 3*HZ, 40, {3,1,2,0,2}, 0,
+      0, { 7, 8, 4,25,28,22,31,21}, 3*HZ/2, 8 }, "2.88M AMI BIOS" }, /*3 1/2 ED*/
 
-{{6, 1000, 15,  8, 3000,  40, 300, 10, 2, 5,  83, 3*HZ, 40, {3,1,2,0,2}, 0,
-      0, { 7, 8, 4,25,28,22,31,21}, 150, 8 }, "2.88M" } /*3 1/2 ED*/
-/*    |  ---autodetected formats--   |   |      |
-      read_track                     |   |    Name printed when booting
-                                     |  Native format
+{{6, 1000, 15,  8, 3000, 4*HZ/10, 3*HZ, 10, SEL_DLY, 5,  83, 3*HZ, 40, {3,1,2,0,2}, 0,
+      0, { 7, 8, 4,25,28,22,31,21}, 3*HZ/2, 8 }, "2.88M" } /*3 1/2 ED*/
+/*    |  ---autodetected formats--   |      |      |
+      read_track                     |      |    Name printed when booting
+                                     |     Native format
                                    Frequency of disk change checks */
 };
 
@@ -335,11 +346,8 @@ static struct floppy_struct floppy_type[32] = {
 
 /* Auto-detection: Disk type used until the next media change occurs. */
 struct floppy_struct *current_type[N_DRIVE] = {
+	NULL, NULL, NULL, NULL,
 	NULL, NULL, NULL, NULL
-#ifdef CONFIG_FLOPPY_2_FDC
-	,
-	NULL, NULL, NULL, NULL
-#endif
 };
 
 /*
@@ -551,7 +559,7 @@ static int disk_change(int drive)
 		}
 		/*USETF(FD_DISK_NEWCHANGE);*/
 		return 1;
-	} else if(jiffies >= DRS->select_date+DP->select_delay){
+	} else {
 		UDRS->last_checked=jiffies;
 		UCLEARF(FD_DISK_NEWCHANGE);
 	}
@@ -632,9 +640,7 @@ static void set_fdc(int drive)
 		current_drive = drive;
 	}
 	set_dor(fdc,~0,8);
-#ifdef CONFIG_FLOPPY_2_FDC
 	set_dor(1-fdc, ~8, 0);
-#endif
 	if ( FDCS->rawcmd == 2 )
 		reset_fdc_info(1);
 	if( inb_p(FD_STATUS) != STATUS_READY )
@@ -700,14 +706,11 @@ static struct timer_list motor_off_timer[N_DRIVE] = {
 	{ NULL, NULL, 0, 0, motor_off_callback },
 	{ NULL, NULL, 0, 1, motor_off_callback },
 	{ NULL, NULL, 0, 2, motor_off_callback },
-	{ NULL, NULL, 0, 3, motor_off_callback }
-#ifdef CONFIG_FLOPPY_2_FDC
-	,
+	{ NULL, NULL, 0, 3, motor_off_callback },
 	{ NULL, NULL, 0, 4, motor_off_callback },
 	{ NULL, NULL, 0, 5, motor_off_callback },
 	{ NULL, NULL, 0, 6, motor_off_callback },
 	{ NULL, NULL, 0, 7, motor_off_callback }
-#endif
 };
 
 /* schedules motor off */
@@ -808,6 +811,36 @@ static int wait_for_completion(int delay, timeout_fn function)
 	return 0;
 }
 
+static int hlt_disabled=0;
+static void floppy_disable_hlt(void)
+{
+	unsigned long flags;
+	save_flags(flags);
+	cli();
+	if(!hlt_disabled){
+		hlt_disabled=1;
+#ifdef HAVE_DISABLE_HLT
+		disable_hlt();
+#endif
+	}
+	restore_flags(flags);
+}
+
+static void floppy_enable_hlt(void)
+{
+	unsigned long flags;
+	save_flags(flags);
+	cli();
+	if(hlt_disabled){
+		hlt_disabled=0;
+#ifdef HAVE_DISABLE_HLT
+		enable_hlt();
+#endif
+	}
+	restore_flags(flags);
+}
+		
+
 static void setup_DMA(void)
 {
 #ifdef CONFIG_FLOPPY_SANITY
@@ -854,6 +887,7 @@ static void setup_DMA(void)
 	set_dma_count(FLOPPY_DMA, raw_cmd.length);
 	enable_dma(FLOPPY_DMA);
 	sti();
+	floppy_disable_hlt();
 }
 
 /* sends a command byte to the fdc */
@@ -989,7 +1023,7 @@ static void fdc_specify(void)
 		/* TODO: lock this in via LOCK during initialization */
 		output_byte(FD_CONFIGURE);
 		output_byte(0);
-		output_byte(0x1A);	/* FIFO on, polling off, 10 byte threshold */
+		output_byte(0x2A);	/* FIFO on, polling off, 10 byte threshold */
 		output_byte(0);		/* precompensation from track 0 upwards */
 		if ( FDCS->reset ){
 			FDCS->has_fifo=0;
@@ -1394,18 +1428,22 @@ static void unexpected_floppy_interrupt(void)
 	int i;
 	if ( initialising )
 		return;
-	DPRINT("unexpected interrupt\n");
-	if ( inr >= 0 )
-		for(i=0; i<inr; i++)
-			printk("%d %x\n", i, reply_buffer[i] );
+	if(print_unex){
+		DPRINT("unexpected interrupt\n");
+		if ( inr >= 0 )
+			for(i=0; i<inr; i++)
+				printk("%d %x\n", i, reply_buffer[i] );
+	}
 	while(1){
 		output_byte(FD_SENSEI);
 		inr=result();
 		if ( inr != 2 )
 			break;
-		printk("sensei\n");
-		for(i=0; i<inr; i++)
-			printk("%d %x\n", i, reply_buffer[i] );
+		if(print_unex){
+			printk("sensei\n");
+			for(i=0; i<inr; i++)
+				printk("%d %x\n", i, reply_buffer[i] );
+		}
 	}
 	FDCS->reset = 1;
 }
@@ -1418,6 +1456,7 @@ static void floppy_interrupt(int irq, struct pt_regs * regs)
 {
 	void (*handler)(void) = DEVICE_INTR;
 
+	floppy_enable_hlt();
 	CLEAR_INTR;
 	if ( fdc >= N_FDC || FDCS->address == -1){
 		/* we don't even know which FDC is the culprit */
@@ -1527,6 +1566,7 @@ static void floppy_shutdown(void)
 	floppy_tq.routine = (void *)(void *) empty;
 	del_timer( &fd_timer);
 
+	floppy_enable_hlt();
 	disable_dma(FLOPPY_DMA);
 	/* avoid dma going to a random drive after shutdown */
 
@@ -1708,9 +1748,10 @@ static void failure_and_wakeup(void)
 static int next_valid_format(void)
 {
 	int probed_format;
+
+	probed_format = DRS->probed_format;
 	while(1){
-		probed_format = DRS->probed_format;
-		if ( probed_format > N_DRIVE ||
+		if ( probed_format >= 8 ||
 		    ! DP->autodetect[probed_format] ){
 			DRS->probed_format = 0;
 			return 1;
@@ -2782,9 +2823,7 @@ static int fd_ioctl(struct inode *inode, struct file *filp, unsigned int cmd,
 			     cnt < (type << 2 ) + 4 ;
 			     cnt++)
 				floppy_sizes[cnt]=
-#ifdef CONFIG_FLOPPY_2_FDC
 					floppy_sizes[cnt+0x80]=
-#endif
 						floppy_type[type].size>>1;
 			process_fd_request();
 			for ( cnt = 0; cnt < N_DRIVE; cnt++){
@@ -2852,41 +2891,44 @@ static int fd_ioctl(struct inode *inode, struct file *filp, unsigned int cmd,
 #undef IOCTL_ALLOWED
 }
 
-#define CMOS_READ(addr) ({ \
-outb_p(addr,0x70); \
-inb_p(0x71); \
-})
-
-static void set_base_type(int drive,int code)
-{
-	if (code > 0 && code <= NUMBER(default_drive_params)) {
-		memcpy((char *) UDP,
-		       (char *) (&default_drive_params[code].params),
-		       sizeof( struct floppy_drive_params ));
-		printk("fd%d is %s", drive, default_drive_params[code].name);
-		return;
-	} else if (!code)
-		printk("fd%d is not installed", drive);
-	else
-		printk("fd%d is unknown type %d",drive,code);
-}
-
 static void config_types(void)
 {
+	int first=1;
 	int drive;
 
-	for (drive=0; drive<N_DRIVE ; drive++){
-		/* default type for unidentifiable drives */
-		memcpy((char *) UDP, (char *) (&default_drive_params->params),
-		       sizeof( struct floppy_drive_params ));
+	/* read drive info out of physical cmos */
+	drive=0;
+	if (!UDP->cmos )
+		UDP->cmos= FLOPPY0_TYPE;
+	drive=1;
+	if (!UDP->cmos && FLOPPY1_TYPE)
+		UDP->cmos = FLOPPY1_TYPE;
+
+	/* XXX */
+	/* additional physical CMOS drive detection should go here */
+
+	for (drive=0; drive < N_DRIVE; drive++){
+		if (UDP->cmos >= 0 && UDP->cmos <= NUMBER(default_drive_params))
+			memcpy((char *) UDP,
+			       (char *) (&default_drive_params[(int)UDP->cmos].params),
+			       sizeof(struct floppy_drive_params));
+		if (UDP->cmos){
+			if (first)
+				printk("Floppy drive(s): ");
+			else
+				printk(", ");
+			first=0;
+			if (UDP->cmos > 0 ){
+				ALLOWED_DRIVE_MASK |= 1 << drive;
+				printk("fd%d is %s", drive,
+				       default_drive_params[(int)UDP->cmos].name);
+			} else
+				printk("fd%d is unknown type %d",drive,
+				       UDP->cmos);
+		}
 	}
-	printk("Floppy drive(s): ");
-	set_base_type(0, (CMOS_READ(0x10) >> 4) & 15);
-	if (CMOS_READ(0x10) & 15) {
-		printk(", ");
-		set_base_type(1, CMOS_READ(0x10) & 15);
-	}
-	printk("\n");
+	if(!first)
+		printk("\n");
 }
 
 static int floppy_read(struct inode * inode, struct file * filp,
@@ -3161,56 +3203,129 @@ static char get_fdc_version(void)
 	return FDC_82077;	/* Revised 82077AA passes all the tests */
 } /* get_fdc_version */
 
-#ifndef FD_MODULE
 /* lilo configuration */
-static void invert_dcl(int *ints)
+
+/* we make the invert_dcl function global. One day, somebody might
+want to centralize all thinkpad related options into one lilo option,
+there are just so many thinkpad related quirks! */
+void floppy_invert_dcl(int *ints,int param)
 {
 	int i;
 	
-	for (i=0; i < ARRAY_SIZE(default_drive_params); i++)
-		default_drive_params[i].params.flags |= 0x80;
+	for (i=0; i < ARRAY_SIZE(default_drive_params); i++){
+		if (param)
+			default_drive_params[i].params.flags |= 0x80;
+		else
+			default_drive_params[i].params.flags &= ~0x80;
+	}
 	DPRINT("Configuring drives for inverted dcl\n");
 }
 
-static void allow_drives(int *ints)
+static void daring(int *ints,int param)
 {
-	if (ints[1] >= 1 ){
-		ALLOWED_DRIVE_MASK=ints[1];
-		DPRINT1("setting allowed_drive_mask to 0x%x\n", ints[1]);
-	} else
-		DPRINT("allowed_drive_mask needs a parameter\n");
+	int i;
+
+	for (i=0; i < ARRAY_SIZE(default_drive_params); i++){
+		if (param){
+			default_drive_params[i].params.select_delay = 0;
+			default_drive_params[i].params.flags |= FD_SILENT_DCL_CLEAR;
+		} else {
+			default_drive_params[i].params.select_delay = 2*HZ/100;
+			default_drive_params[i].params.flags &= ~FD_SILENT_DCL_CLEAR;
+		}
+	}
+	DPRINT1("Assuming %s floppy hardware\n", param ? "standard" : "broken");
 }
 
-#ifdef  CONFIG_FLOPPY_2_FDC
-static void twofdc(int *ints)
+static void allow_drives(int *ints, int param)
 {
-	FDC2 = 0x370;
-	DPRINT("enabling second fdc at address 0x370\n");
+	ALLOWED_DRIVE_MASK=param;
+	DPRINT1("setting allowed_drive_mask to 0x%x\n", param);
 }
-#endif
 
+static void fdc2_adr(int *ints, int param)
+{
+	FDC2 = param;
+	if(param)
+		DPRINT1("enabling second fdc at address 0x%3x\n", FDC2);
+	else
+		DPRINT("disabling second fdc\n");
+}
+
+static void unex(int *ints,int param)
+{
+	print_unex = param;
+	DPRINT1("%sprinting messages for unexpected interrupts\n",
+		param ? "" : "not ");
+}
+
+static void set_cmos(int *ints, int dummy)
+{
+	int current_drive=0;
+
+	if ( ints[0] != 2 ){
+		DPRINT("wrong number of parameter for cmos\n");
+		return;
+	}
+	current_drive = ints[1];
+	if (current_drive < 0 || current_drive >= 8 ){
+		DPRINT("bad drive for set_cmos\n");
+		return;
+	}
+	if(ints[2] <= 0 || ints[2] >= NUMBER(default_drive_params)){
+		DPRINT1("bad cmos code %d\n", ints[2]);
+		return;
+	}
+	DP->cmos = ints[2];
+	DPRINT1("setting cmos code to %d\n", ints[2]);
+}
+		
 static struct param_table {
 	char *name;
-	void (*fn)(int *ints);
+	void (*fn)(int *ints, int param);
+	int def_param;
 } config_params[]={
-{ "allowed_drive_mask", allow_drives },
-#ifdef  CONFIG_FLOPPY_2_FDC
-{ "two_fdc", twofdc },
-#endif
-{ "thinkpad", invert_dcl } };
+{ "allowed_drive_mask", allow_drives, 0xff },
+{ "all_drives", allow_drives, 0xff },
+{ "asus_pci", allow_drives, 0x33 },
 
+{ "daring", daring, 1},
+
+{ "two_fdc", fdc2_adr, 0x370 },
+{ "one_fdc", fdc2_adr, 0 },
+
+{ "thinkpad", floppy_invert_dcl, 1 },
+
+{ "cmos", set_cmos, 0 },
+
+{ "unexpected_interrupts", unex, 1 },
+{ "no_unexpected_interrupts", unex, 0 },
+{ "L40SX", unex, 0 } };
+
+#define FLOPPY_SETUP
 void floppy_setup(char *str, int *ints)
 {
 	int i;
+	int param;
+	if(!str)
+		return;
 	for(i=0; i< ARRAY_SIZE(config_params); i++){
 		if (strcmp(str,config_params[i].name) == 0 ){
-			config_params[i].fn(ints);
+			if (ints[0] )
+				param = ints[1];
+			else
+				param = config_params[i].def_param;
+			config_params[i].fn(ints,param);
 			return;
 		}
 	}
-	printk("unknown floppy parameter %s\n", str);
+	DPRINT1("unknown floppy option %s\n", str);
+	DPRINT("allowed options are:");
+	for(i=0; i< ARRAY_SIZE(config_params); i++)
+		printk(" %s",config_params[i].name);
+	printk("\n");
+	DPRINT("Read linux/drivers/block/README.fd\n");
 }
-#endif
 
 #ifdef FD_MODULE
 static
@@ -3376,7 +3491,7 @@ static void floppy_release_irq_and_dma(void)
 #if N_FDC > 1
 	set_dor(1, ~8, 0);
 #endif
-
+	floppy_enable_hlt();
 #ifdef CONFIG_FLOPPY_SANITY
 	for(drive=0; drive < N_FDC * 4; drive++)
 		if( motor_off_timer[drive].next )
@@ -3391,4 +3506,3 @@ static void floppy_release_irq_and_dma(void)
 #endif
 }
 
-#endif

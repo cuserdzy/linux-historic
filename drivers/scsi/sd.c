@@ -1,19 +1,25 @@
 /*
  *	sd.c Copyright (C) 1992 Drew Eckhardt 
- *	     Copyright (C) 1993, 1994 Eric Youngdale
- *	Linux scsi disk driver by
- *		Drew Eckhardt 
+ *	     Copyright (C) 1993, 1994, 1995 Eric Youngdale
+ *
+ *	Linux scsi disk driver
+ *		Initial versions: Drew Eckhardt 
+ *		Subsequent revisions: Eric Youngdale
  *
  *	<drew@colorado.edu>
  *
  *       Modified by Eric Youngdale ericy@cais.com to
  *       add scatter-gather, multiple outstanding request, and other
  *       enhancements.
+ *
+ *	 Modified by Eric Youngdale eric@aib.com to support loadable
+ *	 low-level scsi drivers.
  */
 
 #include <linux/fs.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
+#include <linux/mm.h>
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <asm/system.h>
@@ -91,6 +97,13 @@ static int sd_open(struct inode * inode, struct file * filp)
 	  if(!rscsi_disks[target].device->access_count)
 	    sd_ioctl(inode, NULL, SCSI_IOCTL_DOORLOCK, 0);
 	};
+	/*
+	 * See if we are requesting a non-existent partition.  Do this
+	 * after checking for disk change.
+	 */
+	if(sd_sizes[MINOR(inode->i_rdev)] == 0)
+	  return -ENXIO;
+
 	rscsi_disks[target].device->access_count++;
 	if (rscsi_disks[target].device->host->hostt->usage_count)
 	  (*rscsi_disks[target].device->host->hostt->usage_count)++;
@@ -371,7 +384,15 @@ static void do_sd_request (void)
       SCpnt = allocate_device(&CURRENT,
 			      rscsi_disks[DEVICE_NR(MINOR(CURRENT->dev))].device, 0); 
     else SCpnt = NULL;
+
+    /*
+     * The following restore_flags leads to latency problems.  FIXME.
+     */
+#if 0
     restore_flags(flags);
+#else
+    sti();
+#endif
 
 /* This is a performance enhancement.  We dig down into the request list and
    try and find a queueable request (i.e. device not busy, and host able to
@@ -1260,3 +1281,20 @@ static void sd_detach(Scsi_Device * SDp)
     }
   return;
 }
+
+/*
+ * Overrides for Emacs so that we follow Linus's tabbing style.
+ * Emacs will notice this stuff at the end of the file and automatically
+ * adjust the settings for this buffer only.  This must remain at the end
+ * of the file.
+ * ---------------------------------------------------------------------------
+ * Local variables:
+ * c-indent-level: 8
+ * c-brace-imaginary-offset: 0
+ * c-brace-offset: -8
+ * c-argdecl-indent: 8
+ * c-label-offset: -8
+ * c-continued-statement-offset: 8
+ * c-continued-brace-offset: 0
+ * End:
+ */

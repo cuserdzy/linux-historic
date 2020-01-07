@@ -1,5 +1,5 @@
 /*
- *  linux/drivers/block/ide.c	Version 3.8  January 12, 1995
+ *  linux/drivers/block/ide.c	Version 3.13  February 23, 1995
  *
  *  Copyright (C) 1994, 1995  Linus Torvalds & authors (see below)
  */
@@ -95,13 +95,23 @@
  *  Version 3.8		fixed byte-swapping for confused Mitsumi cdrom drives
  *			update of ide-cd.c from Scott, allows blocksize=1024
  *			cdrom probe fixes, inspired by jprang@uni-duisburg.de
+ *  Version 3.9		don't use LBA if lba_capacity looks funny
+ *			correct the drive capacity calculations
+ *			fix probing for old Seagates without HD_ALTSTATUS
+ *			fix byte-ordering for some NEC cdrom drives
+ *  Version 3.10	disable multiple mode by default; was causing trouble
+ *  Version 3.11	fix mis-identification of old WD disks as cdroms
+ *  Version 3,12	simplify logic for selecting initial mult_count
+ *			  (fixes problems with buggy WD drives)
+ *  Version 3.13	remove excess "multiple mode disabled" messages
  *
  *  To do:
  *	- special 32-bit controller-type detection & support
- *	- figure out why two WD drives on one i/f sometimes don't identify
  *	- figure out how to support oddball "intelligent" caching cards
+ *	- reverse-engineer 3/4 drive support on fancy "Promise" cards
  */
 
+#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
@@ -110,7 +120,6 @@
 #include <linux/kernel.h>
 #include <linux/hdreg.h>
 #include <linux/genhd.h>
-#include <linux/config.h>
 #include <linux/malloc.h>
 #include <linux/string.h>
 #include <linux/major.h>
@@ -130,8 +139,7 @@
 #include <asm/io.h>
 
 #undef	REALLY_FAST_IO			/* define if ide ports are perfect */
-#undef	INITIAL_MULT_COUNT		/* define to override status quo */
-
+#define INITIAL_MULT_COUNT	0	/* use zero to disable block mode */
 #ifndef VLB_32BIT_IDE			/* 0 for safety, 1 for 32-bit chipset:*/
 #define VLB_32BIT_IDE		0	/*   Winbond 83759F or OPTi 82C621 */
 #endif
@@ -897,8 +905,7 @@ static int do_special (ide_dev_t *dev)
 		if (dev->type == disk) {
 			if (dev->id && dev->mult_req > dev->id->max_multsect)
 				dev->mult_req = dev->id->max_multsect;
-			if (dev->mult_req != dev->mult_count)
-				ide_cmd(dev,WIN_SETMULT,dev->mult_req,&set_multmode_intr);
+			ide_cmd(dev,WIN_SETMULT,dev->mult_req,&set_multmode_intr);
 		} else {
 			dev->mult_req = 0;
 			printk("%s: multmode not supported by this device\n", dev->name);
@@ -1218,7 +1225,7 @@ static void ide_intr (int irq, struct pt_regs *regs)
 
 #if SUPPORT_SHARING_IRQ
 /* entry point for all interrupts on ide0/ide1 when sharing_single_irq==1 */
-static void ide_shared_intr (int irq)
+static void ide_shared_intr (int irq, struct pt_regs * regs)
 {
 	IDE_INTR(current_hwif);
 }
@@ -1567,7 +1574,11 @@ static void fixstring (byte *s, int bytecount, int byteswap)
 		*p++ = '\0';
 }
 
-static unsigned long fix_lba_capacity (struct hd_driveid *id)
+static int lba_capacity_is_ok (struct hd_driveid *id)
+/*
+ * Returns:	1 if lba_capacity looks sensible
+ *		0 otherwise
+ */
 {
 	unsigned long lba_sects   = id->lba_capacity;
 	unsigned long chs_sects   = id->cyls * id->heads * id->sectors;
@@ -1575,20 +1586,20 @@ static unsigned long fix_lba_capacity (struct hd_driveid *id)
 
 	/* perform a rough sanity check on lba_sects:  within 10% is "okay" */
 	if ((lba_sects - chs_sects) < _10_percent)
-		return lba_sects;
+		return 1;	/* lba_capacity is good */
 
 	/* some drives have the word order reversed */
 	lba_sects = (lba_sects << 16) | (lba_sects >> 16);
-	if ((lba_sects - chs_sects) < _10_percent)
-		return (id->lba_capacity = lba_sects);
-
-	/* play it safe and assume lba capacity is the same as chs capacity */
-	return chs_sects;
+	if ((lba_sects - chs_sects) < _10_percent) {
+		id->lba_capacity = lba_sects;	/* fix it */
+		return 1;	/* lba_capacity is (now) good */
+	}
+	return 0;	/* lba_capacity value is bad */
 }
 
 static unsigned long probe_mem_start;	/* used by drive/irq probing routines */
 
-static void do_identify (ide_dev_t *dev)
+static void do_identify (ide_dev_t *dev, byte cmd)
 {
 	int bswap;
 	struct hd_driveid *id;
@@ -1600,17 +1611,10 @@ static void do_identify (ide_dev_t *dev)
 	sti();
 
 	/*
-	 * Non-ATAPI drives seem to always use big-endian string ordering.
-	 * Most ATAPI cdrom drives, such as the NEC, Vertos, and some Mitsumi
-	 * models, use little-endian.  But other Mitsumi models appear to use
-	 * big-endian, confusing the issue.  We try to take all of this into 
-	 * consideration, "knowing" that Mitsumi drive names begin with "FX".
+	 *  WIN_IDENTIFY returns little-endian info,
+	 *  WIN_PIDENTIFY return big-endian info.
 	 */
-	bswap = 1;
-	if (id->model[0] != 'X' || id->model[1] != 'F') {
-		if ((id->model[0] == 'F' && id->model[1] == 'X') || (id->config & 0x8000))
-			bswap = 0;
-	}
+	bswap = (cmd == WIN_IDENTIFY);
 	fixstring (id->model,     sizeof(id->model),     bswap);
 	fixstring (id->fw_rev,    sizeof(id->fw_rev),    bswap);
 	fixstring (id->serial_no, sizeof(id->serial_no), bswap);
@@ -1618,7 +1622,7 @@ static void do_identify (ide_dev_t *dev)
 	/*
 	 * Check for an ATAPI device
 	 */
-	if (id->config & 0x8000) {
+	if (cmd == WIN_PIDENTIFY) {
 #ifdef CONFIG_BLK_DEV_IDECD
 		byte type = (id->config >> 8) & 0x0f;
 #endif	/* CONFIG_BLK_DEV_IDECD */
@@ -1636,17 +1640,15 @@ static void do_identify (ide_dev_t *dev)
 		return;
 	}
 
-	/*
-	 * Gather up the geometry info.
-	 */
 	dev->type = disk;
+	/* Extract geometry if we did not already have one for the drive */
 	if (!dev->present) {
 		dev->present = 1;
 		dev->cyl     = dev->bios_cyl  = id->cyls;
 		dev->head    = dev->bios_head = id->heads;
 		dev->sect    = dev->bios_sect = id->sectors; 
 	}
-	capacity = BIOS_SECTORS(dev);	/* default value */
+	/* Handle logical geometry translation by the drive */
 	if ((id->field_valid & 1) && id->cur_cyls && id->cur_heads
 	 && (id->cur_heads <= 16) && id->cur_sectors)
 	{
@@ -1670,22 +1672,23 @@ static void do_identify (ide_dev_t *dev)
 		if (check == capacity)		/* was it swapped? */
 			*((int *)&id->cur_capacity0) = capacity; /* fix it */
 	}
-	if (id->capability & 2) {	/* use LBA if the drive supports it */
-		capacity  = fix_lba_capacity(id);
-		dev->select.b.lba = 1;
-		if (!dev->head || dev->head > 16) {
-			dev->cyl  = id->cyls;	/* WIN_SPECIFY needs a valid */
-			dev->head = id->heads;	/*  geometry or it fails.  */
-			dev->sect = id->sectors; 
-		}
+	/* Use physical geometry if what we have still makes no sense */
+	if ((!dev->head || dev->head > 16) && id->heads && id->heads <= 16) {
+		dev->cyl  = id->cyls;
+		dev->head = id->heads;
+		dev->sect = id->sectors; 
 	}
 	/* Correct the number of cyls if the bios value is too small */
 	if (dev->sect == dev->bios_sect && dev->head == dev->bios_head) {
-		if (dev->cyl > dev->bios_cyl) {
+		if (dev->cyl > dev->bios_cyl)
 			dev->bios_cyl = dev->cyl;
-			if (!(id->capability & 2))	/* if NOT using LBA */
-				capacity = BIOS_SECTORS(dev);
-		}
+	}
+	/* Determine capacity, and use LBA if the drive properly supports it */
+	if ((id->capability & 2) && lba_capacity_is_ok(id)) {
+		dev->select.b.lba = 1;
+		capacity = id->lba_capacity;
+	} else {
+		capacity = dev->cyl * dev->head * dev->sect;
 	}
 
 	ide_capacity[DEV_HWIF][dev->select.b.drive] = capacity;
@@ -1693,24 +1696,15 @@ static void do_identify (ide_dev_t *dev)
 	 dev->name, id->model, capacity/2048L, id->buf_size/2,
 	 dev->select.b.lba ? "LBA, " : "",
 	 dev->bios_cyl, dev->bios_head, dev->bios_sect);
+
+	dev->mult_count = 0;
 	if (id->max_multsect) {
-		/*
-		 * Keep current multiplemode setting, if any (from DOS/BIOS):
-		 */
-		if ((id->multsect_valid & 1) && id->multsect)
-			dev->mult_count = id->multsect;	/* current setting */
-#ifdef INITIAL_MULT_COUNT
-		if (INITIAL_MULT_COUNT <= id->max_multsect)
-			dev->mult_req = INITIAL_MULT_COUNT;
-		else
+		dev->mult_req = INITIAL_MULT_COUNT;
+		if (dev->mult_req > id->max_multsect)
 			dev->mult_req = id->max_multsect;
-#else	/* use existing setting from DOS/BIOS: */
-		if (dev->mult_count <= id->max_multsect) /* valid? */
-			dev->mult_req = dev->mult_count; /* keep it */
-#endif	/* INITIAL_MULT_COUNT */
-		if (dev->mult_req != dev->mult_count)
+		if (dev->mult_req || ((id->multsect_valid & 1) && id->multsect))
 			dev->special.b.set_multmode = 1;
-		printk(", Mult=%d/%d", dev->mult_req, id->max_multsect);
+		printk(", MaxMult=%d", id->max_multsect);
 	}
 	printk("\n");
 }
@@ -1729,7 +1723,7 @@ static int try_to_identify (ide_dev_t *dev, byte cmd)
  *		2  device aborted the command (refused to identify itself)
  */
 {
-	int rc;
+	int hd_status, rc;
 	unsigned long timeout;
 #if PROBE_FOR_IRQS
 	int irqs = 0;
@@ -1744,22 +1738,27 @@ static int try_to_identify (ide_dev_t *dev, byte cmd)
 	}
 #endif	/* PROBE_FOR_IRQS */
 	delay_10ms();				/* take a deep breath */
+	if (IN_BYTE(HD_ALTSTATUS,DEV_HWIF) == IN_BYTE(HD_STATUS,DEV_HWIF))
+		hd_status = HD_ALTSTATUS;	/* use non-intrusive polling */
+	else
+		hd_status = HD_STATUS;		/* an ancient Seagate drive */
 	OUT_BYTE(cmd,HD_COMMAND);		/* ask drive for ID */
-	delay_10ms();				/* wait for BUSY_STAT */
 	timeout = ((cmd == WIN_IDENTIFY) ? WAIT_WORSTCASE : WAIT_PIDENTIFY) / 2;
-	for (timeout += jiffies; IN_BYTE(HD_ALTSTATUS,DEV_HWIF) & BUSY_STAT;) {
-		if (timeout < jiffies) {
+	timeout += jiffies;
+	do {
+		if (jiffies > timeout) {
 #if PROBE_FOR_IRQS
 			if (!irq_probed[DEV_HWIF])
 				(void) probe_irq_off(irqs);
 #endif	/* PROBE_FOR_IRQS */
 			return 1;	/* drive timed-out */
 		}
-	}
+		delay_10ms();		/* give drive a breather */
+	} while (IN_BYTE(hd_status,DEV_HWIF) & BUSY_STAT);
 	delay_10ms();		/* wait for IRQ and DRQ_STAT */
 	if (OK_STAT(GET_STAT(DEV_HWIF),DRQ_STAT,BAD_RW_STAT)) {
 		cli();			/* some systems need this */
-		do_identify(dev);	/* drive returned ID */
+		do_identify(dev, cmd);	/* drive returned ID */
 		rc = 0;			/* success */
 	} else
 		rc = 2;			/* drive refused ID */
@@ -1821,7 +1820,8 @@ static int do_probe (ide_dev_t *dev, byte cmd)
 		if ((rc = try_to_identify(dev, cmd)))  /* send cmd and wait */
 			rc = try_to_identify(dev, cmd);	/* failed: try again */
 		if (rc == 1)
-			printk("%s: no response\n", dev->name);
+			printk("%s: no response (status = 0x%02x)\n",
+			 dev->name, GET_STAT(DEV_HWIF));
 		OUT_BYTE(dev->ctl|2,HD_CMD);	/* disable device irq */
 		delay_10ms();
 		(void) GET_STAT(DEV_HWIF);	/* ensure drive irq is clear */

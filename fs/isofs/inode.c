@@ -6,6 +6,14 @@
  *  (C) 1991  Linus Torvalds - minix filesystem
  */
 
+#ifdef MODULE
+#include <linux/module.h>
+#include <linux/version.h>
+#else
+#define MOD_INC_USE_COUNT
+#define MOD_DEC_USE_COUNT
+#endif
+
 #include <linux/stat.h>
 #include <linux/sched.h>
 #include <linux/iso_fs.h>
@@ -20,14 +28,6 @@
 
 #include <asm/system.h>
 #include <asm/segment.h>
-
-#ifdef MODULE
-#include <linux/module.h>
-#include <linux/version.h>
-#else
-#define MOD_INC_USE_COUNT
-#define MOD_DEC_USE_COUNT
-#endif
 
 #ifdef LEAK_CHECK
 static int check_malloc = 0;
@@ -63,6 +63,7 @@ struct iso9660_options{
   char map;
   char rock;
   char cruft;
+  char unhide;
   unsigned char conversion;
   unsigned int blocksize;
   mode_t mode;
@@ -77,6 +78,7 @@ static int parse_options(char *options, struct iso9660_options * popt)
 	popt->map = 'n';
 	popt->rock = 'y';
 	popt->cruft = 'n';
+	popt->unhide = 'n';
 	popt->conversion = 'a';
 	popt->blocksize = 1024;
 	popt->mode = S_IRUGO;
@@ -86,6 +88,10 @@ static int parse_options(char *options, struct iso9660_options * popt)
 	for (this_char = strtok(options,","); this_char; this_char = strtok(NULL,",")) {
 	        if (strncmp(this_char,"norock",6) == 0) {
 		  popt->rock = 'n';
+		  continue;
+		};
+	        if (strncmp(this_char,"unhide",6) == 0) {
+		  popt->unhide = 'y';
 		  continue;
 		};
 	        if (strncmp(this_char,"cruft",5) == 0) {
@@ -145,6 +151,43 @@ static int parse_options(char *options, struct iso9660_options * popt)
 	return 1;
 }
 
+
+static unsigned int isofs_get_last_session(int dev)
+{
+  struct cdrom_multisession ms_info;
+  unsigned int vol_desc_start;
+  struct inode inode_fake;
+  extern struct file_operations * get_blkfops(unsigned int);
+  int i;
+
+  /*
+   * look if the driver can tell the multi session redirection value
+   * <emoenke@gwdg.de>
+   */
+  vol_desc_start=0;
+  if (get_blkfops(MAJOR(dev))->ioctl!=NULL)
+    {
+      inode_fake.i_rdev=dev;
+      ms_info.addr_format=CDROM_LBA;
+      set_fs(KERNEL_DS);
+      i=get_blkfops(MAJOR(dev))->ioctl(&inode_fake,
+				       NULL,
+				       CDROMMULTISESSION,
+				       (unsigned long) &ms_info);
+      set_fs(USER_DS);
+#if 0 
+      printk("isofs.inode: CDROMMULTISESSION: rc=%d\n",i);
+      if (i==0)
+	{
+	  printk("isofs.inode: XA disk: %s\n", ms_info.xa_flag ? "yes":"no");
+	  printk("isofs.inode: vol_desc_start = %d\n", ms_info.addr.lba);
+	}
+#endif 0
+      if ((i==0)&&(ms_info.xa_flag)) vol_desc_start=ms_info.addr.lba;
+    }
+  return vol_desc_start;
+}
+
 struct super_block *isofs_read_super(struct super_block *s,void *data,
 				     int silent)
 {
@@ -153,10 +196,8 @@ struct super_block *isofs_read_super(struct super_block *s,void *data,
 	unsigned int blocksize_bits;
 	int high_sierra;
 	int dev=s->s_dev;
-	int i;
 	unsigned int vol_desc_start;
-	struct inode inode_fake;
-	extern struct file_operations * get_blkfops(unsigned int);
+
 	struct iso_volume_descriptor *vdp;
 	struct hs_volume_descriptor *hdp;
 
@@ -179,6 +220,7 @@ struct super_block *isofs_read_super(struct super_block *s,void *data,
 	printk("map = %c\n", opt.map);
 	printk("rock = %c\n", opt.rock);
 	printk("cruft = %c\n", opt.cruft);
+	printk("unhide = %c\n", opt.unhide);
 	printk("conversion = %c\n", opt.conversion);
 	printk("blocksize = %d\n", opt.blocksize);
 	printk("gid = %d\n", opt.gid);
@@ -199,24 +241,11 @@ struct super_block *isofs_read_super(struct super_block *s,void *data,
 
 	s->u.isofs_sb.s_high_sierra = high_sierra = 0; /* default is iso9660 */
 
-	/*
-	 * look if the driver can tell the multi session redirection value
-	 * <emoenke@gwdg.de>
-	 */
-	vol_desc_start=0;
-	inode_fake.i_rdev=dev;
-	i=get_blkfops(MAJOR(dev))->ioctl(&inode_fake,
-					 NULL,
-					 CDROMMULTISESSION_SYS,
-					 (unsigned long) &vol_desc_start);
-#if 0
-	printk("isofs.inode: CDROMMULTISESSION_SYS rc=%d\n",i);
-	printk("isofs.inode: vol_desc_start = %d\n", vol_desc_start);
-#endif 0
-	if (i!=0) vol_desc_start=0;
+	vol_desc_start = isofs_get_last_session(dev);
+	
 	for (iso_blknum = vol_desc_start+16; iso_blknum < vol_desc_start+100; iso_blknum++) {
 #if 0
-	printk("isofs.inode: iso_blknum=%d\n", iso_blknum);
+	        printk("isofs.inode: iso_blknum=%d\n", iso_blknum);
 #endif 0
 		if (!(bh = bread(dev, iso_blknum << (ISOFS_BLOCK_BITS-blocksize_bits), opt.blocksize))) {
 			s->s_dev=0;
@@ -331,6 +360,7 @@ struct super_block *isofs_read_super(struct super_block *s,void *data,
 	s->u.isofs_sb.s_rock = (opt.rock == 'y' ? 1 : 0);
 	s->u.isofs_sb.s_conversion = opt.conversion;
 	s->u.isofs_sb.s_cruft = opt.cruft;
+	s->u.isofs_sb.s_unhide = opt.unhide;
 	s->u.isofs_sb.s_uid = opt.uid;
 	s->u.isofs_sb.s_gid = opt.gid;
 	/*

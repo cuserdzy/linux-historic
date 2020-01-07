@@ -16,6 +16,7 @@
 #include <linux/ptrace.h>
 #include <linux/stat.h>
 #include <linux/mman.h>
+#include <linux/mm.h>
 
 #include <asm/segment.h>
 #include <asm/io.h>
@@ -171,8 +172,12 @@ void ctrl_alt_del(void)
 {
 	if (C_A_D)
 		hard_reset_now();
-	else
+	else {
+		int i;
 		send_sig(SIGINT,task[1],1);
+		for (i = 2; i < NR_TASKS; i++)
+			send_sig(SIGHUP,task[i],1);
+	}
 }
 	
 
@@ -380,7 +385,6 @@ asmlinkage int sys_brk(unsigned long brk)
 	int freepages;
 	unsigned long rlim;
 	unsigned long newbrk, oldbrk;
-	struct vm_area_struct * vma;
 
 	if (brk < current->mm->end_code)
 		return current->mm->brk;
@@ -409,12 +413,8 @@ asmlinkage int sys_brk(unsigned long brk)
 	/*
 	 * Check against existing mmap mappings.
 	 */
-	for (vma = current->mm->mmap; vma; vma = vma->vm_next) {
-		if (newbrk <= vma->vm_start)
-			break;
-		if (oldbrk < vma->vm_end)
-			return current->mm->brk;
-	}
+	if (find_vma_intersection(current, oldbrk, newbrk))
+		return current->mm->brk;
 	/*
 	 * stupid algorithm to decide if we have enough memory: while
 	 * simple, it hopefully works in most obvious cases.. Easy to
@@ -521,6 +521,7 @@ asmlinkage int sys_setsid(void)
 	current->leader = 1;
 	current->session = current->pgrp = current->pid;
 	current->tty = NULL;
+	current->tty_old_pgrp = 0;
 	return current->pgrp;
 }
 
@@ -704,6 +705,10 @@ asmlinkage int sys_setrlimit(unsigned int resource, struct rlimit *rlim)
 	     (new_rlim.rlim_max > old_rlim->rlim_max)) &&
 	    !suser())
 		return -EPERM;
+	if (resource == RLIMIT_NOFILE) {
+		if (new_rlim.rlim_cur > NR_OPEN || new_rlim.rlim_max > NR_OPEN)
+			return -EPERM;
+	}
 	*old_rlim = new_rlim;
 	return 0;
 }

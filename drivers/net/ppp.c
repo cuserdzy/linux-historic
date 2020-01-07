@@ -32,6 +32,11 @@
 #define NEW_TTY_DRIVERS				/* */
 #define OPTIMIZE_FLAG_TIME  ((HZ * 3)/2)	/* */
 
+#ifdef MODULE
+#include <linux/module.h>
+#include <linux/version.h>
+#endif
+
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/types.h>
@@ -63,8 +68,8 @@
 
 #include <linux/ppp.h>
 
-#include <ip.h>
-#include <tcp.h>
+#include <linux/ip.h>
+#include <linux/tcp.h>
 
 #include "slhc.h"
 
@@ -563,6 +568,10 @@ ppp_open(struct tty_struct *tty)
 
   PRINTKN (2,(KERN_INFO "ppp: channel %s open\n", ppp->dev->name));
 
+#ifdef MODULE
+  MOD_INC_USE_COUNT;
+#endif
+
   return (ppp->line);
 }
 
@@ -603,6 +612,9 @@ ppp_dev_close(struct device *dev)
   PRINTKN (2,(KERN_INFO "ppp: channel %s going down for IP packets!\n",
 	      dev->name));
   CHECK_PPP(-ENXIO);
+#ifdef MODULE
+  MOD_DEC_USE_COUNT;
+#endif
   return 0;
 }
 
@@ -1409,8 +1421,8 @@ ppp_ioctl(struct tty_struct *tty, struct file *file, unsigned int i,
   case PPPIOCSMRU:
     error = verify_area (VERIFY_READ, (void *) l, sizeof (temp_i));
     if (error == 0) {
-      PRINTKN (3,(KERN_INFO "ppp_ioctl: set mru to %x\n", temp_i));
       temp_i = (int) get_fs_long (l);
+      PRINTKN (3,(KERN_INFO "ppp_ioctl: set mru to %d\n", temp_i));
       if (ppp->mru != temp_i)
 	ppp_changedmtu (ppp, ppp->dev->mtu, temp_i);
     }
@@ -1451,7 +1463,6 @@ ppp_ioctl(struct tty_struct *tty, struct file *file, unsigned int i,
   case PPPIOCSASYNCMAP:
     error = verify_area (VERIFY_READ, (void *) l, sizeof (temp_i));
     if (error == 0) {
-      memset (ppp->xmit_async_map, 0, sizeof (ppp->xmit_async_map));
       ppp->xmit_async_map[0] = get_fs_long (l);
       bset (ppp->xmit_async_map, PPP_FLAG);
       bset (ppp->xmit_async_map, PPP_ESC);
@@ -1473,7 +1484,7 @@ ppp_ioctl(struct tty_struct *tty, struct file *file, unsigned int i,
     error = verify_area (VERIFY_WRITE, (void *) l, sizeof (temp_i));
     if (error == 0) {
       put_fs_long (ppp->dev->base_addr, l);
-      PRINTKN (3,(KERN_INFO "ppp_ioctl: get unit: %d", ppp->dev->base_addr));
+      PRINTKN (3,(KERN_INFO "ppp_ioctl: get unit: %ld", ppp->dev->base_addr));
     }
     break;
 
@@ -2034,3 +2045,54 @@ static void ppp_print_buffer(const char *name, char *buf, int count, int seg)
 
   set_fs (old_fs);
 }
+
+#ifdef MODULE
+char kernel_version[] = UTS_RELEASE;
+
+static struct device dev_ppp[PPP_NRUNIT] = {
+	{
+		"ppp0",		/* ppp */
+		0, 0, 0, 0,	/* memory */
+		0, 0,		/* base, irq */
+		0, 0, 0, NULL, ppp_init,
+	},
+	{ "ppp1" , 0, 0, 0, 0,  1, 0, 0, 0, 0, NULL, ppp_init },
+	{ "ppp2" , 0, 0, 0, 0,  2, 0, 0, 0, 0, NULL, ppp_init },
+	{ "ppp3" , 0, 0, 0, 0,  3, 0, 0, 0, 0, NULL, ppp_init },
+};
+
+int
+init_module(void)
+{
+	int err;
+	int i;
+
+	for (i = 0; i < PPP_NRUNIT; i++)  {
+		if ((err = register_netdev(&dev_ppp[i])))  {
+			if (err == -EEXIST)  {
+				printk("PPP: devices already present. Module not loaded.\n");
+			}
+			return err;
+		}
+	}
+	return 0;
+}
+
+void
+cleanup_module(void)
+{
+	int i;
+
+	if (MOD_IN_USE)  {
+		printk("PPP: device busy, remove delayed\n");
+		return;
+	}
+	for (i = 0; i < PPP_NRUNIT; i++)  {
+		unregister_netdev(&dev_ppp[i]);
+	}
+	if ((i = tty_register_ldisc(N_PPP, NULL)))  {
+		printk("PPP: can't unregister line discipline (err = %d)\n", i);
+	}
+}
+
+#endif

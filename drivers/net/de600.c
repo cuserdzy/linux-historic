@@ -90,12 +90,18 @@ static char *version =
 #endif
 unsigned int de600_debug = DE600_DEBUG;
 
+#ifdef MODULE
+#include <linux/module.h>
+#include <linux/version.h>
+#endif
+
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/string.h>
 #include <linux/interrupt.h>
+#include <linux/ioport.h>
 #include <asm/io.h>
 #include <linux/in.h>
 #include <linux/ptrace.h>
@@ -106,11 +112,6 @@ unsigned int de600_debug = DE600_DEBUG;
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
-
-#ifdef MODULE
-#include <linux/module.h>
-#include <linux/version.h>
-#endif
 
 #ifdef FAKE_SMALL_MAX
 static unsigned long de600_rspace(struct sock *sk);
@@ -261,7 +262,6 @@ static int	adapter_init(struct device *dev);
 /*
  * D-Link driver variables:
  */
-extern struct device		*irq2dev_map[16];
 static volatile int		rx_page		= 0;
 
 #define TX_PAGES 2
@@ -686,6 +686,14 @@ de600_probe(struct device *dev)
 		return ENODEV;
 	}
 
+#if 0 /* Not yet */
+	if (check_region(DE600_IO, 3)) {
+		printk(", port 0x%x busy\n", DE600_IO);
+		return EBUSY;
+	}
+#endif
+	request_region(DE600_IO, 3, "de600");
+
 	printk(", Ethernet Address: %02X", dev->dev_addr[0]);
 	for (i = 1; i < ETH_ALEN; i++)
 		printk(":%02X",dev->dev_addr[i]);
@@ -834,9 +842,7 @@ init_module(void)
 void
 cleanup_module(void)
 {
-	if (MOD_IN_USE)
-		printk("de600: device busy, remove delayed\n");
-	else
-		unregister_netdev(&de600_dev);
+	unregister_netdev(&de600_dev);
+	release_region(DE600_IO, 3);
 }
 #endif /* MODULE */

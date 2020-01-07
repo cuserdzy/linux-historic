@@ -36,7 +36,7 @@ struct pt_regs {
 	unsigned long r26;
 	unsigned long r27;
 	unsigned long r28;
-	unsigned long padding;
+	unsigned long hae;
 /* These are saved by PAL-code: */
 	unsigned long ps;
 	unsigned long pc;
@@ -46,6 +46,9 @@ struct pt_regs {
 	unsigned long r18;
 };
 
+#ifdef __KERNEL__
 #define user_mode(regs) ((regs)->ps & 8)
+extern void show_regs(struct pt_regs *);
+#endif
 
 #endif

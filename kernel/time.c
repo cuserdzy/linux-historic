@@ -23,13 +23,12 @@
 #include <linux/kernel.h>
 #include <linux/param.h>
 #include <linux/string.h>
+#include <linux/mm.h>
 
 #include <asm/segment.h>
 #include <asm/io.h>
 
 #include <linux/mc146818rtc.h>
-#define RTC_ALWAYS_BCD 1
-
 #include <linux/timex.h>
 
 /* converts date to days since 1/1/1970
@@ -203,16 +202,14 @@ void do_gettimeofday(struct timeval *tv)
 
 	save_flags(flags);
 	cli();
-#ifdef __i386__
 	*tv = xtime;
+#if defined (__i386__) || defined (__mips__)
 	tv->tv_usec += do_gettimeoffset();
 	if (tv->tv_usec >= 1000000) {
 		tv->tv_usec -= 1000000;
 		tv->tv_sec++;
 	}
-#else /* not __i386__ */
-	*tv = xtime;
-#endif /* not __i386__ */
+#endif /* !defined (__i386__) && !defined (__mips__) */
 	restore_flags(flags);
 }
 

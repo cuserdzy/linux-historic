@@ -67,7 +67,7 @@
 #include <linux/inet.h>
 #endif
 
-#include <linux/ppp.h>
+#include <linux/if_ppp.h>
 
 #include <linux/ip.h>
 #include <linux/tcp.h>
@@ -276,7 +276,6 @@ ppp_init(struct device *dev)
   dev->stop            = ppp_dev_close;
   dev->get_stats       = ppp_get_stats;
   dev->hard_header     = ppp_header;
-  dev->type_trans      = ppp_type_trans;
   dev->rebuild_header  = ppp_rebuild_header;
   dev->hard_header_len = 0;
   dev->addr_len        = 0;
@@ -505,9 +504,6 @@ ppp_close(struct tty_struct *tty)
     ppp_release (ppp);
 
     PRINTKN (2,(KERN_INFO "ppp: channel %s closing.\n", ppp->dev->name));
-#ifdef MODULE
-    MOD_DEC_USE_COUNT;
-#endif
   }
 }
 
@@ -616,6 +612,9 @@ ppp_dev_close(struct device *dev)
   PRINTKN (2,(KERN_INFO "ppp: channel %s going down for IP packets!\n",
 	      dev->name));
   CHECK_PPP(-ENXIO);
+#ifdef MODULE
+  MOD_DEC_USE_COUNT;
+#endif
   return 0;
 }
 
@@ -1084,6 +1083,7 @@ ppp_do_ip (struct ppp *ppp, unsigned short proto, unsigned char *c,
 	  int count)
 {
   int flags, done;
+  struct sk_buff *skb;
 
   PRINTKN (4,(KERN_DEBUG "ppp_do_ip: proto %x len %d first byte %x\n",
 	      (int) proto, count, c[0]));
@@ -1151,7 +1151,16 @@ ppp_do_ip (struct ppp *ppp, unsigned short proto, unsigned char *c,
   }
 
   /* receive the frame through the network software */
-  (void) dev_rint (c, count, 0, ppp->dev);
+  
+  skb=alloc_skb(count, GFP_ATOMIC);
+  if(skb)
+  {
+  	memcpy(skb->data, c,count);
+  	skb->protocol=htons(ETH_P_IP);
+  	skb->dev=ppp->dev;
+  	skb->len=count;
+  	netif_rx(skb);
+  }
   return 1;
 }
 
@@ -1262,12 +1271,6 @@ ppp_read(struct tty_struct *tty, struct file *file, unsigned char *buf, unsigned
         } else goto wait;
       }
 
-      i = verify_area (VERIFY_WRITE,buf,nr);
-      if (i != 0) {
-	ppp->us_rbuff_lock = 0;
-	return i;
-      }
-
       /* reset the time of the last read operation */
       ppp->ddinfo.nip_rjiffies = jiffies;
 
@@ -1309,12 +1312,6 @@ ppp_read(struct tty_struct *tty, struct file *file, unsigned char *buf, unsigned
     current->timeout = 0;
     PRINTKN (3,(KERN_DEBUG "ppp_read: sleeping\n"));
     interruptible_sleep_on (&ppp->read_wait);
-
-    /* Ensure that the ppp device is still attached. */
-    ppp = ppp_find(tty);
-    if (!ppp || ppp->magic != PPP_MAGIC || !ppp->inuse)
-      return 0;
-      
     if (current->signal & ~current->blocked)
       return -EINTR;
   } while (1);
@@ -1366,10 +1363,6 @@ ppp_write(struct tty_struct *tty, struct file *file, unsigned char *buf, unsigne
     nr = ppp->mtu;
   }
 
-  i = verify_area (VERIFY_READ,buf,nr);
-  if (i != 0)
-    return i;
-
   if (ppp_debug >= 3)
     ppp_print_buffer ("write frame", buf, nr, USER_DS);
 
@@ -1379,12 +1372,6 @@ ppp_write(struct tty_struct *tty, struct file *file, unsigned char *buf, unsigne
     current->timeout = 0;
     PRINTKN (3,(KERN_DEBUG "ppp_write: sleeping\n"));
     interruptible_sleep_on(&ppp->write_wait);
-
-    /* Ensure that the ppp device is still attached. */
-    ppp = ppp_find(tty);
-    if (!ppp || ppp->magic != PPP_MAGIC || !ppp->inuse)
-      return 0;
-
     if (current->signal & ~current->blocked)
       return -EINTR;
   }
@@ -1758,12 +1745,14 @@ ppp_xmit(struct sk_buff *skb, struct device *dev)
     goto done;
   }
 
+#ifdef CURED_AGES_AGO
   /* get length from IP header as per Alan Cox bugfix for slip.c */
   if (len < sizeof(struct iphdr)) {
     PRINTKN(0,(KERN_ERR "ppp_xmit: given runt packet, ignoring\n"));
     goto done;
   }
   len = ntohs( ((struct iphdr *)(skb->data)) -> tot_len );
+#endif  
 
   /* If doing demand dial then divert the first frame to pppd. */
   if (ppp->flags & SC_IP_DOWN) {
@@ -1855,12 +1844,6 @@ ppp_xmit(struct sk_buff *skb, struct device *dev)
   return 0;
 }
   
-static unsigned short
-ppp_type_trans (struct sk_buff *skb, struct device *dev)
-{
-  return(htons(ETH_P_IP));
-}
-
 #ifdef NET02D
 static int
 ppp_header(unsigned char *buff, struct device *dev, unsigned short type,

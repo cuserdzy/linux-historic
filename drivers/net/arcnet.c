@@ -2,7 +2,7 @@
 	Written 1994-95 by Avery Pennarun, derived from skeleton.c by
         Donald Becker.
 
-	Contact Avery at: apenwarr@foxnet.net or
+	Contact Avery at: apenwarr@tourism.807-city.on.ca or
 	RR #5 Pole Line Road, Thunder Bay, ON, Canada P7C 5M9
 	
 	**********************
@@ -15,13 +15,6 @@
          
 	**********************
 
-	v1.02 (95/06/21)
-	  - A fix to make "exception" packets sent from Linux receivable
-	    on other systems.  (The protocol_id byte was sometimes being set
-	    incorrectly, and Linux wasn't checking it on receive so it
-	    didn't show up)
-	  - Updated my email address.  Please use apenwarr@foxnet.net
-	    from now on.
 	v1.01 (95/03/24)
 	  - Fixed some IPX-related bugs. (Thanks to Tomasz Motylewski
             <motyl@tichy.ch.uj.edu.pl> for the patches to make arcnet work
@@ -86,7 +79,7 @@
  * 8 times every second.
  *
  * This should no longer be necessary.  if you experience "stuck" ARCnet
- * drivers, please email apenwarr@foxnet.net or I will remove
+ * drivers, please email apenwarr@tourism.807-city.on.ca or I will remove
  * this feature in a future release.
  */
 #undef USE_TIMER_HANDLER
@@ -94,7 +87,7 @@
 /**************************************************************************/
  
 static char *version =
- "arcnet.c:v1.02 95/06/21 Avery Pennarun <apenwarr@foxnet.net>\n";
+ "arcnet.c:v1.01 95/03/24 Avery Pennarun <apenwarr@tourism.807-city.on.ca>\n";
 
 /*
   Sources:
@@ -139,7 +132,7 @@ static char *version =
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
-#include "arp.h"
+#include <net/arp.h>
 
 
 /* debug levels:
@@ -587,7 +580,6 @@ arcnet_probe(struct device *dev)
 
 	dev->hard_header        = arc_header;
 	dev->rebuild_header     = arc_rebuild_header;
-	dev->type_trans         = arc_type_trans;
 
 	return 0;
 }
@@ -1257,7 +1249,7 @@ arcnet_prepare_tx(struct device *dev,struct ClientData *hdr,short length,
 		 * make the packet long enough to fit in a 512-byte
 		 * frame.
 		 */
-		arcpacket->raw[offset+0]=hdr->protocol_id;
+		arcpacket->raw[offset+0]=arcsoft->protocol_id;
 		arcpacket->raw[offset+1]=0xFF; /* FF flag */
 			arcpacket->raw[offset+2]=0xFF; /* FF padding */
 			arcpacket->raw[offset+3]=0xFF; /* FF padding */
@@ -1670,15 +1662,7 @@ arcnet_rx(struct device *dev,int recbuf)
          				arp->ar_hln,arp->ar_pln);
          		}
          	}
-		BUGLVL( D_DATA ) {
-	            short i;
-	               	for( i=0; i< skb->len; i++)
-               		{
-                       		if( i%16 == 0 ) printk("\n[%04hX] ",i);
-                       		printk("%02hX ",((unsigned char*)skb->data)[i]);
-               		}
-               		printk("\n");
-            	}
+		skb->protocol=arc_type_trans(skb,dev);
          	netif_rx(skb);
          	lp->stats.rx_packets++;
          }
@@ -1842,24 +1826,15 @@ arcnet_rx(struct device *dev,int recbuf)
          				skb,in->skb);
          		in->skb=NULL;
          		in->lastpacket=in->numpackets=0;
-			BUGLVL( D_DATA ) {
-	        	    short i;
-	        	       	for( i=0; i< skb->len; i++)
-               			{
-                	       		if( i%16 == 0 ) printk("\n[%04hX] ",i);
-                	       		printk("%02hX ",((unsigned char*)skb->data)[i]);
-               			}
-               			printk("\n");
-            		}
+			skb->protocol=arc_type_trans(skb,dev);         		
 	         	netif_rx(skb);
         	 	lp->stats.rx_packets++;
         	}
          }
 	
-	/* If any worth-while packets have been received, dev_rint()
+	/* If any worth-while packets have been received, netif_rx()
 	   has done a mark_bh(NET_BH) for us and will work on them
 	   when we get to the bottom-half routine. */
-	/* arcnet: pardon? */
 }
 
 
@@ -2106,22 +2081,10 @@ int arc_rebuild_header(void *buff,struct device *dev,unsigned long dst,
 unsigned short arc_type_trans(struct sk_buff *skb,struct device *dev)
 {
 	struct ClientData *head = (struct ClientData *) skb->data;
-	/*unsigned char *rawp;*/
 	
 	if (head->daddr==0)
 		skb->pkt_type=PACKET_BROADCAST;
-		
-#if 0 /* code for ethernet with multicast */
-	if(*eth->h_dest&1)
-	{
-		if(memcmp(eth->h_dest,dev->broadcast, ETH_ALEN)==0)
-			skb->pkt_type=PACKET_BROADCAST;
-		else
-			skb->pkt_type=PACKET_MULTICAST;
-	}
-#endif
-	
-	if(dev->flags&IFF_PROMISC)
+	else if(dev->flags&IFF_PROMISC)
 	{
 		/* if we're not sending to ourselves :) */
 		if (head->daddr != dev->dev_addr[0])
@@ -2135,7 +2098,7 @@ unsigned short arc_type_trans(struct sk_buff *skb,struct device *dev)
 	case ARC_P_ARP:		return htons(ETH_P_ARP);
 	case ARC_P_RARP:	return htons(ETH_P_RARP);
 	case ARC_P_IPX:		return htons(ETH_P_IPX);
-	case ARC_P_ATALK:   return htons(ETH_P_ATALK); /* appletalk, not tested */
+	case ARC_P_ATALK:   	return htons(ETH_P_ATALK);	/* Doesn't work yet */
 	case ARC_P_LANSOFT: /* don't understand.  fall through. */
 	default:
 		BUGLVL(D_DURING)
@@ -2143,21 +2106,6 @@ unsigned short arc_type_trans(struct sk_buff *skb,struct device *dev)
 				head->protocol_id,head->protocol_id);
 		return 0;
 	}
-
-#if 0 /* more ethernet-specific junk */
-	if (ntohs(eth->h_proto) >= 1536)
-		return eth->h_proto;
-		
-	rawp = (unsigned char *)(eth + 1);
-	
-	if (*(unsigned short *)rawp == 0xFFFF)
-		return htons(ETH_P_802_3);
-	if (*(unsigned short *)rawp == 0xAAAA)
-		return htons(ETH_P_SNAP);
-		
-	return htons(ETH_P_802_2);
-#endif
-
 	return htons(ETH_P_IP);
 }
 

@@ -271,8 +271,8 @@ static Scsi_Host_Template *the_template = NULL;
 struct pci_chip {
     unsigned short pci_device_id;
     int chip;
-    int min_revision;
     int max_revision;
+    int min_revision;
 };
 
 static struct pci_chip pci_chip_ids[] = { 
@@ -351,7 +351,7 @@ static void internal_setup(int board, int chip, char *str, int *ints) {
 	} else {
 	    overrides[commandline_current].data.pci.bus = ints[1];
 	    overrides[commandline_current].data.pci.device = ints[2];
-	    overrides[commandline_current].data.pci.function = ints[3];
+	    overrides[commandline_current].data.pci.device = ints[3];
     	    overrides[commandline_current].options = (ints[0] >= 4) ?
     	    	ints[4] : 0;
 	}
@@ -831,7 +831,7 @@ static int normal_init (Scsi_Host_Template *tpnt, int board, int chip,
 
 
 /* 
- * Function : static int pci_init(Scsi_Host_Template *tpnt, int board, 
+ * Function : static int ncr_init(Scsi_Host_Template *tpnt, int board, 
  *	int chip, int bus, int device_fn, int options)
  *
  * Purpose : initializes a NCR53c800 family based on the PCI
@@ -851,7 +851,7 @@ static int normal_init (Scsi_Host_Template *tpnt, int board, int chip,
  *
  */
 
-static int pci_init (Scsi_Host_Template *tpnt, int board, int chip, 
+static int ncr_init (Scsi_Host_Template *tpnt, int board, int chip, 
     unsigned char bus, unsigned char device_fn, int options) {
     unsigned short vendor_id, device_id, command;
     unsigned long base, io_port; 
@@ -988,7 +988,7 @@ int NCR53c7xx_detect(Scsi_Host_Template *tpnt) {
     for (current_override = count = 0; current_override < OVERRIDE_LIMIT; 
 	 ++current_override) {
 	 if (overrides[current_override].pci ? 
-	    !pci_init (tpnt, overrides[current_override].board,
+	    !ncr_init (tpnt, overrides[current_override].board,
 		overrides[current_override].chip,
 		(unsigned char) overrides[current_override].data.pci.bus,
 		(((overrides[current_override].data.pci.device
@@ -1013,7 +1013,7 @@ int NCR53c7xx_detect(Scsi_Host_Template *tpnt) {
 		!pcibios_find_device (PCI_VENDOR_ID_NCR, 
 		    pci_chip_ids[i].pci_device_id, pci_index, &pci_bus, 
 		    &pci_device_fn) && 
-	        !pci_init (tpnt, BOARD_GENERIC, pci_chip_ids[i].chip, 
+	        !ncr_init (tpnt, BOARD_GENERIC, pci_chip_ids[i].chip, 
 		    pci_bus, pci_device_fn, /* no options */ 0); 
 		++count, ++pci_index);
     }
